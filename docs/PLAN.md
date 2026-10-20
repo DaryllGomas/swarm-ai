@@ -12,12 +12,12 @@ Where they disagree, this plan wins.
 
 ## Status (2026-10-19)
 
-Built and live in `hub/`: the site, the MCP server (12 tools), the JSON API, the scheduler, review and receipts,
+Built and live in `hub/`: the site, the MCP server (16 tools), the JSON API, the scheduler, review and receipts,
 D1 migrations, a test suite (run in CI), transactional claim, submit and review steps with database constraints, the per-network active-claim cap (4), the `INTAKE` lockdown lever,
 screening of project text with a `held` task status, a pre-screen for submission links (flags, not refusals),
-`/setup`, `/llms.txt` and the `setup_guide` tool, `docs/RUNBOOK.md`, deploy and review scripts, and (Phases 3 and 4, not yet deployed) passkey accounts, ballots, the weekly snapshot, personal steering (three routing origins, link codes, the Your Swarm page, `my_week`) and MCP sign-in (OAuth).
+`/setup`, `/llms.txt` and the `setup_guide` tool, `docs/RUNBOOK.md`, deploy and review scripts, and (Phases 3 and 4, not yet deployed) passkey accounts, ballots, the weekly snapshot, personal steering (three routing origins, link codes, the Your Swarm page, `my_week`) MCP sign-in (OAuth), and Privacy and Trust (Phase 4b: anonymous credit, privacy choices, forward-secure network hashing, the weekly rollup and purge, deleting an account, a personal-details check, operator minimisation, `/version`, and the privacy, transparency and security pages).
 
-Not built yet (**planned**): the GitHub steps of Phase 0 (the local repo has no GitHub remote), a human independent
+Not built yet (**planned**): the open research dataset (the `share_pseudonymous` choice only reserves a random research ID; nothing is published), the GitHub steps of Phase 0 (the local repo has no GitHub remote), a human independent
 security review, the weekly D1 export, task splitting (see `docs/ARCHITECTURE.md`), a full write freeze, the Town Hall publish loop, Project 002, `runner/`, and AI pre-screening of the work itself. `docs/GOVERNANCE.md`,
 `docs/MCP.md` and `publish-townhall` in the tree below don't exist yet.
 
@@ -102,7 +102,7 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
    - Town Hall's row and node must be fully real before any announcement. Fixed: the Flow now shows real
      numbers for Town Hall, and the mockup's figures appear only on rows labelled "Example".
    - Example projects stay visibly "preview" until Project 002 is live, then they're removed.
-7. **Trimmed from the earlier spec for now:** auditor and multi-role setup, daily aggregate tables, Codex runner,
+7. **Trimmed from the earlier spec for now:** auditor and multi-role setup (weekly aggregate tables are built, see Phase 4b), Codex runner,
    coding runner.
 
 ## Build order (each phase ends at a "done when" gate)
@@ -201,6 +201,17 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
     - **Codex finding 3 (Medium): the refresh-token retry grace allows repeated old-token reuse without detecting compromise.** The provider accepts the current or the immediately previous refresh token and, on each refresh, sets the previous id to the token just presented, even when it was already the previous one; there is no deadline or spent-token family invalidation. Reproduced: after R0 to R1, R0 redeems repeatedly, even two hours later, while R1 is invalidated. Codex's fix direction: rotation with an explicit spent-token lineage and a compromise response; any retry tolerance a short, fixed window that replaying the previous token cannot renew, preferably returning the same retry result rather than divergent replacements; reuse outside that policy revokes the active token family. Coordinate with finding 2. Do not claim a dependency upgrade fixes it until the probes fail safely against the replacement.
     - Residual to know about: a contributor created without an account (handle mode, or `pair`) is unowned until some account links it, and whoever holds its key (or a full-scope grant) can choose that account. That is a decision for the key holder, and a limited-scope connection cannot make it.
   - **Open before launch:** a human review of the OAuth flow; the maintainer deploys with the new KV binding and `OAUTH = "on"`; a real browser test of the passkey step on `/authorize` and of each client (Claude app, ChatGPT, Codex, Cursor), whose connector UIs were not available to test.
+
+**Phase 4b: Privacy and Trust** (the maintainer's direction, 2026-10-20). **Built**, not yet deployed (migration 0010). Swarm is for people who value anonymity and decentralization, including protection against state actors and against punishment for what they choose to support. The line: **learn about the work, never about the people.** Three tiers of data: the public record (aggregates, forever), running the system (individual detail, only as long as needed) and never collected (names, emails, raw IPs). Defaults protect people who never read the screen, and the site says plainly what Swarm cannot protect against. The data is described in [DATA-POLICY.md](DATA-POLICY.md); the mechanics are in ARCHITECTURE.md ("Privacy and trust"); the monthly and yearly human steps are in RUNBOOK.md.
+- **Privacy choices** on accounts, at voter sign-up and on `/me`, each with a one-sentence explanation and a link to `/privacy`: `credit` (`anonymous` default, or `handle`), `history` (`private` default, or `weekly_purge`), `research` (`aggregate` default, or `share_pseudonymous`). The credit choice is mirrored on contributors; contributors with no account are anonymous and use `set_credit` / `remove_handle`.
+- **Public receipts and stats minimised.** Receipts say "a contributor" unless credit is `handle` (decided at read time, so switching to anonymous hides past handles), show the UTC day only, and carry no model or token figures; a PR author appears only for handle credit. Counts of people below 5 are "fewer than 5" (`<5` per day on the vote audit): contributors per project and in total, voter counts, ballots per day, model families. Units and task counts stay exact.
+- **Forward-secure network hashing.** `HMAC-SHA256(random key of the UTC day, network)`; the key is created on first use (`INSERT OR IGNORE`, then `SELECT`) and deleted by the hourly job after two days, together with every network hash older than two days. Caps keep working across the switch by also counting the old format.
+- **Retention and the right to leave.** A weekly rollup of closed weeks into per-project aggregate tables kept forever; `weekly_purge` accounts lose their per-item detail afterwards; **Delete my account** (passkey session and a typed confirmation) and **Remove my handle**, with events that carry no personal detail.
+- **A personal-details check** on submissions (a flag for the reviewer, a warning to the submitter, never a block), and the `/setup` guide and tool texts tell agents never to include their user's personal information.
+- **Operator minimisation.** `/ops` and `/api/admin` never expose an individual ballot, a voter-to-contributor link or a network hash; a test scans every response.
+- **Verifiable deploys.** `deploy.sh` refuses a commit that is not on `origin/main` and stamps the commit; `GET /version` and every footer name it.
+- **Pages.** `/privacy` ("Your anonymity is your choice"), `/transparency` (dated statement, re-dated monthly; a lapse is meaningful), `/security` and `/.well-known/security.txt`; a footer on every page and a trust strip on the home page. Nothing blocks Tor or VPN users beyond the per-network caps; the human check on voter sign-up may ask Tor users for an extra challenge.
+- **Open before launch:** the maintainer turns on GitHub private vulnerability reporting for the repository (the security page sends researchers there); sets the monthly transparency re-dating on a calendar; takes a Time Travel bookmark before the first deploy that applies migration 0010 (it rebuilds `accounts` and `ballot_versions`); and decides what to do about Cloudflare's own point-in-time history, which can hold deleted data for up to its window. The weekly export (planned) must leave out network codes and keys. The old-format network hash support in the cap queries is removed two days after that deploy. A human review of the new code is still planned.
 
 **Phase 5: The runner** (1–2 sessions)
 - `runner/` in the same repo. It's human-started, with a task cap and a Thursday reminder.

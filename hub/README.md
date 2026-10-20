@@ -12,6 +12,7 @@ For the plan and the architecture, see [`../docs/PLAN.md`](../docs/PLAN.md) and
 - `src/worker.js`: routing, public API, `/setup`, `/llms.txt` and cron. `src/admin.js`: bearer admin API and shared transactional review.
 - `src/access.js`: Access JWT verification. `src/ops.js`: private operator APIs. `src/prescreen.js`: advisory Workers AI annotations.
 - `src/mcp.js`: the MCP tools. `src/core.js`: stats, claims, allocation, task intake. `src/lib.js`: helpers.
+- `src/privacy.js`, `src/rollup.js`, `src/pii.js`, `src/trust.js`: privacy and trust (the three choices and credit, the k-anonymity rule, network-hash erasure, delete account and remove handle; the weekly rollup and purge; the personal-details check; `/version`, `security.txt` and the transparency date). See [`../docs/DATA-POLICY.md`](../docs/DATA-POLICY.md).
 - `src/webauthn.js`, `src/accounts.js`, `src/voting.js`: passkey accounts (hand-written WebAuthn on WebCrypto), sessions, ballots, the weekly snapshot and `/api/vote/*`.
 - `src/steering.js`, `src/me.js`, `src/identity.js`: Phase 4. Linking a contributor to a voter account (link codes), the ballot that steers `next_task`, the weekly summary, `/api/me`, and contributor creation.
 - `src/oauth.js`, `src/oauth-scopes.js`: MCP sign-in (OAuth 2.1 + PKCE) on `@cloudflare/workers-oauth-provider`, the `/authorize` page, and the `read`/`work`/`submit` scopes.

@@ -173,13 +173,30 @@ to work.
 - **Local OAuth.** With `RP_ORIGIN=http://localhost:8787` the issuer and audience are `http://localhost:8787` (the library allows `http` on loopback only). The Workers KV binding is simulated locally.
 - **Smoke test without Workers AI.** Copy `wrangler.toml` to a scratch folder with the `[ai]` block removed and absolute paths, apply migrations with `--persist-to <scratch>`, run `wrangler dev --persist-to <scratch>`, check `/me`, `/authorize`, the two `/.well-known/oauth-*` documents and MCP `tools/list`, then stop the server by its PID.
 
+## Privacy and trust: what the hourly job does, and what you do
+
+The privacy page promises things this runbook has to keep true. The code in `hub/src/privacy.js`, `rollup.js` and `trust.js` does the work; these are the checks and the human steps.
+
+- **Hourly job order.** (1) `forgetNetworks`: delete `network_keys` older than two days and NULL every `claims.network`, `contributors.pair_ip`, `accounts.network` older than two days. (2) the weekly snapshot. (3) the weekly rollup, then the purge. (4) expire sessions, challenges, codes and old link attempts, (5) expire claims, (6) sync. Each of (1) and (3) logs and carries on if it fails, so a failure never blocks the rest. Look in the Worker logs for `forgetNetworks failed` or `weekly maintenance failed`.
+- **Key deletion check.** `scripts/deploy.sh d1 execute swarm-ai --remote --command "SELECT day FROM network_keys ORDER BY day"` should list at most three days (today, yesterday, and the day before). Anything older means the job is not running: investigate before anything else, because the privacy page says those codes are irreversible after two days. `SELECT COUNT(*) FROM claims WHERE network IS NOT NULL AND claimed_at < <now minus 2 days in ms>` should be 0.
+- **Weekly rollup.** The first hourly run after Monday 00:00 UTC rolls up each closed week that is not in `rollup_weeks`, oldest first. Check: `SELECT * FROM rollup_weeks ORDER BY week DESC LIMIT 3`. It runs once per week and never rewrites a week; if a week's numbers are wrong, fix the cause, then `DELETE FROM weekly_project_stats / weekly_model_stats / rollup_weeks WHERE week = '<monday>'` in one batch and the next run recomputes it (only possible while the underlying rows still exist; after a `weekly_purge` they do not for that account's items). If a week fails, the job stops at it, retries every hour, and the purge does not touch that week or later.
+- **`weekly_purge`.** After each rollup the job deletes the per-item detail of those accounts from rolled-up weeks. It is idempotent. An accepted write-up that a `mission` project still has to publish keeps its body until it is published (the link to the contributor is cut regardless). Check what ran: `SELECT ts, detail FROM events WHERE type = 'history_purged' ORDER BY id DESC LIMIT 5` (counts only).
+- **Delete-account requests.** The person does it themselves on `/me` (passkey session and a typed confirmation). If someone who lost their passkey asks, there is no way to prove an account is theirs, and none is offered: say so. Never delete an account by hand from SQL unless a court order requires it; if you must, use `deleteAccount` in `hub/src/privacy.js` through a one-off script rather than `DELETE`, because the order of statements matters (events scrubbed first, ballots re-labelled `gone:`, then the account). Record that it happened in the transparency report if the law allows.
+- **Handle removal** is `remove_handle` (tool) or `/me`. Operators do not do it for people.
+- **Transparency report: re-date it every month.** On the first working day of each month: (1) ask whether anything in `hub/src/trust.js` is still true: no legal requests received, nothing handed over, no gag orders; (2) if it is, change `TRANSPARENCY_AS_OF` in `hub/src/trust.js` to today's date (that constant is the only place the date lives; the page, `/api/transparency` and the test all read it), commit, open a pull request and deploy; (3) if a request has arrived and the law lets you say so, update `LEGAL_REQUESTS_RECEIVED`, `DATA_HANDED_OVER` and add a dated entry to `hub/public/transparency.html`; if a gag order stops you saying so, **do not re-date**: let the date lapse. The page shows an "overdue" warning on its own after 45 days, and says on the page that a lapse is meaningful. Put the re-dating on the maintainer's calendar as a monthly recurring event, and a second reminder for day 40.
+- **Yearly: `security.txt`.** `SECURITY_TXT_EXPIRES` in `hub/src/trust.js` is a fixed date just under a year out. Renew it each year with the transparency re-dating nearest to it (the test `trust.test.js` checks its format).
+- **Before launch: turn on GitHub private vulnerability reporting** for `DaryllGomas/swarm-ai` (Settings, Code security, Private vulnerability reporting). `/security` and `security.txt` both send researchers there, so they must not point at a switch that is off.
+- **Remove the old-format network hash.** Two days after the deploy that includes migration 0010, no row carries the old `sha256(HASH_SALT|ip|day|network)` format any more. Delete `legacyIpHashFor` and the two `legacy*` values from `capHashes` in `hub/src/lib.js`, and the `?8 ?9`-style extras in the cap queries (`identity.js`, `accounts.js`, `oauth.js`, `mcp.js`), in a follow-up pull request.
+- **Compelled disclosure.** If a lawful order arrives: tell a lawyer first, give only what the order covers, and record it for the transparency report. What exists to give is what `/privacy` lists; there are no names, emails or IP addresses in it, and network codes older than two days are gone (apart from Cloudflare's own backup window).
+- **Before the first deploy that includes migration 0010.** It rebuilds `accounts` and `ballot_versions` (with their data) inside the deploy's `migrations apply`. Take a Time Travel bookmark first (`scripts/deploy.sh d1 time-travel info swarm-ai`), run the deploy, then check: `SELECT COUNT(*) FROM accounts` and `SELECT COUNT(*) FROM ballot_versions` are unchanged, every account has `credit = 'anonymous'`, and `/version` shows the new commit. Existing contributors become anonymous on public receipts (the default): the handles on past receipts disappear until each owner chooses handle credit. That is intended.
+
 ## Deploy
 
 ```sh
 hub/scripts/deploy.sh
 ```
 
-The script refuses to run if the working tree has uncommitted changes or if the branch is not `main`. Then it runs
+The script refuses to run if the working tree has uncommitted changes, if the branch is not `main`, or if the commit is not on `origin/main` (it fetches first, so a stale local copy cannot fool it). It passes the commit to the Worker (`--var GIT_COMMIT:<sha>`, with `BUILT_AT`), and `GET /version` and every page footer report it, so anyone can compare the running code with the repository. Then it runs
 the tests (`npm test`), applies the database migrations to the live database
 (`wrangler d1 migrations apply swarm-ai --remote`), and only then deploys the Worker. If any step fails, the later
 ones don't run: a failed test or migration means nothing is deployed. Deploys use a Cloudflare API token scoped to
@@ -266,7 +283,7 @@ Low: hygiene.
 | Secret | Rotate when | How | What it breaks |
 |---|---|---|---|
 | `ADMIN_TOKEN` | Leak, or every 90 days | Make a new long random value, run `hub/scripts/deploy.sh secret put ADMIN_TOKEN`, and update the copy in the operator's local config that `review.sh` reads | Nothing for contributors. Old admin calls stop working |
-| `HASH_SALT` | Leak | Make a new long random value and run `hub/scripts/deploy.sh secret put HASH_SALT` | **Every contributor key stops working**, because key hashes are salted. Contributors pair again and get new handles; their old work stays attributed to the old handles. Daily network hashes reset too |
+| `HASH_SALT` | Leak | Make a new long random value and run `hub/scripts/deploy.sh secret put HASH_SALT` | **Every contributor key stops working**, because key hashes are salted. Contributors pair again and get new handles; their old work stays attributed to the old handles. Sessions and link codes stop too. Network hashes are not affected: they use the random day keys in `network_keys`, not the salt |
 | Cloudflare API tokens | Leak, or before they expire | Roll in the Cloudflare dashboard, then update the operator's local config | Deploys fail until updated |
 
 After rotating `ADMIN_TOKEN`, run `hub/scripts/review.sh pending` to confirm the new token works.
@@ -281,7 +298,12 @@ After rotating `ADMIN_TOKEN`, run `hub/scripts/review.sh pending` to confirm the
   scripts/deploy.sh d1 time-travel restore swarm-ai --timestamp <a time before the problem>
   ```
 - **Weekly export (planned).** A weekly `wrangler d1 export` to the maintainer's backup storage, so a copy
-  exists outside Cloudflare. Not running yet.
+  exists outside Cloudflare. Not running yet. **When it is built it must not keep what the privacy page says is erased:** export without
+  the `network_keys` table and with the `network`, `pair_ip` columns blanked, or the forward secrecy is undone by the backup.
+- **Time Travel and forward secrecy.** Time Travel is Cloudflare's own history of the database. Anything Swarm deletes (a network key, a
+  deleted account) can be restored from it by whoever holds the Cloudflare account until the window passes (documented as up to 30 days,
+  less on a free plan). The privacy page says this. After any restore, the hourly job re-erases old network keys and hashes within the hour,
+  but **account deletions and handle removals made after the restore point are undone: redo them**, and tell the people who asked.
 - **Restore drill (planned).** Once a quarter, restore an export into a local database and check that
   `/api/stats` looks right.
 
