@@ -10,7 +10,7 @@ import OAuthProvider, { AuthorizationError } from '@cloudflare/workers-oauth-pro
 import { privateJson, rpOrigin, session, writeGuard } from './accounts.js';
 import { IdentityError, MAX_PAIRS_PER_NETWORK_PER_DAY, checkHandle, createContributor } from './identity.js';
 import { SCOPES, SCOPE_TEXT } from './oauth-scopes.js';
-import { SECURITY_HEADERS, ipHashFor, readJson } from './lib.js';
+import { SECURITY_HEADERS, capHashes, ipHashFor, readJson } from './lib.js';
 import { linkDirect, ownedContributor } from './steering.js';
 
 export { oauthEnabled } from './oauth-scopes.js';
@@ -168,8 +168,8 @@ async function decide(req, env, oauth) {
   if (!contributor) {
     // Refuse what is certain to fail before the consent handle is spent; createContributor below enforces the same rules atomically.
     if (chosen && await env.DB.prepare('SELECT 1 AS n FROM contributors WHERE handle = ?1').bind(chosen).first()) return privateJson({ error: 'That handle is taken. Pick another.' }, 409);
-    const [today, yesterday] = [ipHash, await ipHashFor(env, req, 1)];
-    const recent = await env.DB.prepare('SELECT COUNT(*) AS n FROM contributors WHERE pair_ip IN (?1, ?2) AND created >= ?3').bind(today, yesterday, Date.now() - 86400000).first();
+    const net = await capHashes(env, req);
+    const recent = await env.DB.prepare('SELECT COUNT(*) AS n FROM contributors WHERE pair_ip IN (?1, ?2, ?4, ?5) AND created >= ?3').bind(net.today, net.yesterday, Date.now() - 86400000, net.legacyToday, net.legacyYesterday).first();
     if (recent.n >= MAX_PAIRS_PER_NETWORK_PER_DAY) return privateJson({ error: 'Too many pairings from this network today. Try again tomorrow.' }, 409);
   }
 

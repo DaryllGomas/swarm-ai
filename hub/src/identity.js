@@ -1,7 +1,7 @@
 // Contributor identities: the one place a contributor row is created (the MCP `pair` tool and the OAuth authorize step
 // both use it), and the handle rules.
 import { eventStmt } from './core.js';
-import { ipHashFor, sha256 } from './lib.js';
+import { capHashes, sha256 } from './lib.js';
 
 export const MAX_PAIRS_PER_NETWORK_PER_DAY = 5;
 const RESERVED_EXACT = new Set(['swarm', 'daryll', 'null', 'undefined', 'anonymous', 'reviewer', 'bot', 'me', 'you', 'everyone', 'nobody', 'unknown', 'deleted', 'api', 'mcp']);
@@ -33,7 +33,8 @@ export async function createContributor(env, req, ipHash, handle, ownerAccount =
   const key = newKey();
   const hash = await keyHash(env, key);
   // The network hash rotates daily, so count yesterday's too: pairing just before and after UTC midnight shares one cap.
-  const yesterday = await ipHashFor(env, req, 1);
+  // (And the pre-0010 format of both, for rows written before the switch to day keys.)
+  const net = await capHashes(env, req);
   for (let attempt = 0; attempt < 5; attempt++) {
     const h = handle ?? `helper-${randomId(6)}`;
     try {
@@ -41,8 +42,8 @@ export async function createContributor(env, req, ipHash, handle, ownerAccount =
       const res = await env.DB.prepare(
         `INSERT INTO contributors (handle, key_hash, created, pair_ip, owner_account)
          SELECT ?1, ?2, ?3, ?4, ?7
-         WHERE (SELECT COUNT(*) FROM contributors WHERE pair_ip IN (?4, ?6) AND created >= ?5) < ${MAX_PAIRS_PER_NETWORK_PER_DAY}`
-      ).bind(h, hash, now, ipHash, now - 86400000, yesterday, ownerAccount).run();
+         WHERE (SELECT COUNT(*) FROM contributors WHERE pair_ip IN (?4, ?6, ?8, ?9) AND created >= ?5) < ${MAX_PAIRS_PER_NETWORK_PER_DAY}`
+      ).bind(h, hash, now, ipHash, now - 86400000, net.yesterday, ownerAccount, net.legacyToday, net.legacyYesterday).run();
       if (!res.meta.changes) throw new IdentityError('Too many pairings from this network today. Try again tomorrow.');
       await eventStmt(env, { type: 'contributor_paired', contributor: res.meta.last_row_id, actor: 'system' }).run();
       return { id: res.meta.last_row_id, handle: h, key };

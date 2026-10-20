@@ -8,7 +8,7 @@ import { SCOPES, SCOPE_FOR_TOOL, oauthChallenge, oauthEnabled } from './oauth-sc
 import { pickByDeficit, recapLines, redeemLinkCode, steeringFor, weekSummary, linkOfContributor } from './steering.js';
 import { PrError, checkPrSubmission } from './github.js';
 import { syncIfStale, UNTRUSTED } from './sync.js';
-import { byteLength, clean, iso, ipHashFor, json, readJsonResult, underRateLimit, weekOf } from './lib.js';
+import { byteLength, capHashes, clean, iso, ipHashFor, json, readJsonResult, underRateLimit, weekOf } from './lib.js';
 import { LinkError, screenSources } from './links.js';
 import { CLIENT_IDS, normalizeClient, setupGuide } from './setup.js';
 import { prescreenSubmission } from './prescreen.js';
@@ -436,7 +436,7 @@ async function claim(c, who, taskId, origin) {
   //  - the project's reviewer queue has room;
   //  - at most MAX_ACTIVE_CLAIMS per contributor, and at most MAX_ACTIVE_CLAIMS_PER_NETWORK across every handle on one
   //    network (today's and yesterday's network hash, so a claim made just before UTC midnight still counts).
-  const yesterday = await ipHashFor(env, c.req, 1);
+  const net = await capHashes(env, c.req); // today's and yesterday's network hash, and the same two in the pre-0010 format
   const op = newOp();
   // One transaction: the claim, the task's move to 'claimed' and the event commit together or not at all. The two later
   // statements run only if this request's INSERT won (its claim carries this request's op), so they cannot touch a task
@@ -452,8 +452,8 @@ async function claim(c, who, taskId, origin) {
            AND NOT EXISTS (SELECT 1 FROM claims k WHERE k.task = t.id AND k.outcome IS NULL)
            AND (SELECT COUNT(*) FROM submissions s JOIN tasks t2 ON t2.id = s.task WHERE t2.project = t.project AND s.status = 'pending') < p.max_pending
            AND (SELECT COUNT(*) FROM claims WHERE contributor = ?2 AND outcome IS NULL AND expires_at > ?5) < ${MAX_ACTIVE_CLAIMS}
-           AND (SELECT COUNT(*) FROM claims WHERE network IN (?7, ?8) AND outcome IS NULL AND expires_at > ?5) < ${MAX_ACTIVE_CLAIMS_PER_NETWORK}`
-      ).bind(taskId, who.id, routed, weekOf(now), now, now + CLAIM_TTL_MS, c.ipHash, yesterday, op, origin),
+           AND (SELECT COUNT(*) FROM claims WHERE network IN (?7, ?8, ?11, ?12) AND outcome IS NULL AND expires_at > ?5) < ${MAX_ACTIVE_CLAIMS_PER_NETWORK}`
+      ).bind(taskId, who.id, routed, weekOf(now), now, now + CLAIM_TTL_MS, c.ipHash, net.yesterday, op, origin, net.legacyToday, net.legacyYesterday),
       env.DB.prepare(
         `UPDATE tasks SET status = 'claimed'
          WHERE id = ?1 AND status = 'ready' AND held_reason IS NULL AND EXISTS (SELECT 1 FROM claims WHERE task = ?1 AND outcome IS NULL AND op = ?2)`
@@ -476,8 +476,8 @@ async function claim(c, who, taskId, origin) {
     if (why) throw why;
     const mine = await env.DB.prepare('SELECT COUNT(*) AS n FROM claims WHERE contributor = ?1 AND outcome IS NULL AND expires_at > ?2').bind(who.id, now).first();
     if (mine.n >= MAX_ACTIVE_CLAIMS) throw new CapError(`You already hold ${MAX_ACTIVE_CLAIMS} active claims. Submit or release one first (my_work lists them).`);
-    const net = await env.DB.prepare('SELECT COUNT(*) AS n FROM claims WHERE network IN (?1, ?2) AND outcome IS NULL AND expires_at > ?3').bind(c.ipHash, yesterday, now).first();
-    if (net.n >= MAX_ACTIVE_CLAIMS_PER_NETWORK) throw new CapError(`Too many tasks are claimed from your network right now (limit ${MAX_ACTIVE_CLAIMS_PER_NETWORK} at a time across all handles). Submit or release some, or try again when they expire.`);
+    const netCount = await env.DB.prepare('SELECT COUNT(*) AS n FROM claims WHERE network IN (?1, ?2, ?4, ?5) AND outcome IS NULL AND expires_at > ?3').bind(c.ipHash, net.yesterday, now, net.legacyToday, net.legacyYesterday).first();
+    if (netCount.n >= MAX_ACTIVE_CLAIMS_PER_NETWORK) throw new CapError(`Too many tasks are claimed from your network right now (limit ${MAX_ACTIVE_CLAIMS_PER_NETWORK} at a time across all handles). Submit or release some, or try again when they expire.`);
     throw new ToolError('Someone else just claimed that task. Try again.');
   }
   return { task, claim: { id: res[0].meta.last_row_id, routed: !!routed, routing_origin: origin, expires_at: iso(now + CLAIM_TTL_MS) } };

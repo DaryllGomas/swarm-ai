@@ -1,4 +1,4 @@
-import { ipHashFor, json, readJson, sha256, underRateLimit } from './lib.js';
+import { capHashes, ipHashFor, json, readJson, sha256, underRateLimit } from './lib.js';
 import { assertion, b64, clientData, random, registration, unb64 } from './webauthn.js';
 export const rpOrigin = (env) => env.RP_ORIGIN || 'https://swarm.bigpicsolutions.com';
 const rpId = (env) => env.RP_ID || 'swarm.bigpicsolutions.com';
@@ -81,12 +81,12 @@ export async function handleAccount(req, env, path) {
       const { jwk, count } = await registration(body.response.attestationObject, body.id, rpId(env));
       const transports = body.response.transports ?? [];
       if (!Array.isArray(transports) || transports.length > 8 || transports.some((t) => !['usb', 'nfc', 'ble', 'internal', 'hybrid', 'smart-card'].includes(t))) throw new Error('Invalid transports');
-      const [today, yesterday] = await Promise.all([ipHashFor(env, req), ipHashFor(env, req, 1)]);
+      const net = await capHashes(env, req);
       // Like pairing: a rolling 24h window counts both network-day hashes, atomically with insertion.
       const res = await env.DB.batch([
         env.DB.prepare(`INSERT INTO accounts(id, created, network) SELECT ?1, ?2, ?3
-          WHERE (SELECT COUNT(*) FROM accounts WHERE network IN (?3, ?4) AND created > ?5) < 3`)
-          .bind(c.account, now, today, yesterday, now - 86400000),
+          WHERE (SELECT COUNT(*) FROM accounts WHERE network IN (?3, ?4, ?6, ?7) AND created > ?5) < 3`)
+          .bind(c.account, now, net.today, net.yesterday, now - 86400000, net.legacyToday, net.legacyYesterday),
         env.DB.prepare(`INSERT INTO credentials(id, account, public_key, sign_count, transports)
           SELECT ?1, id, ?3, ?4, ?5 FROM accounts WHERE id = ?2`).bind(body.id, c.account, JSON.stringify(jwk), count, JSON.stringify(transports)),
         env.DB.prepare('INSERT INTO sessions(hash, account, expires) SELECT ?1, id, ?3 FROM accounts WHERE id = ?2').bind(hash, c.account, now + SESSION_TTL),

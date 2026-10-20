@@ -11,6 +11,7 @@ import { UNTRUSTED, syncIfStale, syncTasks } from './sync.js';
 import { SECURITY_HEADERS, clean, ipHashFor, isAdmin, iso, json, underRateLimit } from './lib.js';
 import { adminHeld, adminPending, adminReview, adminSubmission, adminPublished } from './admin.js';
 import { handleOps } from './ops.js';
+import { forgetNetworks } from './privacy.js';
 import { normalizeClient, setupGuide } from './setup.js';
 
 // Requests the OAuth provider owns: discovery metadata, registration, the token endpoint, /authorize (through its default
@@ -44,6 +45,8 @@ export default {
   // Hourly: free up expired claims and pull fresh tasks from Town Hall.
   async scheduled(_event, env, ctx) {
     ctx.waitUntil((async () => {
+      // First, and on its own: forgetting must not wait on, or be skipped by, anything else the job does.
+      try { await forgetNetworks(env); } catch (err) { console.error('forgetNetworks failed:', String(err?.message || err).slice(0, 300)); }
       await publishSnapshot(env);
       const now = Date.now();
       await env.DB.batch([
