@@ -264,7 +264,7 @@ const keyHash = (env, key) => sha256(`${env.HASH_SALT}|key|${key}`);
 const RESERVED_EXACT = new Set(['swarm', 'daryll', 'null', 'undefined', 'anonymous', 'reviewer', 'bot', 'me', 'you', 'everyone', 'nobody', 'unknown', 'deleted', 'api', 'mcp']);
 const RESERVED_PART = /(admin|moderator|official|staff|support|bigpic|system|root|swarmai|swarm-ai|townhall|town-hall|anthropic|openai|claude-team)/;
 
-async function pair({ env, args, ipHash }) {
+async function pair({ env, args, ipHash, req }) {
   let handle = args.handle;
   if (handle !== undefined) {
     if (typeof handle !== 'string' || !/^[a-z0-9_-]{3,24}$/.test(handle)) throw new ToolError('A handle is 3 to 24 characters: lowercase letters, digits, underscore or hyphen.');
@@ -272,6 +272,8 @@ async function pair({ env, args, ipHash }) {
   }
   const key = `swk_${b64url(crypto.getRandomValues(new Uint8Array(24)))}`;
   const hash = await keyHash(env, key);
+  // The network hash rotates daily, so count yesterday's too: pairing just before and after UTC midnight shares one cap.
+  const yesterday = await ipHashFor(env, req, 1);
   for (let attempt = 0; attempt < 5; attempt++) {
     const h = handle ?? `helper-${randomId(6)}`;
     try {
@@ -281,8 +283,8 @@ async function pair({ env, args, ipHash }) {
       const res = await env.DB.prepare(
         `INSERT INTO contributors (handle, key_hash, created, pair_ip)
          SELECT ?1, ?2, ?3, ?4
-         WHERE (SELECT COUNT(*) FROM contributors WHERE pair_ip = ?4 AND created >= ?5) < ${MAX_PAIRS_PER_NETWORK_PER_DAY}`
-      ).bind(h, hash, now, ipHash, now - 86400000).run();
+         WHERE (SELECT COUNT(*) FROM contributors WHERE pair_ip IN (?4, ?6) AND created >= ?5) < ${MAX_PAIRS_PER_NETWORK_PER_DAY}`
+      ).bind(h, hash, now, ipHash, now - 86400000, yesterday).run();
       if (!res.meta.changes) throw new ToolError('Too many pairings from this network today. Try again tomorrow.');
       await eventStmt(env, { type: 'contributor_paired', contributor: res.meta.last_row_id, actor: 'system' }).run();
       return {

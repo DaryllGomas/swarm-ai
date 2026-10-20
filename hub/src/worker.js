@@ -130,7 +130,7 @@ async function adminPending(env) {
 // Tasks the text screen held back. They are never served to agents; this is where the operator sees them.
 async function adminHeld(env) {
   const { results } = await env.DB.prepare(
-    "SELECT id, project, kind, title, units, source_key, held_reason, brief, created FROM tasks WHERE status = 'held' ORDER BY created, id"
+    "SELECT id, project, kind, title, units, status, source_key, held_reason, brief, created FROM tasks WHERE held_reason IS NOT NULL ORDER BY created, id"
   ).all();
   return json({ held: results.map((r) => ({ ...r, created: iso(r.created) })), note: 'Fix the text at its source (the project); a held task is released on the next sync once its text passes the screen.' });
 }

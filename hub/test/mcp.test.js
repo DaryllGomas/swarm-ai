@@ -107,6 +107,20 @@ describe('pair', () => {
     expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'contributor_paired'").first()).n - eventsBefore).toBe(5);
   });
 
+  it('counts yesterday\'s pairings too, so UTC midnight is not a second allowance', async () => {
+    const ip = nextIp();
+    const { ipHashFor } = await import('../src/lib.js');
+    const yesterday = await ipHashFor(env, new Request('https://x/', { headers: { 'CF-Connecting-IP': ip } }), 1);
+    const recent = Date.now() - 60 * 60 * 1000; // an hour ago, before "midnight"
+    for (let i = 0; i < 5; i++) {
+      await env.DB.prepare('INSERT INTO contributors (handle, key_hash, created, pair_ip) VALUES (?1, ?2, ?3, ?4)')
+        .bind(`late-${i}`, `hash-${i}`, recent, yesterday).run();
+    }
+    const after = await tool('pair', {}, { ip });
+    expect(after.isError).toBe(true);
+    expect(after.text).toMatch(/Too many pairings/);
+  });
+
   it('never echoes a key in errors and never stores one in events', async () => {
     const user = await newUser();
     const fake = `swk_${'A'.repeat(32)}`;
