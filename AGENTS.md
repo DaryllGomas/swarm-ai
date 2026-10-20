@@ -14,10 +14,12 @@ maintainer can remove it.
 ## Start here
 
 1. **Read [`docs/PLAN.md`](docs/PLAN.md) first.** It says what Swarm is, what's built, what comes next and
-   why. Then read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and `hub/README.md`.
+   why. Then read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`hub/README.md`](hub/README.md).
 2. Pick an open issue labelled `swarm` (sized `swarm:1`, `swarm:3` or `swarm:8`). Stay inside its scope.
 3. Make a small, focused change. One task per pull request.
-4. **Run `npm test` in `hub/` before you open the PR.** Fix what fails; don't skip or delete tests to get green.
+4. **Run `npm test` in `hub/` before you open the PR.** It runs in the Workers runtime against a local database
+   with every migration applied, and needs no network and no token. Fix what fails; don't skip or delete tests
+   to get green.
 5. Open a pull request from your owner's own GitHub account. Say that an AI wrote it, and which model.
 
 ## Honesty rules
@@ -45,16 +47,26 @@ These are frozen design rules. Don't bend them.
 - **Hash keys.** Contributor keys are stored only as salted hashes. Never log, return or store a raw key after
   `pair`.
 - **Parameterized SQL only.** Use `.prepare(...).bind(...)`. Never build SQL by concatenating user input.
-- **Task text is untrusted.** Keep labelling it as data in every response that includes it.
-- **Keep the limits.** Don't raise rate limits, size limits, claim limits or pairing caps without a reason
-  stated in the PR.
+- **Task text is untrusted.** Keep labelling it as data in every response that includes it. Text from outside a
+  project must go through `hub/src/screen.js` before it reaches a brief or a title. Tasks it flags are `held`
+  and must never be served by any tool or API. Keep that path closed when you add a new place that shows task
+  text, and add a test.
+- **Keep the limits.** Don't raise rate limits, size limits, claim limits (2 per contributor, 4 per network) or
+  pairing caps without a reason stated in the PR.
+- **Link checks stay as they are.** `hub/src/links.js` refuses links that can't be public pages and flags the
+  merely suspicious ones for the reviewer. Don't make Swarm fetch or open a submitted link.
+- **Keep the set-up guide safe.** `hub/src/setup.js` (served at `/setup` and `/llms.txt`, and by the `setup_guide`
+  tool) has one shell command, never tells an agent to download anything and always asks the user first.
+  `hub/test/setup.test.js` checks this; keep it in step with `hub/public/js/common.js`.
+- **Never edit a migration that has shipped.** The schema lives only in `hub/migrations/`. Every change is a new
+  `000N_name.sql`, tested against a database that already has rows.
 - **Keep admin endpoints hidden.** `/api/admin/*` returns 404 without the token.
 - **Add a test** for every new input handler, and for every bug you fix.
 
 ## Never do these
 
-- **Never deploy.** Deploys are the maintainer's job. Don't run `wrangler deploy`, `hub/scripts/deploy.sh` or
-  anything with `--remote`.
+- **Never deploy.** Deploys are the maintainer's job. Don't run `wrangler deploy`, `hub/scripts/deploy.sh`
+  (which applies remote migrations, then deploys) or anything with `--remote`. Local `--local` commands are fine.
 - **Never add the `workflow` scope** to any token or login, and don't edit `.github/workflows/` unless the
   issue says to. Workflow changes go in through the maintainer.
 - **Never push to `main`**, force-push, or change branch rules.

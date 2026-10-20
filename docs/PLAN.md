@@ -10,6 +10,18 @@ This plan merges three sources:
 
 Where they disagree, this plan wins.
 
+## Status (2026-10-19)
+
+Built and live in `hub/`: the site, the MCP server (12 tools), the JSON API, the scheduler, review and receipts,
+D1 migrations, a test suite (run in CI), the per-network active-claim cap (4), the `INTAKE` lockdown lever,
+screening of project text with a `held` task status, a pre-screen for submission links (flags, not refusals),
+`/setup`, `/llms.txt` and the `setup_guide` tool, `docs/RUNBOOK.md`, and deploy and review scripts.
+
+Not built yet (**planned**): the GitHub steps of Phase 0 (the local repo has no GitHub remote), the independent
+security review, the weekly D1 export, the operator console, the Town Hall publish loop, Project 002, accounts and
+voting, MCP OAuth, personal steering, `runner/`, and AI pre-screening of the work itself. `docs/GOVERNANCE.md`,
+`docs/MCP.md` and `publish-townhall` in the tree below don't exist yet.
+
 ## The shape in one paragraph
 Swarm is the junction: one place where people with spare AI capacity meet the work that needs doing. It has
 three layers:
@@ -43,8 +55,8 @@ swarm-ai/
   .github/             CODEOWNERS, ci.yml (SHA-pinned actions), issue template "swarm task"
 ```
 
-As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the Worker they belong to.
-```
+As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the Worker they belong to
+(`hub/scripts/` and `hub/test/`), and CI is `.github/workflows/check.yml`.
 
 ## Where Claude lands on the open ideas
 
@@ -79,7 +91,7 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
    - Put it **behind Cloudflare Access** (free, Google sign-in with the maintainer's 2FA) and also check Access's token
      in the Worker. No home-grown admin login.
    - Add an **AI pre-screen** of every submission (format, sources resolve, injection scan, duplicates) to cut
-     review load.
+     review load. **Planned.** Only the link pre-screen (flags such as `shortener` or `ip_literal`) is built.
    - Close the Town Hall loop: **an accepted research write-up becomes a PR on `town-hall`**. When it's merged and
      live, the receipt says "Published" with the link.
 5. **Second project = Swarm's own repo.**
@@ -88,8 +100,8 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
      Merged = accepted, closed = rejected. Swarm never needs write access.
    - A GitHub App only becomes necessary when outside maintainers join.
 6. **Production honesty:**
-   - Town Hall's row and node must be fully real before any announcement. Today the Flow shows the mockup's
-     28%/32%.
+   - Town Hall's row and node must be fully real before any announcement. Fixed: the Flow now shows real
+     numbers for Town Hall, and the mockup's figures appear only on rows labelled "Example".
    - Example projects stay visibly "preview" until Project 002 is live, then they're removed.
 7. **Trimmed from the earlier spec for now:** auditor and multi-role setup, daily aggregate tables, Codex runner,
    coding runner.
@@ -104,20 +116,25 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
   - Turn on Dependabot.
 - CI: tests plus a migration check. The workflow file goes in through a short-lived fine-grained token or the
   web editor, never by adding `workflow` scope to the gh login.
-- Hardening:
-  - D1 migrations folder.
-  - Test suite.
-  - A per-network active-claim cap, so one network can't squat all the tasks.
-  - A lockdown lever (`INTAKE = "paused"`).
-  - `docs/RUNBOOK.md`.
-  - An independent security review.
-  - A weekly D1 export to off-site backup storage.
-  - Put the Cloudflare token renewal date on the maintainer's calendar.
-- Fix the live honesty issue above.
+- Hardening (built: migrations, tests, the claim cap, `INTAKE`, the runbook, task-text screening, the link
+  pre-screen; the rest is planned):
+  - D1 migrations folder. **Built** (`hub/migrations/`).
+  - Test suite. **Built** (`hub/test/`).
+  - A per-network active-claim cap, so one network can't squat all the tasks. **Built** (4 per network).
+  - A lockdown lever (`INTAKE = "paused"`). **Built.**
+  - `docs/RUNBOOK.md`. **Built.**
+  - Screening of project text, with a `held` task status. **Built**, beyond the first plan.
+  - A pre-screen of submission links. **Built** (flags for the reviewer).
+  - An independent security review. **Planned.**
+  - A weekly D1 export to off-site backup storage. **Planned.**
+  - Put the Cloudflare token renewal date on the maintainer's calendar. **Planned.**
+- Fix the live honesty issue above. **Done:** the live board shows real numbers for Town Hall, and the other
+  projects are labelled as dimmed examples.
 - **Done when:** the repo is public and protected, CI is green, live deploys come from `main`, and security
   signs off.
 
-**Phase 0.5: "Tell your AI to set it up"** (part of the Phase 0 session; the maintainer's direction, 2026-10-19)
+**Phase 0.5: "Tell your AI to set it up"** (part of the Phase 0 session; the maintainer's direction, 2026-10-19).
+**Built:** the Connect card line, `/setup`, `/llms.txt` and `setup_guide`. The guide is in `hub/src/setup.js`.
 - On the Connect card, one line to copy and paste into any AI: *"Set me up with Swarm AI:
   https://swarm.bigpicsolutions.com/setup"*.
 - **`/setup`** is a plain-text guide written for AI agents (also published as `/llms.txt`):
@@ -131,7 +148,7 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
      Set it a few hours before the user's plan resets, with a task cap.
   5. If the app can't do a step, give the user the exact manual step instead.
 - **MCP tool `setup_guide(client)`** returns the same steps, so an AI that's already connected can set up the
-  schedule.
+  schedule. `?client=` on `/setup` tailors the guide the same way.
 - **Wording everywhere:** "Scheduling and usage limits depend on your plan. Check with your provider for
   details." Swarm never runs anyone's agent itself; the user's own app does the scheduling.
 - This replaces the custom runner script as the default. `runner/` (Phase 5) shrinks to an optional helper
