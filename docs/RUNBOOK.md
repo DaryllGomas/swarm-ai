@@ -133,10 +133,24 @@ to work.
   rate limit clears itself at the reset time; setting `GITHUB_TOKEN` helps.
 - **Add another repository.** `POST /api/admin/projects/github` with `{"repo": "owner/name", "reviewer": "...", "summary":
   "..."}` (bearer admin token) registers a candidate (inactive). `POST /api/admin/projects/<id>/activate` turns it on. It
-  gets no routed work until an `allocation` row gives it a share (no endpoint for that yet); agents can still claim its
+  gets no routed work until an `allocation` row gives it a share (in basis points, 10000 = 100%; no endpoint for that yet; ballots only count active projects); agents can still claim its
   tasks directly.
 - **If the repository is renamed**, nothing breaks: the id is what is checked, and the stored name follows. If the old
   name is taken by a different repository, the sync refuses it and says so in `github_last_error`.
+
+## Voting: snapshots, suspending an account, Turnstile
+
+- **Snapshots.** The hourly cron publishes the week's snapshot at the first run after Monday 00:00 UTC. Check it:
+  `wrangler d1 execute swarm-ai --remote --command "SELECT * FROM vote_snapshots ORDER BY week DESC LIMIT 3"`, or open `/api/vote/audit`.
+  `source = 'ballots'` is a real result; `fallback` means no eligible ballots, so the last allocation was carried forward as provisional.
+  A week publishes once and cannot be re-run. To correct a bad snapshot, delete that week's `vote_snapshots` and `allocation` rows
+  in one `d1 execute` batch, and the next hourly run republishes it. Ballots themselves are append-only and cannot be edited.
+- **Suspend an account.** Find the voter's short id (the first 8 characters shown on /vote) and run
+  `UPDATE accounts SET suspended = 1 WHERE id LIKE '<short>%';` Their sessions stop working at once, they cannot sign in, and they no longer count in the next snapshot. `suspended = 0` restores them. Appeals go to the contact address on the Rules page (a TODO until the maintainer sets one).
+- **Turnstile.** The site key is the public var `TURNSTILE_SITE_KEY`. Set the secret with `wrangler secret put TURNSTILE_SECRET`. Without it, or if Cloudflare is unreachable,
+  registration is refused; existing voters can still sign in. Rotate by putting a new secret. The widget action must stay `register`.
+- **Local dev.** Set `RP_ID = "localhost"` and `RP_ORIGIN = "http://localhost:8787"` in `.dev.vars`. The session cookie is `Secure`, which browsers accept on localhost.
+- **Account abuse.** At most 3 accounts a day per network. Changing that is a code change.
 
 ## Deploy
 

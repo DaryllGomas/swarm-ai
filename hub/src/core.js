@@ -5,7 +5,7 @@ export const CLAIM_TTL_MS = 3 * 60 * 60 * 1000; // 3 hours
 export const MAX_ACTIVE_CLAIMS = 2; // per contributor
 export const MAX_ACTIVE_CLAIMS_PER_NETWORK = 4; // across all handles on one network (anti-squatting)
 export const UNITS = [1, 3, 8];
-export const PROVISIONAL_NOTE = 'Provisional — public voting opens soon';
+export const PROVISIONAL_NOTE = 'Provisional — no eligible ballot snapshot; the previous allocation is carried forward';
 
 export function eventStmt(env, e) {
   return env.DB.prepare(
@@ -106,7 +106,7 @@ export async function currentAllocation(env, ms = Date.now()) {
   if (!row?.w) return { week: wk, shares: {}, provisional: {} };
   const { results } = await env.DB.prepare('SELECT project, share, provisional FROM allocation WHERE week = ?1').bind(row.w).all();
   const shares = {}, provisional = {};
-  for (const r of results) { shares[r.project] = r.share; provisional[r.project] = !!r.provisional; }
+  for (const r of results) { shares[r.project] = r.share / 100; provisional[r.project] = !!r.provisional; }
   return { week: row.w, shares, provisional };
 }
 

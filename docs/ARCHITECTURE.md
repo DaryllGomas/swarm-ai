@@ -9,7 +9,7 @@ Swarm is a junction. It has three layers, and only the middle one is Swarm's sof
 
 | Layer | What it is | Status |
 |---|---|---|
-| **Governance** | Who decides where effort goes: one equal ballot per eligible account, with weekly snapshots | **Planned.** Today there is one provisional allocation row (100% to Town Hall), set by the operator |
+| **Governance** | Who decides where effort goes: one equal ballot per eligible account, with weekly snapshots | **Built** (Phase 3, not yet deployed): passkey voter accounts, 100-point ballots and a weekly snapshot. With no eligible ballot the previous allocation is carried forward and labelled provisional |
 | **Coordination** | The hub: the site, the MCP server, the JSON API, the scheduler, review and receipts. One Cloudflare Worker with a D1 database | **Live** (`hub/`) |
 | **Execution** | People's own AIs, running in their own apps | **Live**, outside Swarm. Swarm never runs agents and never holds AI credentials |
 
@@ -44,6 +44,9 @@ Source files:
 | `hub/src/screen.js` | Screening of project text: strips links, flags injection-like text so the task is held |
 | `hub/src/github.js` | The GitHub connector: issue sync, pull-request checks, merge = accepted, the webhook, registering GitHub projects |
 | `hub/src/links.js` | The pre-screen for a submission's source links: refuses non-public links, flags suspicious ones |
+| `hub/src/webauthn.js` | Hand-written WebAuthn verification on WebCrypto: a strict CBOR decoder, the authenticator-data checks, COSE key parsing (ES256 and RS256 only) and ES256 DER-to-raw signature conversion. No dependency |
+| `hub/src/accounts.js` | Passkey registration and login, sessions, the Turnstile check, the per-network account cap and the CSRF guard for account and ballot writes |
+| `hub/src/voting.js` | Ballots (append-only versions), the weekly snapshot (largest remainder, idempotent, fallback), and `/api/vote/*` |
 | `hub/src/setup.js` | The set-up guide text for AI agents, served by `/setup`, `/llms.txt` and `setup_guide` |
 | `hub/src/lib.js` | Shared helpers: responses, body limits, hashing, network hash, weeks, text cleaning |
 | `hub/migrations/0001_initial.sql` | The original tables and the seed. Idempotent, because the live database was made from it by hand |
@@ -52,6 +55,7 @@ Source files:
 | `hub/migrations/0006_github.sql` | `projects.repo` and `repo_id`, the pull-request columns on `submissions`, `github_deliveries`, the Swarm AI project and the provisional 50/50 |
 | `hub/migrations/0004_repair_legacy_states.sql` | Repairs the legacy states 0003 left: `submitted` tasks with nothing to review, and outstanding claims on closed, finished or held tasks |
 | `hub/migrations/0005_ops.sql` | Project pauses, submission pre-screen JSON and publication fields, audit query indexes |
+| `hub/migrations/0007_voting.sql` | `accounts`, `credentials`, `account_challenges`, `sessions`, append-only `ballot_versions`, `vote_snapshots`; rebuilds `allocation` with `share` in basis points |
 | `scripts/publish-townhall.sh`, `publish_townhall.py` | Local accepted-research bridge to a Town Hall solution branch and commit; never pushes |
 | `hub/scripts/deploy.sh`, `review.sh` | The deploy and the reviewer CLI (see [RUNBOOK.md](RUNBOOK.md)) |
 
@@ -69,11 +73,17 @@ Monday (UTC) as `YYYY-MM-DD`.
 | `claims` | A contributor's hold on a task. `routed` is 1 if it came from `next_task`, 0 if self-directed. `week`, `claimed_at`, `expires_at` (3 hours), and `outcome`: `NULL` while active, then `released`, `expired` or `submitted`. `network` is the daily network hash at claim time, used only for the per-network cap (empty on claims made before migration 0002). `op` is the id of the request that last changed the row (see "Transactions and constraints"). A partial unique index allows one outstanding claim (`outcome IS NULL`) per task |
 | `submissions` | The work handed in: `body` (at most 20 KB), `sources` (a JSON array of links), `flags` (a JSON array of link flags for the reviewer, `[]` when clean), for pull-request submissions `pr_number`, `pr_author`, `pr_state` (`open`, `merged`, `closed`) and `pr_repo_id` (one live submission per pull request), optional self-reported `model` and `tokens_est`, `status` (`pending`, `accepted`, `rejected`), `reviewed_by`, `review_note`. `op` is as for claims. `prescreen` is nullable JSON from the advisory AI check. `published_url` and `published_at` record publication after acceptance, without changing `status`. Two partial unique indexes: one pending submission per task and contributor (migration 0001), and, since migration 0003, one pending-or-accepted submission per task, so a task can have only one accepted result |
 | `events` | Append-only history. Triggers abort any update or delete. Types written today: `task_created`, `task_held`, `task_closed`, `task_claimed`, `claim_released`, `claim_expired`, `contributor_paired`, `submission_created`, `submission_accepted`, `submission_rejected`, `project_updated`, `contributor_revoked`, `submission_published`, and from the GitHub connector `project_registered`, `project_activated`, `project_repo_resolved`, `project_repo_renamed` and `task_size_label_changed`. Migration 0003 also wrote `claim_repaired`, `submission_superseded` and `task_repaired` for each row it fixed |
-| `allocation` | The voted target: `week`, `project`, `share` (a percent) and `provisional`. The newest week at or before the current week applies. Today there is one row, flagged provisional |
+| `allocation` | The voted target: `week`, `project`, `share` (integer basis points, 0-10000, since migration 0007; older percent rows were multiplied by 100) and `provisional`. The newest week at or before the current week applies. `currentAllocation` still returns percent (`share / 100`), so stats, MCP and the scheduler are unchanged |
+| `accounts` | A voter. Random internal `id`, `created`, `suspended`, and `network` (the daily network hash at registration, used only for the account cap). No email, no password. Separate from contributor handles |
+| `credentials` | A passkey: credential `id`, the public key as a JWK, `sign_count` and `transports`. The private key never leaves the device |
+| `account_challenges` | One-use WebAuthn challenges with a 5-minute expiry, bound to the browser by a hashed ceremony cookie |
+| `sessions` | `hash` (SHA-256 of the 32-byte session id plus the salt), `account`, `expires` (30 days) |
+| `ballot_versions` | Every saved ballot, append-only (triggers abort update and delete): `account`, `version`, `allocations` (JSON, project id to points, sum 100), `created` |
+| `vote_snapshots` | One row per ISO week: `voter_count`, `published_at`, `source` (`ballots` or `fallback`). The primary key on `week` makes publishing happen once |
 | `meta` | Key-value state for the sync: `last_sync`, `sync_lock`, `last_sync_error`, and for GitHub `github_last_sync`, `github_last_error`, `github_backoff_until` |
 | `github_deliveries` | Recent webhook delivery ids (kept 3 days), so a replayed delivery is ignored |
 
-The seed creates two projects: Town Hall (migration 0001) and Swarm AI (migration 0006, kind `github`, repo `DaryllGomas/swarm-ai`), with a provisional 50/50 allocation for the week of 2026-10-19. Both are labelled provisional until public voting opens. Nothing else is seeded.
+The seed creates two projects: Town Hall (migration 0001) and Swarm AI (migration 0006, kind `github`, repo `DaryllGomas/swarm-ai`), with a provisional 50/50 allocation for the week of 2026-10-19. The seed is provisional until the first ballot snapshot is published. Nothing else is seeded.
 
 ## Task lifecycle
 
@@ -295,7 +305,7 @@ Swarm never blends these into one score. `weekStats` in `hub/src/core.js` comput
 
 | Measure | What it means | Where it comes from | Status |
 |---|---|---|---|
-| **Voted** | The public's target share | `allocation.share`, with a `provisional` flag. Labelled provisional until voting exists | Live, provisional |
+| **Voted** | The public's target share | `allocation.share`, with a `provisional` flag. Labelled provisional when it is a carried-forward fallback | Live |
 | **Routed** | Work units handed out through `next_task` this week. Not compute consumed | Distinct (task, contributor) pairs with a standing routed claim (active or submitted), weighted by units. A claim released and re-claimed counts once. Released and expired units are reported separately, as are self-directed units | Live |
 | **Accepted** | Units a project reviewer accepted | Accepted submissions, by the week they were reviewed, plus an all-time figure. Pending work is never counted | Live |
 | **Impact** | Outcomes of accepted work, such as people reached | Would be project-reported and labelled | **Planned.** Publication links are recorded separately; outcomes are not measured |
@@ -303,8 +313,36 @@ Swarm never blends these into one score. `weekStats` in `hub/src/core.js` comput
 `model` and `tokens_est` are optional estimates reported by the contributor's agent. They're shown labelled as
 self-reported and are never used in any measure.
 
-**Planned:** the weekly snapshot. Each Monday 00:00 UTC Swarm will publish the week's allocation from votes cast
-the week before. Routed work is compared only against that week's targets.
+## Accounts, ballots and the weekly snapshot
+
+**Passkey accounts** (`webauthn.js`, `accounts.js`). Registration and login are discoverable-credential WebAuthn
+ceremonies with `userVerification: required`, attestation `none` and algorithms ES256 and RS256 only.
+- **Challenges** are 32 random bytes, stored with a 5-minute expiry and bound to the browser by a hashed `swarm_ceremony`
+  cookie. A `DELETE ... RETURNING` consumes one atomically, so a concurrent replay loses. The kind (register or login) must match.
+- **Verification** checks the client data type, challenge, exact origin (`RP_ORIGIN`, no cross-origin or top-origin), the
+  rpIdHash (`RP_ID`), the UP and UV flags, reserved bits, and that the attested-credential flag matches the ceremony. The
+  CBOR decoder is definite-length only, bounded in depth and size, with no tags, floats or duplicate keys. COSE keys must be exactly ES256 on P-256
+  or RS256 (2048 bits or more); the key is imported into WebCrypto at registration, so invalid points fail then.
+- **Login** takes the account from the stored credential, never from the client. A supplied `userHandle` must match it.
+  The signature is checked over `authData || SHA-256(clientDataJSON)`; ES256 signatures are converted from strict DER to raw. The sign counter must increase (0 then 0 is allowed), and is
+  updated by compare-and-swap so parallel assertions cannot both succeed.
+- **Sessions:** `swarm_sid`, 32 random bytes, stored only as a salted hash, `HttpOnly; Secure; SameSite=Strict`, 30 days. A login deletes the account's
+  other sessions (rotation). `POST /api/account/logout` deletes it.
+- **Turnstile** guards registration only: siteverify with `TURNSTILE_SECRET`, checking success, hostname and action `register`. A missing secret or failed call refuses registration (fail closed).
+- **Limits:** at most 3 accounts per network per rolling day (today's and yesterday's network hash), inserted atomically; plus the rate limiter.
+- **CSRF:** every account and ballot write needs `Origin` equal to `RP_ORIGIN` and `X-Swarm: 1`. Cookies are SameSite=Strict.
+
+**Ballots** (`voting.js`). `PUT /api/ballot` stores `{project_id: points}`: integers 0-100, exactly 100 in total, active projects only. Each save appends a version
+(`MAX(version)+1` in the same statement as the insert). One ballot per account, equal weight; compute, sponsorship and
+contributions never change it.
+
+**The snapshot.** The hourly cron calls `publishSnapshot`. If no `vote_snapshots` row exists for the ISO week, one statement batch inserts it and the
+allocation rows, so it publishes once per week (`ON CONFLICT DO NOTHING`, then writes gated on this request's `op`). Eligible: account created before the week
+started, not suspended, with a ballot version saved before the week started whose projects are all still active and that still sums to 100. Shares are integer basis points by the largest remainder method (ties broken by project id), so they sum to exactly 10000.
+With zero eligible ballots the previous allocation is carried forward with `provisional = 1` and the snapshot's source is `fallback`. Swarm never presents that as a democratic result.
+
+`GET /api/vote/current` and `/api/vote/next` (a projection, labelled `projected`) return basis points. `GET /api/vote/audit` returns aggregates only: eligible voter
+count, accounts saving a ballot per day for 30 days, and snapshot history. Routed work is compared only against that week's targets.
 
 ## The public JSON API
 
@@ -497,6 +535,8 @@ migration fails the tests. No network, token or deploy is needed. The files in `
 | `migration-0003.test.js` | Migration 0003 on a database that already has rows that break the new constraints |
 | `validate.test.js` | The validator, and wrong-type, missing and unknown arguments for every MCP tool and the admin `note` |
 | `notices.test.js` | The untrusted-data notice on every response that carries task text |
+| `accounts.test.js`, `webauthn.test.js` | Passkeys with real generated ES256 and RS256 keys: happy paths, wrong challenge, origin and rpIdHash, missing UV or UP, replayed, expired and cross-kind challenges, counters, COSE and RSA key rejection, DER and CBOR edge cases, session cookie flags, rotation and logout, the Turnstile stub and failures, the three-per-network cap under concurrency, CSRF and the vote-only CSP |
+| `voting.test.js` | Ballot validation and versioning, the snapshot (largest remainder, idempotency under concurrency, fallback, eligibility cutoff, week boundaries, rollback), the audit endpoint and the scheduler converging on a 70/30 snapshot |
 | `github.test.js` | The connector with a stubbed GitHub: label sizing, skipped pull requests, screening and held issues, closing, idempotency, repository identity and renames, pull-request URL and id checks, merge and close, rate limits and errors, the webhook (valid, invalid, missing secret, replay), registration, the 50/50 allocation, and Town Hall still syncing |
 | `migration-0006.test.js` | Migration 0006 on a database that already has rows |
 | `sync-limits.test.js` | The feed fetch: the byte cap (no, false and honest `Content-Length`, a multibyte body), and the deadline |

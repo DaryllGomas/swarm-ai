@@ -1,5 +1,7 @@
 // Swarm AI hub: static site (public/ via ASSETS) + MCP at /mcp + JSON API at /api/* + D1.
 // Swarm never publishes into a project; submissions wait for a person to review them.
+import { handleAccount } from './accounts.js';
+import { handleVoting, publishSnapshot } from './voting.js';
 import { expireClaims, weekStats } from './core.js';
 import { adminActivateProject, adminRegisterGithub, handleGithubWebhook } from './github.js';
 import { handleMcp } from './mcp.js';
@@ -27,6 +29,8 @@ export default {
   // Hourly: free up expired claims and pull fresh tasks from Town Hall.
   async scheduled(_event, env, ctx) {
     ctx.waitUntil((async () => {
+      await publishSnapshot(env);
+      await env.DB.batch([env.DB.prepare('DELETE FROM sessions WHERE expires <= ?1').bind(Date.now()), env.DB.prepare('DELETE FROM account_challenges WHERE expires <= ?1').bind(Date.now())]);
       await expireClaims(env);
       await syncTasks(env, { force: true });
     })());
@@ -44,6 +48,8 @@ function setupText(req, url) {
 
 async function api(req, env, ctx, url) {
   const path = url.pathname;
+  if (path.startsWith('/api/account/')) return handleAccount(req, env, path);
+  if (path === '/api/ballot' || path.startsWith('/api/vote/')) return handleVoting(req, env, path);
   if (path === '/api/github/webhook') return handleGithubWebhook(req, env, ctx); // 404 until GITHUB_WEBHOOK_SECRET is set
   if (path.startsWith('/api/admin/')) {
     if (!(await isAdmin(req, env))) return json({ error: 'not found' }, 404);
