@@ -421,23 +421,37 @@ async function claim(c, who, taskId, routed) {
   //  - at most MAX_ACTIVE_CLAIMS per contributor, and at most MAX_ACTIVE_CLAIMS_PER_NETWORK across every handle on one
   //    network (today's and yesterday's network hash, so a claim made just before UTC midnight still counts).
   const yesterday = await ipHashFor(env, c.req, 1);
-  let ins;
+  const op = newOp();
+  // One transaction: the claim, the task's move to 'claimed' and the event commit together or not at all. The two later
+  // statements run only if this request's INSERT won (its claim carries this request's op), so they cannot touch a task
+  // that someone else's claim now owns.
+  let res;
   try {
-    ins = await env.DB.prepare(
-      `INSERT INTO claims (task, contributor, routed, week, claimed_at, expires_at, network)
-       SELECT t.id, ?2, ?3, ?4, ?5, ?6, ?7 FROM tasks t JOIN projects p ON p.id = t.project
-       WHERE t.id = ?1 AND t.status = 'ready' AND t.held_reason IS NULL AND p.active = 1
-         AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = t.id AND (s.contributor = ?2 OR s.status IN ('pending','accepted')))
-         AND NOT EXISTS (SELECT 1 FROM claims k WHERE k.task = t.id AND k.outcome IS NULL)
-         AND (SELECT COUNT(*) FROM submissions s JOIN tasks t2 ON t2.id = s.task WHERE t2.project = t.project AND s.status = 'pending') < p.max_pending
-         AND (SELECT COUNT(*) FROM claims WHERE contributor = ?2 AND outcome IS NULL AND expires_at > ?5) < ${MAX_ACTIVE_CLAIMS}
-         AND (SELECT COUNT(*) FROM claims WHERE network IN (?7, ?8) AND outcome IS NULL AND expires_at > ?5) < ${MAX_ACTIVE_CLAIMS_PER_NETWORK}`
-    ).bind(taskId, who.id, routed, weekOf(now), now, now + CLAIM_TTL_MS, c.ipHash, yesterday).run();
+    res = await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO claims (task, contributor, routed, week, claimed_at, expires_at, network, op)
+         SELECT t.id, ?2, ?3, ?4, ?5, ?6, ?7, ?9 FROM tasks t JOIN projects p ON p.id = t.project
+         WHERE t.id = ?1 AND t.status = 'ready' AND t.held_reason IS NULL AND p.active = 1
+           AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = t.id AND (s.contributor = ?2 OR s.status IN ('pending','accepted')))
+           AND NOT EXISTS (SELECT 1 FROM claims k WHERE k.task = t.id AND k.outcome IS NULL)
+           AND (SELECT COUNT(*) FROM submissions s JOIN tasks t2 ON t2.id = s.task WHERE t2.project = t.project AND s.status = 'pending') < p.max_pending
+           AND (SELECT COUNT(*) FROM claims WHERE contributor = ?2 AND outcome IS NULL AND expires_at > ?5) < ${MAX_ACTIVE_CLAIMS}
+           AND (SELECT COUNT(*) FROM claims WHERE network IN (?7, ?8) AND outcome IS NULL AND expires_at > ?5) < ${MAX_ACTIVE_CLAIMS_PER_NETWORK}`
+      ).bind(taskId, who.id, routed, weekOf(now), now, now + CLAIM_TTL_MS, c.ipHash, yesterday, op),
+      env.DB.prepare(
+        `UPDATE tasks SET status = 'claimed'
+         WHERE id = ?1 AND status = 'ready' AND held_reason IS NULL AND EXISTS (SELECT 1 FROM claims WHERE task = ?1 AND outcome IS NULL AND op = ?2)`
+      ).bind(taskId, op),
+      env.DB.prepare(
+        `INSERT INTO events (ts, type, task, contributor, submission, actor, detail)
+         SELECT ?3, 'task_claimed', ?1, ?4, NULL, ?5, json_object('claim', id, 'routed', json(?6)) FROM claims WHERE task = ?1 AND outcome IS NULL AND op = ?2`
+      ).bind(taskId, op, now, who.id, who.handle, routed ? 'true' : 'false'),
+    ]);
   } catch (err) {
     if (!/UNIQUE/i.test(String(err.message))) throw err;
     throw new ToolError('Someone else just claimed that task. Try again.'); // the unique index caught a claim that raced this one
   }
-  if (!ins.meta.changes) {
+  if (!res[0].meta.changes) {
     // Not claimed: say why, from the current state. A repeat that raced its own first call finds its claim here.
     task = await readClaimTask(env, who, taskId);
     const again = await myOutstandingClaim(env, who, taskId, Date.now());
@@ -450,14 +464,7 @@ async function claim(c, who, taskId, routed) {
     if (net.n >= MAX_ACTIVE_CLAIMS_PER_NETWORK) throw new CapError(`Too many tasks are claimed from your network right now (limit ${MAX_ACTIVE_CLAIMS_PER_NETWORK} at a time across all handles). Submit or release some, or try again when they expire.`);
     throw new ToolError('Someone else just claimed that task. Try again.');
   }
-  const claimId = ins.meta.last_row_id;
-  const upd = await env.DB.prepare("UPDATE tasks SET status = 'claimed' WHERE id = ?1 AND status = 'ready' AND held_reason IS NULL").bind(taskId).run();
-  if (!upd.meta.changes) {
-    await env.DB.prepare("UPDATE claims SET released = 1, outcome = 'released' WHERE id = ?1").bind(claimId).run();
-    throw new ToolError('Someone else just claimed that task. Try again.');
-  }
-  await eventStmt(env, { type: 'task_claimed', task: taskId, contributor: who.id, actor: who.handle, detail: { claim: claimId, routed: !!routed } }).run();
-  return { task, claim: { id: claimId, routed: !!routed, expires_at: iso(now + CLAIM_TTL_MS) } };
+  return { task, claim: { id: res[0].meta.last_row_id, routed: !!routed, expires_at: iso(now + CLAIM_TTL_MS) } };
 }
 
 const claimedView = ({ task, claim: c }, extra = {}) => ({
@@ -592,35 +599,66 @@ async function submitWork({ env, args, who }) {
 
   const now = Date.now();
   const claim = await env.DB.prepare('SELECT id FROM claims WHERE task = ?1 AND contributor = ?2 AND outcome IS NULL AND expires_at > ?3').bind(taskId, who.id, now).first();
-  if (!claim) throw new ToolError(`You need an active claim on task ${taskId} to submit. Claims last 3 hours; use next_task or claim_task first.`);
-  const dup = await env.DB.prepare("SELECT id FROM submissions WHERE task = ?1 AND contributor = ?2 AND status = 'pending'").bind(taskId, who.id).first();
-  if (dup) throw new ToolError(`You already have a pending submission (${dup.id}) for this task.`);
+  if (!claim) return submitRefusal(env, who, taskId, { body, sources, flags });
   const day = await env.DB.prepare('SELECT COUNT(*) AS n FROM submissions WHERE contributor = ?1 AND created >= ?2').bind(who.id, now - 86400000).first();
   if (day.n >= MAX_SUBMISSIONS_PER_CONTRIBUTOR_PER_DAY) throw new ToolError('Daily submission limit reached. Try again tomorrow.');
 
-  const won = await env.DB.prepare("UPDATE claims SET outcome = 'submitted' WHERE id = ?1 AND outcome IS NULL AND expires_at > ?2").bind(claim.id, now).run();
-  if (!won.meta.changes) throw new ToolError('Your claim just expired. Claim the task again.');
-  let sub;
+  // One transaction: the submission, the claim's move to 'submitted', the task's move to 'submitted' and the event commit
+  // together or not at all. The INSERT runs only while this claim is still outstanding and the task has no pending or
+  // accepted submission; the three later statements run only if that INSERT happened (they find this request's op on the
+  // rows it wrote). A failure anywhere leaves the claim exactly as it was, so a retry can submit.
+  const op = newOp();
+  let res;
   try {
-    sub = await env.DB.prepare(
-      'INSERT INTO submissions (task, contributor, claim, body, sources, flags, model, tokens_est, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)'
-    ).bind(taskId, who.id, claim.id, body, JSON.stringify(sources), JSON.stringify(flags), model, tokens, now).run();
+    res = await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO submissions (task, contributor, claim, body, sources, flags, model, tokens_est, created, op)
+         SELECT c.task, c.contributor, c.id, ?4, ?5, ?6, ?7, ?8, ?9, ?10 FROM claims c
+         WHERE c.id = ?3 AND c.task = ?1 AND c.contributor = ?2 AND c.outcome IS NULL AND c.expires_at > ?9
+           AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = c.task AND s.status IN ('pending','accepted'))`
+      ).bind(taskId, who.id, claim.id, body, JSON.stringify(sources), JSON.stringify(flags), model, tokens, now, op),
+      env.DB.prepare(
+        "UPDATE claims SET outcome = 'submitted', op = ?2 WHERE id = ?1 AND outcome IS NULL AND EXISTS (SELECT 1 FROM submissions WHERE claim = ?1 AND op = ?2)"
+      ).bind(claim.id, op),
+      env.DB.prepare(
+        "UPDATE tasks SET status = 'submitted' WHERE id = ?1 AND status = 'claimed' AND EXISTS (SELECT 1 FROM claims WHERE id = ?2 AND outcome = 'submitted' AND op = ?3)"
+      ).bind(taskId, claim.id, op),
+      env.DB.prepare(
+        `INSERT INTO events (ts, type, task, contributor, submission, actor, detail)
+         SELECT ?4, 'submission_created', ?1, ?2, id, ?5, ?6 FROM submissions WHERE claim = ?3 AND op = ?7`
+      ).bind(taskId, who.id, claim.id, now, who.handle, flags.length ? JSON.stringify({ flags }) : null, op),
+    ]);
   } catch (err) {
-    await env.DB.prepare('UPDATE claims SET outcome = NULL WHERE id = ?1').bind(claim.id).run();
-    if (/UNIQUE/i.test(String(err.message))) throw new ToolError('You already have a pending submission for this task.');
+    if (/UNIQUE/i.test(String(err.message))) return submitRefusal(env, who, taskId, { body, sources, flags });
     throw err;
   }
-  const id = sub.meta.last_row_id;
-  await env.DB.batch([
-    env.DB.prepare("UPDATE tasks SET status = 'submitted' WHERE id = ?1 AND status = 'claimed'").bind(taskId),
-    eventStmt(env, { type: 'submission_created', task: taskId, contributor: who.id, submission: id, actor: who.handle, detail: flags.length ? { flags } : undefined }),
-  ]);
-  return {
-    submission_id: id,
-    status: 'pending',
-    ...(flags.length ? { link_flags: flags, link_flags_note: 'Some of your source links look unusual. This does not block your submission; the reviewer will see these flags.' } : {}),
-    note: 'Your work now waits for a person to review it. Swarm never publishes it. Check submission_status or my_work later; pending work is never shown as accepted.',
-  };
+  if (!res[0].meta.changes) return submitRefusal(env, who, taskId, { body, sources, flags });
+  return submitResult(res[0].meta.last_row_id, 'pending', flags);
+}
+
+const submitResult = (id, status, flags, extra = {}) => ({
+  submission_id: id,
+  status,
+  ...extra,
+  ...(flags.length ? { link_flags: flags, link_flags_note: 'Some of your source links look unusual. This does not block your submission; the reviewer will see these flags.' } : {}),
+  note: 'Your work now waits for a person to review it. Swarm never publishes it. Check submission_status or my_work later; pending work is never shown as accepted.',
+});
+
+// The submission did not happen. If this contributor already has this very work in for the task (a retry of a call whose
+// answer was lost, or two identical calls at once), answer with that submission. Otherwise say why not.
+async function submitRefusal(env, who, taskId, { body, sources, flags }) {
+  const live = await env.DB.prepare(
+    "SELECT id, status, body, sources FROM submissions WHERE task = ?1 AND contributor = ?2 AND status IN ('pending','accepted') ORDER BY id DESC LIMIT 1"
+  ).bind(taskId, who.id).first();
+  if (live) {
+    if (live.body === body && live.sources === JSON.stringify(sources)) return submitResult(live.id, live.status, flags, { already_received: true });
+    throw new ToolError(`You already have a ${live.status} submission (${live.id}) for this task.`);
+  }
+  const other = await env.DB.prepare("SELECT id FROM submissions WHERE task = ?1 AND status IN ('pending','accepted')").bind(taskId).first();
+  const claim = await env.DB.prepare('SELECT id FROM claims WHERE task = ?1 AND contributor = ?2 AND outcome IS NULL AND expires_at > ?3').bind(taskId, who.id, Date.now()).first();
+  if (other && claim) throw new ToolError('Another submission for this task is already waiting for review. Release your claim; this task is no longer open.');
+  if (claim) throw new ToolError('Your claim just changed. Check my_work and try again.');
+  throw new ToolError(`You need an active claim on task ${taskId} to submit. Claims last 3 hours; use next_task or claim_task first.`);
 }
 
 async function submissionStatus({ env, args, who }) {

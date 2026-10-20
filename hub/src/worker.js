@@ -1,6 +1,6 @@
 // Swarm AI hub: static site (public/ via ASSETS) + MCP at /mcp + JSON API at /api/* + D1.
 // Swarm never publishes into a project; submissions wait for a person to review them.
-import { PROVISIONAL_NOTE, eventStmt, expireClaims, weekStats } from './core.js';
+import { PROVISIONAL_NOTE, expireClaims, newOp, weekStats } from './core.js';
 import { handleMcp } from './mcp.js';
 import { syncIfStale, syncTasks } from './sync.js';
 import { SECURITY_HEADERS, clean, ipHashFor, isAdmin, iso, json, readJsonResult, underRateLimit } from './lib.js';
@@ -151,32 +151,39 @@ async function adminReview(req, env) {
   if (s.status !== 'pending') return json({ error: `already ${s.status}` }, 409);
 
   const accept = body.decision === 'accept';
+  const verdict = accept ? 'accepted' : 'rejected';
   const now = Date.now();
-  // A review is a valid transition only for a pending submission whose task is waiting for review ('submitted'), and a task
-  // gets at most one accepted result. Both are conditions of the UPDATE itself, so a concurrent request cannot slip past.
-  const upd = await env.DB.prepare(
-    `UPDATE submissions SET status = ?2, reviewed_by = ?3, review_note = ?4, reviewed_at = ?5
-     WHERE id = ?1 AND status = 'pending'
-       AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = submissions.task AND t.status = 'submitted')
-       AND (?2 != 'accepted' OR NOT EXISTS (SELECT 1 FROM submissions a WHERE a.task = submissions.task AND a.status = 'accepted'))`
-  ).bind(id, accept ? 'accepted' : 'rejected', s.reviewer, note, now).run();
-  if (!upd.meta.changes) {
+  const op = newOp();
+  // One transaction: the submission, the task and the event commit together or not at all. The first UPDATE is the only
+  // thing that can change who wins: it applies to a pending submission whose task is waiting for review ('submitted'), and
+  // a task gets at most one accepted result. The task change and the event run only if it applied (they find this request's
+  // op on the submission), so a stale or repeated review cannot touch a task that has moved on.
+  const res = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE submissions SET status = ?2, reviewed_by = ?3, review_note = ?4, reviewed_at = ?5, op = ?6
+       WHERE id = ?1 AND status = 'pending'
+         AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = submissions.task AND t.status = 'submitted')
+         AND (?2 != 'accepted' OR NOT EXISTS (SELECT 1 FROM submissions a WHERE a.task = submissions.task AND a.status = 'accepted'))`
+    ).bind(id, verdict, s.reviewer, note, now, op),
+    // A rejected piece of work puts the task back in the pool, up to two rejections by a reviewer; after that it stays rejected.
+    env.DB.prepare(
+      `UPDATE tasks SET status = CASE
+           WHEN ?3 = 'accepted' THEN 'accepted'
+           WHEN (SELECT COUNT(*) FROM submissions WHERE task = ?1 AND status = 'rejected' AND COALESCE(reviewed_by, '') != 'system') >= 2 THEN 'rejected'
+           ELSE 'ready' END
+       WHERE id = ?1 AND status = 'submitted' AND EXISTS (SELECT 1 FROM submissions WHERE id = ?2 AND op = ?4 AND status = ?3)`
+    ).bind(s.task, id, verdict, op),
+    env.DB.prepare(
+      `INSERT INTO events (ts, type, task, contributor, submission, actor, detail)
+       SELECT ?3, ?4, task, contributor, id, ?5, json_object('note', ?6) FROM submissions WHERE id = ?1 AND op = ?2`
+    ).bind(id, op, now, accept ? 'submission_accepted' : 'submission_rejected', s.reviewer, note),
+  ]);
+  if (!res[0].meta.changes) {
+    // Not reviewed by this request: someone else got there first, or the task is not in a state that can be reviewed.
     const now2 = await env.DB.prepare('SELECT s.status, t.status AS task_status FROM submissions s JOIN tasks t ON t.id = s.task WHERE s.id = ?1').bind(id).first();
     if (now2.status !== 'pending') return json({ error: `already ${now2.status}` }, 409);
     return json({ error: `the task is ${now2.task_status}, not waiting for review, or it already has an accepted result` }, 409);
   }
-
-  const stmts = [];
-  if (accept) {
-    stmts.push(env.DB.prepare("UPDATE tasks SET status = 'accepted' WHERE id = ?1").bind(s.task));
-  } else {
-    // A rejected piece of work puts the task back in the pool, up to two rejections; after that it stays rejected.
-    stmts.push(env.DB.prepare(
-      `UPDATE tasks SET status = CASE WHEN (SELECT COUNT(*) FROM submissions WHERE task = ?1 AND status = 'rejected') >= 2 THEN 'rejected' ELSE 'ready' END WHERE id = ?1`
-    ).bind(s.task));
-  }
-  stmts.push(eventStmt(env, { type: accept ? 'submission_accepted' : 'submission_rejected', task: s.task, contributor: s.contributor, submission: id, actor: s.reviewer, detail: { note } }));
-  await env.DB.batch(stmts);
   const task = await env.DB.prepare('SELECT status FROM tasks WHERE id = ?1').bind(s.task).first();
   return json({ ok: true, id, decision: accept ? 'accepted' : 'rejected', reviewed_by: s.reviewer, task_status: task.status, receipt: accept ? `/api/receipts` : null, allocation_note: PROVISIONAL_NOTE });
 }
