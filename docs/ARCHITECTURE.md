@@ -44,6 +44,7 @@ Source files:
 | `hub/migrations/0001_initial.sql` | The original tables and the seed. Idempotent, because the live database was made from it by hand |
 | `hub/migrations/0002_hardening.sql` | The `held` task status and `held_reason`, `claims.network`, `submissions.flags` |
 | `hub/migrations/0003_lifecycle_constraints.sql` | The one-outstanding-claim and one-live-submission unique indexes, the `op` columns, and the repair of rows that would break them |
+| `hub/migrations/0004_repair_legacy_states.sql` | Repairs the legacy states 0003 left: `submitted` tasks with nothing to review, and outstanding claims on closed, finished or held tasks |
 | `hub/scripts/deploy.sh`, `review.sh` | The deploy and the reviewer CLI (see [RUNBOOK.md](RUNBOOK.md)) |
 
 ## Data model
@@ -118,7 +119,7 @@ The same transition made twice (a repeat, a stale request, two requests at once)
 |---|---|---|
 | Claim (`claim_task`, `next_task`) | insert the claim; task to `claimed`; `task_claimed` event | the task is `ready`, not held, in an active project; this contributor has handed in nothing on it and nobody has a pending or accepted submission on it; no claim is outstanding on it; the reviewer queue has room; the contributor holds under 2 and the network under 4 active claims. First, `claim()` expires that task's own stale claims, so an expired claim never blocks a new one |
 | Release, expiry | claim to `released` or `expired`; task to `ready`; event | the claim is still outstanding (live for a release, past its 3 hours for an expiry). Expiry transitions each claim on its own |
-| Submit (`submit_work`) | insert the submission; claim to `submitted`; task to `submitted`; `submission_created` event | the claim is outstanding and unexpired; the task has no pending or accepted submission; the contributor has under 20 submissions in the last 24 hours (a rolling window counted inside the insert). When any of these fails, nothing is written and the claim stays usable |
+| Submit (`submit_work`) | insert the submission; claim to `submitted`; task to `submitted`; `submission_created` event | the claim is outstanding and unexpired; the task is `claimed` (by this claim) and not withheld, and has no pending or accepted submission; the contributor has under 20 submissions in the last 24 hours (a rolling window counted inside the insert). When any of these fails, nothing is written and the claim stays usable |
 | Review (`/api/admin/review`) | submission to `accepted` or `rejected`; task to `accepted`, `ready`, or `rejected` after the second reviewer rejection; event | the submission is pending, its task is `submitted`, and, for an accept, the task has no accepted submission |
 
 Database constraints back this up (migration 0003): at most one outstanding claim per task, and at most one pending or
@@ -127,6 +128,9 @@ the older code could have written, without deleting any: extra live submissions 
 accepted duplicate stops counting as accepted, so a task is credited once), extra outstanding claims were closed as
 `released`, and task statuses were made to match the claims and submissions. Each change wrote an event. A
 `system` rejection does not count toward the two-rejection limit.
+Migration 0004 repairs what 0003 left: a `submitted` task with nothing to review goes to `ready` (or `rejected` after two
+reviewer rejections, or `claimed` if someone still holds it), and an outstanding claim on a closed, accepted, rejected
+or held task is closed as `released` without reopening the task; each repair wrote an event.
 
 Retries are safe:
 - `claim_task` for a task you already hold returns that claim.

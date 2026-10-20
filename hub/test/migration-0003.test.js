@@ -35,7 +35,7 @@ let migrations;
 beforeEach(async () => {
   migrations = env.TEST_MIGRATIONS;
   await wipe();
-  await applyD1Migrations(db(), migrations.filter((m) => !m.name.startsWith('0003')));
+  await applyD1Migrations(db(), migrations.filter((m) => /^000[12]/.test(m.name)));
 });
 
 // The damage: every row below is something the older code could write.
@@ -92,7 +92,7 @@ describe('migration 0003 on a database that already has rows', () => {
     };
     await db().batch([db().prepare("INSERT INTO events (ts, type, task, actor) VALUES (1, 'old_event', 1, 'x')")]);
 
-    await applyD1Migrations(db(), migrations); // 0003 on top
+    await applyD1Migrations(db(), migrations.filter((m) => /^000[123]/.test(m.name))); // 0003 on top (0004 has its own test)
 
     // Nothing deleted.
     expect((await one('SELECT COUNT(*) AS n FROM claims')).n).toBe(before.claims);
@@ -163,7 +163,7 @@ describe('migration 0003 on a database that already has rows', () => {
   });
 
   it('enforces both rules afterwards, and an empty database upgrades cleanly', async () => {
-    await applyD1Migrations(db(), migrations);
+    await applyD1Migrations(db(), migrations); // all of them, 0004 included
     const names = (await all("SELECT name FROM sqlite_master WHERE type = 'index'")).map((r) => r.name);
     expect(names).toContain('claims_one_outstanding');
     expect(names).toContain('submissions_one_live');

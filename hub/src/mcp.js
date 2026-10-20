@@ -607,8 +607,9 @@ async function submitWork({ env, args, who }) {
   if (!claim) return submitRefusal(env, who, taskId, { body, sources, flags });
 
   // One transaction: the submission, the claim's move to 'submitted', the task's move to 'submitted' and the event commit
-  // together or not at all. The INSERT runs only while this claim is still outstanding, the task has no pending or
-  // accepted submission and this contributor has fewer than MAX_SUBMISSIONS_PER_CONTRIBUTOR_PER_DAY submissions in the
+  // together or not at all. The INSERT runs only while this claim is still outstanding, the task is 'claimed' and not
+  // withheld (so an outstanding claim left on a closed, held or finished task cannot produce a submission nobody can
+  // review), the task has no pending or accepted submission and this contributor has fewer than MAX_SUBMISSIONS_PER_CONTRIBUTOR_PER_DAY submissions in the
   // last 24 hours (a rolling window, counted inside the INSERT so two concurrent submissions cannot both pass a separate
   // count). When the cap blocks, nothing is written and the claim stays usable. The three later statements run only if
   // that INSERT happened (they find this request's op on the rows it wrote). A failure anywhere leaves the claim exactly
@@ -619,8 +620,9 @@ async function submitWork({ env, args, who }) {
     res = await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO submissions (task, contributor, claim, body, sources, flags, model, tokens_est, created, op)
-         SELECT c.task, c.contributor, c.id, ?4, ?5, ?6, ?7, ?8, ?9, ?10 FROM claims c
+         SELECT c.task, c.contributor, c.id, ?4, ?5, ?6, ?7, ?8, ?9, ?10 FROM claims c JOIN tasks t ON t.id = c.task
          WHERE c.id = ?3 AND c.task = ?1 AND c.contributor = ?2 AND c.outcome IS NULL AND c.expires_at > ?9
+           AND t.status = 'claimed' AND t.held_reason IS NULL
            AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = c.task AND s.status IN ('pending','accepted'))
            AND (SELECT COUNT(*) FROM submissions d WHERE d.contributor = c.contributor AND d.created >= ?9 - 86400000) < ${MAX_SUBMISSIONS_PER_CONTRIBUTOR_PER_DAY}`
       ).bind(taskId, who.id, claim.id, body, JSON.stringify(sources), JSON.stringify(flags), model, tokens, now, op),
@@ -666,7 +668,12 @@ async function submitRefusal(env, who, taskId, { body, sources, flags }) {
   const other = await env.DB.prepare("SELECT id FROM submissions WHERE task = ?1 AND status IN ('pending','accepted')").bind(taskId).first();
   const claim = await env.DB.prepare('SELECT id FROM claims WHERE task = ?1 AND contributor = ?2 AND outcome IS NULL AND expires_at > ?3').bind(taskId, who.id, Date.now()).first();
   if (other && claim) throw new ToolError('Another submission for this task is already waiting for review. Release your claim; this task is no longer open.');
-  if (claim) throw new ToolError('Your claim just changed. Check my_work and try again.');
+  if (claim) {
+    const task = await env.DB.prepare('SELECT status, held_reason FROM tasks WHERE id = ?1').bind(taskId).first();
+    // Only the status, never why a task is withheld. The claim is still yours to release; releasing it does not reopen the task.
+    if (!task || task.held_reason || task.status !== 'claimed') throw new ToolError(`Task ${taskId} is not open for work any more, so nothing can be handed in for it. Release your claim.`);
+    throw new ToolError('Your claim just changed. Check my_work and try again.');
+  }
   throw new ToolError(`You need an active claim on task ${taskId} to submit. Claims last 3 hours; use next_task or claim_task first.`);
 }
 
