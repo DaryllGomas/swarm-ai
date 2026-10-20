@@ -26,7 +26,7 @@
     if (img.complete && img.naturalWidth === 0) fall();
   })();
 
-  // vote donut: the provisional allocation split, from the live numbers. Voting is not open, so nobody has voted yet.
+  // Allocation from the live snapshot; fallback shares stay clearly provisional.
   function donut(list) {
     const seg = $('donut-seg'), key = $('donut-key');
     S.clear(seg); S.clear(key);
@@ -38,7 +38,7 @@
       li.appendChild(S.el('b', null, S.pct(m.voted))); li.appendChild(S.el('span', null, m.name));
       key.appendChild(li);
     });
-    $('donut-svg').setAttribute('aria-label', 'Provisional split of the allocation, not a vote: ' + list.map((m) => m.name + ' ' + S.pct(m.voted)).join(', '));
+    $('donut-svg').setAttribute('aria-label', (list.some((p) => p.provisional) ? 'Provisional allocation: ' : 'Voted allocation: ') + list.map((m) => m.name + ' ' + S.pct(m.voted)).join(', '));
   }
 
   function bar(value, color) {
@@ -83,6 +83,7 @@
       const list = S.projects(stats);
       S.renderStamp($('how-stamp'), stats);
       S.flow($('flow-host'), list, { lite: true, onSelect: (id) => { window.location.href = '/live.html#' + id; } });
+      $('board-note').textContent = stats.allocation_note || 'Voted allocation from the weekly ballot snapshot. Routed and accepted measures show real work separately.';
       board(list);
       donut(list);
       const real = S.renderReceipts($('receipts-host'), rec, { limit: 4 });

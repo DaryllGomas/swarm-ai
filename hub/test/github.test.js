@@ -723,7 +723,7 @@ describe('admin: register and activate a GitHub project', () => {
 describe('the provisional 50/50 allocation', () => {
   it('Town Hall and Swarm AI each hold 50, both provisional', async () => {
     const rows = await env.DB.prepare("SELECT project, share, provisional FROM allocation WHERE week = '2026-10-19' ORDER BY project").all();
-    expect(rows.results).toEqual([{ project: 'swarm-ai', share: 50, provisional: 1 }, { project: 'town-hall', share: 50, provisional: 1 }]);
+    expect(rows.results).toEqual([{ project: 'swarm-ai', share: 5000, provisional: 1 }, { project: 'town-hall', share: 5000, provisional: 1 }]);
     const s = await (await send('/api/stats')).json();
     const by = Object.fromEntries(s.projects.map((p) => [p.id, p]));
     expect(by['town-hall'].allocation).toEqual({ share: 50, provisional: true });

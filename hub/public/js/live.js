@@ -30,7 +30,8 @@
     const why = S.el('div', 'why');
     why.appendChild(S.el('strong', null, 'Where the live numbers stand')); why.appendChild(document.createTextNode(l.gap_reason || 'Routed work is at or near the allocation share.'));
     host.appendChild(why);
-    host.appendChild(S.el('p', 'quiet', 'Voting isn’t open yet, so these shares are provisional.'));
+    if (p.provisional) host.appendChild(S.el('p', 'quiet', 'Provisional fallback: no eligible ballot snapshot has replaced this allocation.'));
+    else host.appendChild(S.el('p', 'quiet', 'Voted allocation from the weekly ballot snapshot.'));
     const q = S.el('p', 'quiet'); q.appendChild(document.createTextNode('Reviewer: ' + l.reviewer + ' · '));
     if (/^https:\/\//.test(l.url || '')) { const a = S.el('a', null, 'Visit ' + p.name); a.href = l.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; q.appendChild(a); }
     host.appendChild(q);

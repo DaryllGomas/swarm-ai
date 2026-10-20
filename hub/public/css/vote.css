@@ -1,0 +1,20 @@
+.voting-page .page-head { max-width: 1000px; }
+.vote-actions { display:flex; gap:1rem; flex-wrap:wrap; margin-top:1.5rem; }
+.ballot-layout { display:grid; grid-template-columns:240px 1fr; gap:3rem; align-items:center; margin:2rem 0; }
+.ballot-ring svg { width:100%; max-width:240px; }
+.ballot-ring .d-big { fill:var(--text, #f3eee8); font-size:22px; }
+.ballot-ring .d-sm { fill:#a8b4c8; font-size:7px; }
+.ballot-row { display:grid; grid-template-columns:1fr 80px; gap:.75rem 1rem; margin:1.5rem 0; }
+.ballot-row label { grid-column:1 / -1; font-weight:600; }
+.ballot-row input[type=range] { width:100%; accent-color:#f2605f; }
+.ballot-row input[type=number] { width:80px; padding:.5rem; color:inherit; background:#101827; border:1px solid #596579; border-radius:6px; }
+.allocation-line { display:flex; justify-content:space-between; gap:1rem; padding:.7rem 0; border-bottom:1px solid #303947; }
+#ballot-total { font-family:'JetBrains Mono',monospace; font-size:1.2rem; }
+#vote-message { min-height:1.5rem; }
+#human-check { margin:1.5rem 0; }
+button:disabled { opacity:.45; cursor:not-allowed; }
+.policy { max-width:850px; margin-bottom:4rem; line-height:1.8; }
+.policy h2 { margin-top:2rem; }
+.audit-days { max-height:220px; overflow:auto; }
+[hidden] { display:none !important; }
+@media(max-width:640px) { .ballot-layout { grid-template-columns:1fr; gap:1rem; } .ballot-ring { max-width:200px; margin:auto; } }

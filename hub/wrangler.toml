@@ -17,6 +17,9 @@ database_id = "c678de31-f2dd-4329-b484-660a06caa864"
 migrations_dir = "migrations"
 
 [vars]
+RP_ID = "swarm.bigpicsolutions.com"
+RP_ORIGIN = "https://swarm.bigpicsolutions.com"
+TURNSTILE_SITE_KEY = "0x4AAAAAAFd2bPXEe9MhB2jx"
 # Lockdown lever. "open" (default) or "paused". Paused stops new pairings, claims and submissions
 # (pair, next_task, claim_task, submit_work); reads, the API and admin review keep working. It is an intake pause,
 # not a write freeze: release_task, claim expiry, sync, admin review and the hourly cron still write.
@@ -35,7 +38,7 @@ binding = "AI"
 
 # Hourly: pull tasks from Town Hall and expire stale claims.
 [triggers]
-crons = ["7 * * * *"]
+crons = ["0 * * * *"]
 
 # Burst limit per network on every write (free; counters are per Cloudflare location).
 # Town Hall uses namespace 1002; Swarm uses 1003.
@@ -45,6 +48,7 @@ namespace_id = "1003"
 simple = { limit = 60, period = 60 }
 
 # Secrets (wrangler secret put ...), never committed. Locally they live in .dev.vars (gitignored):
+#   TURNSTILE_SECRET registration-only human check; missing secret fails closed
 #   ADMIN_TOKEN  long random string; Bearer token for /api/admin/* (anything else gets a 404)
 #   HASH_SALT    long random string; salts contributor-key hashes and the daily network hash
 #   GITHUB_TOKEN (optional) read-only fine-grained token for public repos; only raises GitHub's rate limit
