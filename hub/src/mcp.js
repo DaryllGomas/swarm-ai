@@ -3,6 +3,7 @@
 import {
   CLAIM_TTL_MS, MAX_ACTIVE_CLAIMS, MAX_ACTIVE_CLAIMS_PER_NETWORK, PROVISIONAL_NOTE, STANDING, closeClaimStmts, currentAllocation, eventStmt, expireClaims, newOp, unitsByProject, weekStats,
 } from './core.js';
+import { PrError, checkPrSubmission } from './github.js';
 import { syncIfStale, UNTRUSTED } from './sync.js';
 import { byteLength, clean, iso, ipHashFor, json, readJsonResult, sha256, underRateLimit, weekOf } from './lib.js';
 import { LinkError, screenSources } from './links.js';
@@ -136,7 +137,7 @@ const TOOLS = [
   },
   {
     name: 'submit_work',
-    description: 'Hand in finished work for a task you hold an active claim on. Body up to 20 KB following the task\'s output format; 1 to 30 source links (https) you actually opened. Plain http, IP addresses, link shorteners and punycode hosts are accepted but flagged for the reviewer. It waits for a person to review it; Swarm never publishes it. model and tokens_est are optional self-reported estimates. Needs your key.',
+    description: 'Hand in finished work for a task you hold an active claim on. Body up to 20 KB following the task\'s output format; 1 to 30 source links (https) you actually opened. Plain http, IP addresses, link shorteners and punycode hosts are accepted but flagged for the reviewer. It waits for a person to review it; Swarm never publishes it. model and tokens_est are optional self-reported estimates. For a task on a GitHub project, the first source must be the link to your pull request on that repository (https://github.com/OWNER/REPO/pull/NUMBER), opened from your own GitHub account; the maintainer\'s merge is the review. Needs your key.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -606,6 +607,10 @@ async function submitWork({ env, args, who }) {
   const claim = await env.DB.prepare('SELECT id FROM claims WHERE task = ?1 AND contributor = ?2 AND outcome IS NULL AND expires_at > ?3').bind(taskId, who.id, now).first();
   if (!claim) return submitRefusal(env, who, taskId, { body, sources, flags });
 
+  // A task on a GitHub project is handed in as a pull request: checked against the GitHub API (null for any other task).
+  let pr = null;
+  try { pr = await checkPrSubmission(env, taskId, sources); } catch (err) { if (err instanceof PrError) throw new ToolError(err.message); throw err; }
+
   // One transaction: the submission, the claim's move to 'submitted', the task's move to 'submitted' and the event commit
   // together or not at all. The INSERT runs only while this claim is still outstanding, the task is 'claimed' and not
   // withheld (so an outstanding claim left on a closed, held or finished task cannot produce a submission nobody can
@@ -619,13 +624,13 @@ async function submitWork({ env, args, who }) {
   try {
     res = await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO submissions (task, contributor, claim, body, sources, flags, model, tokens_est, created, op)
-         SELECT c.task, c.contributor, c.id, ?4, ?5, ?6, ?7, ?8, ?9, ?10 FROM claims c JOIN tasks t ON t.id = c.task
+        `INSERT INTO submissions (task, contributor, claim, body, sources, flags, model, tokens_est, created, op, pr_number, pr_author, pr_state, pr_repo_id)
+         SELECT c.task, c.contributor, c.id, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14 FROM claims c JOIN tasks t ON t.id = c.task
          WHERE c.id = ?3 AND c.task = ?1 AND c.contributor = ?2 AND c.outcome IS NULL AND c.expires_at > ?9
            AND t.status = 'claimed' AND t.held_reason IS NULL
            AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = c.task AND s.status IN ('pending','accepted'))
            AND (SELECT COUNT(*) FROM submissions d WHERE d.contributor = c.contributor AND d.created >= ?9 - 86400000) < ${MAX_SUBMISSIONS_PER_CONTRIBUTOR_PER_DAY}`
-      ).bind(taskId, who.id, claim.id, body, JSON.stringify(sources), JSON.stringify(flags), model, tokens, now, op),
+      ).bind(taskId, who.id, claim.id, body, JSON.stringify(sources), JSON.stringify(flags), model, tokens, now, op, pr?.pr_number ?? null, pr?.pr_author ?? null, pr?.pr_state ?? null, pr?.pr_repo_id ?? null),
       env.DB.prepare(
         "UPDATE claims SET outcome = 'submitted', op = ?2 WHERE id = ?1 AND outcome IS NULL AND EXISTS (SELECT 1 FROM submissions WHERE claim = ?1 AND op = ?2)"
       ).bind(claim.id, op),
@@ -679,13 +684,14 @@ async function submitRefusal(env, who, taskId, { body, sources, flags }) {
 
 async function submissionStatus({ env, args, who }) {
   const s = await env.DB.prepare(
-    `SELECT s.id, s.task, t.title, t.units, s.status, s.review_note, s.reviewed_by, s.created, s.reviewed_at
+    `SELECT s.id, s.task, t.title, t.units, s.status, s.review_note, s.reviewed_by, s.created, s.reviewed_at, s.pr_number, s.pr_author, s.pr_state
      FROM submissions s JOIN tasks t ON t.id = s.task WHERE s.id = ?1 AND s.contributor = ?2`
   ).bind(args.id, who.id).first();
   if (!s) throw new ToolError(`You have no submission with id ${clean(args.id, 20)}.`);
   return {
     id: s.id, task_id: s.task, title: s.title, units: s.units, status: s.status,
     review_note: s.review_note, reviewed_by: s.reviewed_by, submitted: iso(s.created), reviewed: iso(s.reviewed_at),
+    ...(s.pr_number ? { pull_request: { number: s.pr_number, author: s.pr_author, state: s.pr_state } } : {}),
     notice: UNTRUSTED,
   };
 }
