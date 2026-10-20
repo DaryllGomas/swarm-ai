@@ -61,7 +61,10 @@ jobs:
           if [ "$EVENT" = pull_request ]; then base=$PR_BASE; fi
           if [ "$EVENT" = push ] && [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ]; then base=$PUSH_BEFORE; fi
           if [ -n "$base" ]; then
-            changed=$(git diff --name-status --no-renames "$base" HEAD -- migrations | grep -v '^A' || true)
+            # A base we can't resolve must fail the job, never read as "no changes".
+            git cat-file -e "$base^{commit}" || { echo "Cannot find the base commit $base to compare migrations against."; exit 1; }
+            diff=$(git diff --name-status --no-renames "$base" HEAD -- migrations)
+            changed=$(printf '%s\n' "$diff" | awk 'NF && $1 != "A"')
             if [ -n "$changed" ]; then echo "Shipped migrations were modified, renamed or deleted:"; echo "$changed"; exit 1; fi
             echo "Only new migration files relative to $base."
           fi
