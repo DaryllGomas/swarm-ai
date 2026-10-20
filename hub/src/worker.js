@@ -142,6 +142,7 @@ async function adminReview(req, env) {
   const id = body.id;
   if (!Number.isInteger(id)) return json({ error: 'id must be a whole number' }, 400);
   if (body.decision !== 'accept' && body.decision !== 'reject') return json({ error: 'decision must be "accept" or "reject"' }, 400);
+  if (body.note !== undefined && typeof body.note !== 'string') return json({ error: 'note must be a string (or left out)' }, 400);
   const note = clean(body.note, 500) || null;
 
   const s = await env.DB.prepare(

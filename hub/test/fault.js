@@ -76,7 +76,7 @@ export function wrapDb(real, hooks = {}) {
     return w;
   };
   return {
-    prepare: (sql) => wrapStmt(real.prepare(sql), sql),
+    prepare: (sql) => { hooks.onPrepare?.(sql); return wrapStmt(real.prepare(sql), sql); },
     async batch(stmts) {
       await hooks.beforeBatch?.(stmts.map((s) => s.__sql ?? ''));
       const mapped = stmts.map((s, i) => {

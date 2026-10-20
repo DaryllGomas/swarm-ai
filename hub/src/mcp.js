@@ -7,6 +7,7 @@ import { syncIfStale, UNTRUSTED } from './sync.js';
 import { byteLength, clean, iso, ipHashFor, json, readJsonResult, sha256, underRateLimit, weekOf } from './lib.js';
 import { LinkError, screenSources } from './links.js';
 import { CLIENT_IDS, normalizeClient, setupGuide } from './setup.js';
+import { validateArgs } from './validate.js';
 
 const MAX_MCP_BODY_BYTES = 64 * 1024; // the 20 KB submission body plus JSON escaping and the rest of the call
 const MAX_BODY_BYTES = 20 * 1024;
@@ -159,6 +160,8 @@ const TOOLS = [
   },
 ];
 
+const SCHEMAS = Object.fromEntries(TOOLS.map((t) => [t.name, t.inputSchema]));
+
 const HANDLERS = {
   how_to_help: async () => HOW_TO_HELP,
   setup_guide: setupGuideTool,
@@ -216,13 +219,14 @@ export async function handleMcp(req, env, ctx) {
         return rpc(id, { tools: TOOLS });
       case 'tools/call': {
         const name = msg.params?.name;
-        const args = msg.params?.arguments ?? {};
+        const args = msg.params?.arguments === undefined ? {} : msg.params.arguments; // missing is {}; an explicit null is not an object
         const handler = typeof name === 'string' && Object.hasOwn(HANDLERS, name) ? HANDLERS[name] : null;
         if (!handler) return rpcError(id, -32602, `Unknown tool: ${clean(name, 60)}`);
-        if (!args || typeof args !== 'object' || Array.isArray(args)) return rpcError(id, -32602, 'arguments must be an object');
+        // The tool's inputSchema is enforced, first: before the pause check, authentication, any database read or any sync.
+        const invalid = validateArgs(SCHEMAS[name], args);
+        if (invalid) return rpcError(id, -32602, `Invalid arguments for ${name}: ${invalid}`);
         try {
           const c = { env, ctx, req, ipHash, args };
-          if ('id' in args && !Number.isInteger(args.id)) throw new ToolError('id must be a whole number.');
           if (env.INTAKE === 'paused' && INTAKE_TOOLS.has(name)) throw new ToolError(PAUSED_MESSAGE);
           if (!PUBLIC_TOOLS.has(name)) c.who = await authenticate(c);
           if (name !== 'how_to_help' && name !== 'setup_guide' && name !== 'pair') {
