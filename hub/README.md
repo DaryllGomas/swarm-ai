@@ -11,7 +11,7 @@ For the plan and the architecture, see [`../docs/PLAN.md`](../docs/PLAN.md) and
 ## Layout
 - `src/worker.js`: routes, public API, admin API, `/setup` and `/llms.txt`, cron.
 - `src/mcp.js`: the MCP tools. `src/core.js`: stats, claims, allocation, task intake. `src/lib.js`: helpers.
-- `src/sync.js`: Town Hall task sync. `src/screen.js`: screening of project text. `src/links.js`: submission link
+- `src/sync.js`: Town Hall task sync. `src/github.js`: the GitHub connector (issues to tasks, pull-request checks, merge = accepted, webhook, project registration). `src/screen.js`: screening of project text. `src/links.js`: submission link
   pre-screen. `src/setup.js`: the set-up guide text.
 - `public/`: plain HTML, CSS and JS with no build step and no framework. `_headers` holds the CSP (self plus Google
   Fonts). Dynamic text is rendered with `textContent`.
@@ -40,6 +40,7 @@ Files in `migrations/` are applied in order by `wrangler d1 migrations apply` (`
   and records it. No one-time manual step is needed.
 - `0002_hardening.sql` adds the `held` task status (rebuilding `tasks`, since SQLite can't change a CHECK), the
   network hash on `claims`, and link flags on `submissions`.
+- `0006_github.sql` adds the GitHub columns, the `github_deliveries` table, the Swarm AI project and a provisional 50/50 allocation.
 - Never edit a migration that has shipped. Every schema change is a new `000N_*.sql`. Test a new one against a copy
   that already has rows in it, because a table rebuild is where migrations go wrong.
 
@@ -68,6 +69,14 @@ hourly cron still write (see `docs/RUNBOOK.md`).
 - `held`: tasks the text screen held back (see below).
 - `sync`: pull tasks from Town Hall now.
 The admin API answers 404 to anything without the right bearer token.
+
+## GitHub connector
+Issues labelled `swarm` (sizes `swarm:1`, `swarm:3`, `swarm:8`, default 3) on a registered public repo become tasks, in the
+same hourly sync as Town Hall. Code tasks are handed in with `submit_work`, with the pull request URL as the first source;
+the hub checks it against the GitHub API by repository id. A merged pull request is accepted, one closed without a merge is
+rejected. It is read-only and works without secrets. Optional secrets: `GITHUB_TOKEN` (rate limit) and
+`GITHUB_WEBHOOK_SECRET` (enables `POST /api/github/webhook`). Tests stub `fetch`; no network is used. See
+[ARCHITECTURE.md](../docs/ARCHITECTURE.md#the-github-connector) and the runbook.
 
 ## Task text screening
 Contributors' AIs read task briefs, so project text is treated as hostile. In `sync.js`, before a task is created or
