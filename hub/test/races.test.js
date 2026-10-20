@@ -221,3 +221,69 @@ describe('finding 1: constraints and review rules', () => {
     expect(await count("SELECT COUNT(*) AS n FROM events WHERE type IN ('submission_accepted','submission_rejected') AND submission = ?1", subId)).toBe(1);
   });
 });
+
+describe('finding 3: the daily submission cap holds under concurrency', () => {
+  const DAY = 86400000;
+  // A contributor with `recent` submissions in the last day and `old` ones from before that, plus two live claims.
+  async function seeded(recent, old = 0) {
+    const user = await newUser();
+    const uid = (await env.DB.prepare('SELECT id FROM contributors WHERE handle = ?1').bind(user.handle).first()).id;
+    const history = await addTask({ status: 'rejected' });
+    const claim = (await env.DB.prepare(
+      "INSERT INTO claims (task, contributor, routed, week, claimed_at, expires_at, outcome) VALUES (?1, ?2, 0, '2026-10-19', ?3, ?3, 'submitted')"
+    ).bind(history, uid, Date.now() - 1000).run()).meta.last_row_id;
+    const rows = [];
+    for (let i = 0; i < recent + old; i++) {
+      rows.push(env.DB.prepare("INSERT INTO submissions (task, contributor, claim, body, sources, status, created) VALUES (?1, ?2, ?3, 'b', '[]', 'rejected', ?4)")
+        .bind(history, uid, claim, i < recent ? Date.now() - 3600000 : Date.now() - DAY - 3600000));
+    }
+    if (rows.length) await env.DB.batch(rows);
+    const [t1, t2] = [await addTask(), await addTask()];
+    expect((await user.call('claim_task', { id: t1 })).isError).toBe(false);
+    expect((await user.call('claim_task', { id: t2 })).isError).toBe(false);
+    return { user, uid, t1, t2 };
+  }
+  const inWindow = (uid) => count('SELECT COUNT(*) AS n FROM submissions WHERE contributor = ?1 AND created >= ?2', uid, Date.now() - DAY);
+  const submitTo = (u, id, over) => u.call('submit_work', { task_id: id, body: BODY, sources: [SOURCE] }, over ? { over } : {});
+
+  it('two submissions that both saw 19 in the window: exactly one gets in, and the other claim stays usable', async () => {
+    const { user, uid, t1, t2 } = await seeded(19);
+    const wait = rendezvous(2, 500);
+    const slow = () => wrapDb(env.DB, { afterRead: async (sql) => { if (/COUNT\(\*\) AS n FROM submissions WHERE contributor = \?1 AND created >= /.test(sql)) await wait(); } });
+    const [a, b] = await Promise.all([submitTo(user, t1, slow()), submitTo(user, t2, slow())]);
+    expect([a, b].filter((r) => !r.isError)).toHaveLength(1);
+    const refused = [a, b].find((r) => r.isError);
+    expect(refused.text).toMatch(/Daily submission limit/);
+    expect(await inWindow(uid)).toBe(20);
+
+    // The refused submission consumed nothing: its claim is still live and its task still claimed.
+    const lostTask = a.isError ? t1 : t2;
+    expect(await outstanding(lostTask)).toBe(1);
+    expect((await taskRow(lostTask)).status).toBe('claimed');
+    expect(await eventCount('submission_created', lostTask)).toBe(0);
+
+    // Once the window has room again (an old submission ages out), the same claim submits.
+    await env.DB.prepare('UPDATE submissions SET created = ?2 WHERE id = (SELECT MIN(id) FROM submissions WHERE contributor = ?1)').bind(uid, Date.now() - DAY - 1000).run();
+    expect((await submitTo(user, lostTask)).isError).toBe(false);
+    expect(await inWindow(uid)).toBe(20);
+  });
+
+  it('the window is rolling: submissions older than a day do not count, and the 21st within a day is refused', async () => {
+    const { user, uid, t1, t2 } = await seeded(19, 10);
+    expect((await submitTo(user, t1)).isError).toBe(false); // the 20th in the window
+    const over = await submitTo(user, t2);
+    expect(over.isError).toBe(true);
+    expect(over.text).toMatch(/Daily submission limit/);
+    expect(await inWindow(uid)).toBe(20);
+    expect(await outstanding(t2)).toBe(1);
+  });
+
+  it('other contributors are not affected by one contributor\'s cap', async () => {
+    const { t1 } = await seeded(20);
+    const other = await newUser();
+    const t = await addTask();
+    await other.call('claim_task', { id: t });
+    expect((await submitTo(other, t)).isError).toBe(false);
+    expect(t1).toBeTruthy();
+  });
+});

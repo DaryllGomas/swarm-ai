@@ -600,13 +600,14 @@ async function submitWork({ env, args, who }) {
   const now = Date.now();
   const claim = await env.DB.prepare('SELECT id FROM claims WHERE task = ?1 AND contributor = ?2 AND outcome IS NULL AND expires_at > ?3').bind(taskId, who.id, now).first();
   if (!claim) return submitRefusal(env, who, taskId, { body, sources, flags });
-  const day = await env.DB.prepare('SELECT COUNT(*) AS n FROM submissions WHERE contributor = ?1 AND created >= ?2').bind(who.id, now - 86400000).first();
-  if (day.n >= MAX_SUBMISSIONS_PER_CONTRIBUTOR_PER_DAY) throw new ToolError('Daily submission limit reached. Try again tomorrow.');
 
   // One transaction: the submission, the claim's move to 'submitted', the task's move to 'submitted' and the event commit
-  // together or not at all. The INSERT runs only while this claim is still outstanding and the task has no pending or
-  // accepted submission; the three later statements run only if that INSERT happened (they find this request's op on the
-  // rows it wrote). A failure anywhere leaves the claim exactly as it was, so a retry can submit.
+  // together or not at all. The INSERT runs only while this claim is still outstanding, the task has no pending or
+  // accepted submission and this contributor has fewer than MAX_SUBMISSIONS_PER_CONTRIBUTOR_PER_DAY submissions in the
+  // last 24 hours (a rolling window, counted inside the INSERT so two concurrent submissions cannot both pass a separate
+  // count). When the cap blocks, nothing is written and the claim stays usable. The three later statements run only if
+  // that INSERT happened (they find this request's op on the rows it wrote). A failure anywhere leaves the claim exactly
+  // as it was, so a retry can submit.
   const op = newOp();
   let res;
   try {
@@ -615,7 +616,8 @@ async function submitWork({ env, args, who }) {
         `INSERT INTO submissions (task, contributor, claim, body, sources, flags, model, tokens_est, created, op)
          SELECT c.task, c.contributor, c.id, ?4, ?5, ?6, ?7, ?8, ?9, ?10 FROM claims c
          WHERE c.id = ?3 AND c.task = ?1 AND c.contributor = ?2 AND c.outcome IS NULL AND c.expires_at > ?9
-           AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = c.task AND s.status IN ('pending','accepted'))`
+           AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = c.task AND s.status IN ('pending','accepted'))
+           AND (SELECT COUNT(*) FROM submissions d WHERE d.contributor = c.contributor AND d.created >= ?9 - 86400000) < ${MAX_SUBMISSIONS_PER_CONTRIBUTOR_PER_DAY}`
       ).bind(taskId, who.id, claim.id, body, JSON.stringify(sources), JSON.stringify(flags), model, tokens, now, op),
       env.DB.prepare(
         "UPDATE claims SET outcome = 'submitted', op = ?2 WHERE id = ?1 AND outcome IS NULL AND EXISTS (SELECT 1 FROM submissions WHERE claim = ?1 AND op = ?2)"
@@ -654,6 +656,8 @@ async function submitRefusal(env, who, taskId, { body, sources, flags }) {
     if (live.body === body && live.sources === JSON.stringify(sources)) return submitResult(live.id, live.status, flags, { already_received: true });
     throw new ToolError(`You already have a ${live.status} submission (${live.id}) for this task.`);
   }
+  const day = await env.DB.prepare('SELECT COUNT(*) AS n FROM submissions WHERE contributor = ?1 AND created >= ?2').bind(who.id, Date.now() - 86400000).first();
+  if (day.n >= MAX_SUBMISSIONS_PER_CONTRIBUTOR_PER_DAY) throw new ToolError('Daily submission limit reached. Try again tomorrow.');
   const other = await env.DB.prepare("SELECT id FROM submissions WHERE task = ?1 AND status IN ('pending','accepted')").bind(taskId).first();
   const claim = await env.DB.prepare('SELECT id FROM claims WHERE task = ?1 AND contributor = ?2 AND outcome IS NULL AND expires_at > ?3').bind(taskId, who.id, Date.now()).first();
   if (other && claim) throw new ToolError('Another submission for this task is already waiting for review. Release your claim; this task is no longer open.');
