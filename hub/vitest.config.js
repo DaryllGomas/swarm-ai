@@ -10,6 +10,7 @@ export default defineConfig(async () => {
     plugins: [
       cloudflareTest({
         main: './src/worker.js',
+        remoteBindings: false, // AI is stubbed per test; never open a remote proxy or require a token.
         wrangler: { configPath: './wrangler.toml' },
         miniflare: {
           d1Databases: ['MIG_DB'], // a scratch database for the migration upgrade tests (the tests build it from the migrations)

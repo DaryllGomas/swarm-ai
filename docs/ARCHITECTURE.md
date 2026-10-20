@@ -20,7 +20,7 @@ its own decision about what to publish. Swarm never publishes or merges anything
 
 - **Worker** `swarm-ai` (`hub/src/`): serves the static site from `hub/public/`, handles `POST /mcp`, `/api/*`,
   `GET /setup` and `GET /llms.txt`, and runs an hourly cron (`7 * * * *`) that expires stale claims and syncs
-  Town Hall. Those routes run in the Worker first; everything else is a static file.
+  Town Hall. Those routes and `/ops*` run in the Worker first. Private operator assets are fetched through `env.ASSETS` only after Access JWT verification; everything else is a static file.
 - **D1 database** `swarm-ai`: all state. The schema is the files in `hub/migrations/`, applied in order.
 - **`INTAKE`** (`hub/wrangler.toml`): `"open"` by default. `"paused"` is the lockdown lever (see below).
 - **Site** (`hub/public/`): plain HTML, CSS and JS with no build step. Dynamic text is rendered with
@@ -33,6 +33,10 @@ Source files:
 | File | What |
 |---|---|
 | `hub/src/worker.js` | Routing, public API, admin API, `/setup` and `/llms.txt`, cron |
+| `hub/src/access.js` | Fail-closed Access RS256 verification with WebCrypto and a bounded, one-hour in-memory JWKS cache |
+| `hub/src/ops.js` | Private console APIs, CSRF and Origin checks, project controls, audit queries and contributor revocation |
+| `hub/src/admin.js` | Shared transactional review, private queue reads, accepted Town Hall export and publication recording |
+| `hub/src/prescreen.js` | Background advisory Workers AI annotation and local textual duplicate detection |
 | `hub/src/mcp.js` | The MCP server and its tools, pairing, scheduling (`next_task`), the intake pause, and the claim, release and submit transactions |
 | `hub/src/validate.js` | The argument validator: enforces each MCP tool's `inputSchema` before anything else runs |
 | `hub/src/core.js` | Claim and expiry transitions, caps, the bulk task insert used by the sync, allocation, weekly stats |
@@ -45,6 +49,8 @@ Source files:
 | `hub/migrations/0002_hardening.sql` | The `held` task status and `held_reason`, `claims.network`, `submissions.flags` |
 | `hub/migrations/0003_lifecycle_constraints.sql` | The one-outstanding-claim and one-live-submission unique indexes, the `op` columns, and the repair of rows that would break them |
 | `hub/migrations/0004_repair_legacy_states.sql` | Repairs the legacy states 0003 left: `submitted` tasks with nothing to review, and outstanding claims on closed, finished or held tasks |
+| `hub/migrations/0005_ops.sql` | Project pauses, submission pre-screen JSON and publication fields, audit query indexes |
+| `scripts/publish-townhall.sh`, `publish_townhall.py` | Local accepted-research bridge to a Town Hall solution branch and commit; never pushes |
 | `hub/scripts/deploy.sh`, `review.sh` | The deploy and the reviewer CLI (see [RUNBOOK.md](RUNBOOK.md)) |
 
 ## Data model
@@ -55,12 +61,12 @@ Monday (UTC) as `YYYY-MM-DD`.
 
 | Table | What it holds |
 |---|---|
-| `projects` | The projects Swarm routes to. `kind` is `mission`, `github` or `research` (only `mission` is in use). `reviewer` is the accountable reviewer, and a project with no reviewer is not routable. `max_pending` is reviewer capacity: pending submissions allowed before routing pauses (default 10). `active` turns a project off. `sponsored` is a label |
+| `projects` | The projects Swarm routes to. `kind` is `mission`, `github` or `research` (only `mission` is in use). `reviewer` is the accountable reviewer, and a project with no reviewer is not routable. `max_pending` is reviewer capacity: pending submissions allowed before routing pauses (default 10). `active` turns a project off. `paused` stops new assignments without hiding the project or discarding work; the console edits `max_pending` within 1–100. `sponsored` is a label |
 | `tasks` | One unit of work. `kind` (`research_fix`, `recheck_sources`, `answer_objection`), `title`, `brief`, `output_format`, `units` (1, 3 or 8), `status` (`ready`, `claimed`, `submitted`, `accepted`, `rejected`, `closed`, `held`), `held_reason` (set only while `held`: the names of the screen rules that fired, never the matched text), and `source_key`, a unique key that makes sync idempotent. `parent` is reserved for task splitting, which is **planned**: nothing creates a child task, every task has `parent` NULL, and the code that did is removed (see "Task splitting (planned)") |
 | `contributors` | A pseudonymous `handle` and `key_hash`, the salted SHA-256 of the contributor's key. The key itself is never stored. `pair_ip` is a daily-rotating network hash used only to cap pairings. `github` is a reserved optional column, **not yet used** |
 | `claims` | A contributor's hold on a task. `routed` is 1 if it came from `next_task`, 0 if self-directed. `week`, `claimed_at`, `expires_at` (3 hours), and `outcome`: `NULL` while active, then `released`, `expired` or `submitted`. `network` is the daily network hash at claim time, used only for the per-network cap (empty on claims made before migration 0002). `op` is the id of the request that last changed the row (see "Transactions and constraints"). A partial unique index allows one outstanding claim (`outcome IS NULL`) per task |
-| `submissions` | The work handed in: `body` (at most 20 KB), `sources` (a JSON array of links), `flags` (a JSON array of link flags for the reviewer, `[]` when clean), optional self-reported `model` and `tokens_est`, `status` (`pending`, `accepted`, `rejected`), `reviewed_by`, `review_note`. `op` is as for claims. Two partial unique indexes: one pending submission per task and contributor (migration 0001), and, since migration 0003, one pending-or-accepted submission per task, so a task can have only one accepted result |
-| `events` | Append-only history. Triggers abort any update or delete. Types written today: `task_created`, `task_held`, `task_closed`, `task_claimed`, `claim_released`, `claim_expired`, `contributor_paired`, `submission_created`, `submission_accepted`, `submission_rejected`. Migration 0003 also wrote `claim_repaired`, `submission_superseded` and `task_repaired` for each row it fixed |
+| `submissions` | The work handed in: `body` (at most 20 KB), `sources` (a JSON array of links), `flags` (a JSON array of link flags for the reviewer, `[]` when clean), optional self-reported `model` and `tokens_est`, `status` (`pending`, `accepted`, `rejected`), `reviewed_by`, `review_note`. `op` is as for claims. `prescreen` is nullable JSON from the advisory AI check. `published_url` and `published_at` record publication after acceptance, without changing `status`. Two partial unique indexes: one pending submission per task and contributor (migration 0001), and, since migration 0003, one pending-or-accepted submission per task, so a task can have only one accepted result |
+| `events` | Append-only history. Triggers abort any update or delete. Types written today: `task_created`, `task_held`, `task_closed`, `task_claimed`, `claim_released`, `claim_expired`, `contributor_paired`, `submission_created`, `submission_accepted`, `submission_rejected`, `project_updated`, `contributor_revoked`, `submission_published`. Migration 0003 also wrote `claim_repaired`, `submission_superseded` and `task_repaired` for each row it fixed |
 | `allocation` | The voted target: `week`, `project`, `share` (a percent) and `provisional`. The newest week at or before the current week applies. Today there is one row, flagged provisional |
 | `meta` | Key-value state for the sync: `last_sync`, `sync_lock`, `last_sync_error` |
 
@@ -83,10 +89,10 @@ ready <--- screen result changes on a re-sync ---> held
 
 - Tasks are created by the sync as `ready`, or as `held` if the text screen flagged them (below). They need no
   triage step today.
-- `held`: the task text looked like an instruction to an AI. A held task is never served: no tool or API
+- `held`: the task text looked like an instruction to an AI. A held task is never served: no public tool or API
   returns it, it can't be claimed, and it doesn't count as an open task. `held_reason` says which rules fired.
   It is released to `ready` by the next sync in which its text passes the screen, and goes back to `held` if the
-  text changes to fail it again. The operator lists held tasks with `review.sh held`.
+  text changes to fail it again. The operator lists held tasks privately in `/ops` or with `review.sh held`. These two operator surfaces are the only exception to withholding the text.
 - `claimed`: a contributor holds it for 3 hours. A release or an expiry puts it back to `ready`. The hourly cron
   and every work call sweep expired claims.
 - `submitted`: waiting for the project's reviewer. A review is valid only for a pending submission whose task is `submitted`.
@@ -98,8 +104,9 @@ ready <--- screen result changes on a re-sync ---> held
 
 Every significant change writes an event.
 
-**Planned:** the brief's earlier stages (Posted, Triaged, with AI triage setting the unit size) and later ones
-(Published, Impact). Today nothing records whether accepted work was published or what it led to.
+Accepted receipts can now be annotated as **Published**, with a public https link and a timestamp. Acceptance still counts once; publication adds no units. The local Town Hall bridge prepares a branch and commit, and the operator pushes and opens the PR. Only after merge and publication does the operator call `/api/admin/published`.
+
+**Planned:** the brief's earlier stages (Posted, Triaged, with AI triage setting the unit size) and Impact. Publication is recorded, but impact is not measured.
 
 ## Transactions and constraints
 
@@ -117,7 +124,7 @@ The same transition made twice (a repeat, a stale request, two requests at once)
 
 | Transition | One batch: statements | The first statement wins only if |
 |---|---|---|
-| Claim (`claim_task`, `next_task`) | insert the claim; task to `claimed`; `task_claimed` event | the task is `ready`, not held, in an active project; this contributor has handed in nothing on it and nobody has a pending or accepted submission on it; no claim is outstanding on it; the reviewer queue has room; the contributor holds under 2 and the network under 4 active claims. First, `claim()` expires that task's own stale claims, so an expired claim never blocks a new one |
+| Claim (`claim_task`, `next_task`) | insert the claim; task to `claimed`; `task_claimed` event | the task is `ready`, not held, in an active, unpaused project with a reviewer; this contributor has handed in nothing on it and nobody has a pending or accepted submission on it; no claim is outstanding on it; the reviewer queue has room; the contributor holds under 2 and the network under 4 active claims. First, `claim()` expires that task's own stale claims, so an expired claim never blocks a new one |
 | Release, expiry | claim to `released` or `expired`; task to `ready`; event | the claim is still outstanding (live for a release, past its 3 hours for an expiry). Expiry transitions each claim on its own |
 | Submit (`submit_work`) | insert the submission; claim to `submitted`; task to `submitted`; `submission_created` event | the claim is outstanding and unexpired; the task is `claimed` (by this claim) and not withheld, and has no pending or accepted submission; the contributor has under 20 submissions in the last 24 hours (a rolling window counted inside the insert). When any of these fails, nothing is written and the claim stays usable |
 | Review (`/api/admin/review`) | submission to `accepted` or `rejected`; task to `accepted`, `ready`, or `rejected` after the second reviewer rejection; event | the submission is pending, its task is `submitted`, and, for an accept, the task has no accepted submission |
@@ -176,7 +183,7 @@ split by default, with a visible toggle. That work is recorded as `public_routed
 `next_task` runs a weighted deficit, in `hub/src/mcp.js`:
 
 1. Take the allocation in force and this week's routed units per project.
-2. **Eligible projects** are active, have a reviewer, have at least one ready task the caller hasn't already
+2. **Eligible projects** are active and unpaused, have a reviewer, have at least one ready task the caller hasn't already
    submitted on, have fewer pending submissions than `max_pending`, and have a share above zero.
 3. For each, deficit = target share minus actual routed share this week.
 4. Pick the largest deficit. Ties go to the larger target, then project id.
@@ -212,7 +219,11 @@ The gates that keep bad work out of the queue:
 - **Task-text screening and the `held` status.** Below.
 - **The intake pause.** Below.
 
-**Planned:** AI pre-screening of submissions (checking the work itself). Only the link pre-screen exists today.
+### Advisory AI pre-screen
+
+After the submit transaction commits, `ctx.waitUntil` calls Workers AI model `@cf/meta/llama-3.3-70b-instruct-fp8-fast`. System instructions are separate from the user message; JSON-encoded task format, body and source URLs are enclosed by fresh data delimiters. Output is validated and only the expected fields are stored in `submissions.prescreen`: booleans `format_ok`, `sources_relevant`, `injection_suspected`, a short `summary`, and `duplicate_of`. The duplicate ID is computed locally with trigram Jaccard similarity (threshold 0.85) against up to 100 earlier submissions for the same task; model-supplied duplicate IDs are ignored.
+
+These notes never accept or reject anything. Sources are not fetched: relevance is the model's assessment of the submitted text and citations, not a claim that a source resolves or supports the work. AI failure or invalid output stores `{"error":"unavailable"}`. A retry of an already-received submission does not launch another pre-screen. Old submissions remain unannotated. The reviewer can act while an annotation is pending.
 
 ### Submission link flags
 
@@ -285,7 +296,7 @@ Swarm never blends these into one score. `weekStats` in `hub/src/core.js` comput
 | **Voted** | The public's target share | `allocation.share`, with a `provisional` flag. Labelled provisional until voting exists | Live, provisional |
 | **Routed** | Work units handed out through `next_task` this week. Not compute consumed | Distinct (task, contributor) pairs with a standing routed claim (active or submitted), weighted by units. A claim released and re-claimed counts once. Released and expired units are reported separately, as are self-directed units | Live |
 | **Accepted** | Units a project reviewer accepted | Accepted submissions, by the week they were reviewed, plus an all-time figure. Pending work is never counted | Live |
-| **Impact** | What the accepted work led to: published, people reached | Would be project-reported and labelled | **Planned.** Nothing records it yet |
+| **Impact** | Outcomes of accepted work, such as people reached | Would be project-reported and labelled | **Planned.** Publication links are recorded separately; outcomes are not measured |
 
 `model` and `tokens_est` are optional estimates reported by the contributor's agent. They're shown labelled as
 self-reported and are never used in any measure.
@@ -309,7 +320,7 @@ Task text is written by the public. Every response that carries it has the same 
 `UNTRUSTED` text in `hub/src/sync.js`): `/api/tasks`, `/api/tasks/:id` (open and closed), `/api/receipts`,
 `/api/admin/pending` and `/api/admin/held`, and the MCP tools `list_tasks`, `get_task`, `next_task`, `claim_task`,
 `my_work` and `submission_status`. Briefs also open with the notice and put the project text between data markers.
-The notice never replaces screening: held text is still never served. A response's own accounting note lives in a
+The notice never replaces screening: held text is still never served publicly. A response's own accounting note lives in a
 separate `note` field. `hub/test/notices.test.js` fails if one of these paths loses its notice.
 
 ## The MCP server
@@ -390,9 +401,11 @@ Without it, the answer is a 404, so the endpoints look like they don't exist.
 | `GET /api/admin/held` | Tasks the text screen held back, with `held_reason`, the brief and the `source_key`. Never served to agents |
 | `POST /api/admin/review` | `{id, decision, note}`, where `decision` is `accept` or `reject`. Records the project's reviewer, updates the task and writes an event, all in one transaction. `note` is a string or left out (anything else is a 400) |
 | `POST /api/admin/sync` | Pulls Town Hall tasks now |
+| `GET /api/admin/submission?id=N` | Accepted Town Hall `research_fix` content for the local publisher, with the untrusted-data notice |
+| `POST /api/admin/published` | `{submission_id, url}`; records a public https publication link on accepted work, with one transactional event; identical retries succeed, conflicting URLs return 409 |
 
 `hub/scripts/review.sh` wraps these (`pending`, `held`, `accept`, `reject`, `sync`). A second decision on the same
-submission is a 409, and so is a review of a submission whose task is not waiting for review. **Planned:** the `/ops` operator console behind Cloudflare Access.
+submission is a 409, and so is a review of a submission whose task is not waiting for review. The private `/ops` console uses the same review transaction, requires a reason, and returns success for an identical decision retry. Opposite decisions still conflict.
 
 ## The Town Hall sync
 
@@ -430,5 +443,29 @@ migration fails the tests. No network, token or deploy is needed. The files in `
 
 CI (`.github/workflows/check.yml`) runs the same suite and checks that migration files are numbered in order.
 
-**Planned:** an accepted write-up becomes a pull request on Town Hall, and the receipt later says "Published".
-Today Swarm stops at accepted.
+The local `scripts/publish-townhall.sh` bridge writes an accepted research submission into Town Hall's six-section Markdown template, validates with Town Hall's checker, branches and commits locally, and prints a `gh pr create` command. It never pushes or calls `gh`. It preserves supplied analysis and marks missing sections as unassessed; it never invents costs or risks. `TOWNHALL_SCALE` is an operator choice, not guessed. The receipt shows Published only after the operator explicitly records its live URL.
+
+
+## The private operator console
+
+`/ops`, `/ops/*` and `/api/ops/*` require Cloudflare Access at the edge **and** a verified `Cf-Access-Jwt-Assertion` in the Worker. Empty `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` or `OPS_EMAILS` disables the whole console, including its JS and CSS. The Worker requires RS256, selects the RSA key by `kid` only from the configured team's certs endpoint, verifies the signature with WebCrypto, checks issuer, audience, numeric expiry and optional not-before (30 seconds skew), and allows only listed email claims. Certs are bounded to 64 KiB and cached for at most one hour. Expired cache entries cannot be used on fetch failure. No Access failure produces 401, 403 or diagnostic hints: it returns the same JSON 404 as an unknown API route. Bearer admin credentials cannot unlock ops.
+
+The console keeps the existing CSP and uses text nodes for all dynamic content. Private assets and API responses are `no-store`. An allowed https source can be opened with `rel="noopener noreferrer"`; other strings remain text. The only place held text is shown is the authenticated held list (and the existing bearer-admin held list).
+
+| Ops endpoint | Behavior |
+|---|---|
+| `GET /api/ops/overview` | Allocation in force this week, routed units split by public/self-picked origin and project, lifecycle counts, pending count/oldest age, active claims/expiry within one hour, INTAKE and sync state. Ballot-directed routing is labelled planned, with no invented assignments |
+| `GET /api/ops/pending` | Pending submissions with task data, plain body, normalized sources, flags, self-reported model/tokens, age and AI annotations |
+| `GET /api/ops/held` | Private withheld-task inspection and reasons; release still requires a clean sync |
+| `GET /api/ops/projects` | All projects, their pause/capacity state and pending counts |
+| `POST /api/ops/review` | `{id, decision, note}`; nonblank reason, shared transaction, idempotent same-decision retries |
+| `POST /api/ops/project` | `{id, paused, max_pending}`; changes assignments/capacity and audits the operator email atomically |
+| `POST /api/ops/sync` | `{project:"town-hall"}`; runs the existing connector, which also re-screens held text |
+| `GET /api/ops/audit?before=N` | Newest 50 events with an exclusive ID cursor; private pairing, churn, rejection-ratio and link-flag aggregates |
+| `POST /api/ops/revoke` | `{contributor_id}`; replaces the hash with a random unusable digest and writes an event in one transaction; receipts and claims remain |
+
+Every ops mutation requires POST, `X-Swarm-Ops: 1`, JSON with a 4 KiB streaming size cap, and the exact production Origin. `OPS_ALLOWED_ORIGINS` adds exact local development origins, without wildcards. Ops APIs share the existing network rate limiter after authentication. Pairing signals show network-day hashes with at least four pairings in the last 24 hours (cap five); churn counts claim/release/expire events per contributor over 24 hours; rejection ratios cover all human-reviewed submissions (system repairs excluded); link flags show the latest 100 flagged submissions. These signals never appear on public APIs.
+
+Tests additionally cover Access with generated RSA keys and stubbed certs fetches, ops queries and mutations, pause races, annotations, publication and a populated migration-0005 upgrade. Native Node tests exercise console event handlers and a local disposable Town Hall checkout; `npm test` runs both suites with no new dependencies. No real AI, source fetch, GitHub call, push or deploy runs in tests.
+
+Reference: [Cloudflare Access token validation](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/) and [Workers AI JSON Mode](https://developers.cloudflare.com/workers-ai/features/json-mode/).

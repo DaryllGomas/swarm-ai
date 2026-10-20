@@ -9,7 +9,8 @@ For the plan and the architecture, see [`../docs/PLAN.md`](../docs/PLAN.md) and
 [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md). For operations, see [`../docs/RUNBOOK.md`](../docs/RUNBOOK.md).
 
 ## Layout
-- `src/worker.js`: routes, public API, admin API, `/setup` and `/llms.txt`, cron.
+- `src/worker.js`: routing, public API, `/setup`, `/llms.txt` and cron. `src/admin.js`: bearer admin API and shared transactional review.
+- `src/access.js`: Access JWT verification. `src/ops.js`: private operator APIs. `src/prescreen.js`: advisory Workers AI annotations.
 - `src/mcp.js`: the MCP tools. `src/core.js`: stats, claims, allocation, task intake. `src/lib.js`: helpers.
 - `src/sync.js`: Town Hall task sync. `src/screen.js`: screening of project text. `src/links.js`: submission link
   pre-screen. `src/setup.js`: the set-up guide text.
@@ -28,8 +29,8 @@ Local dev fetches the real Town Hall feed. To reset the local database: `rm -rf 
 ## Test
     npm test
 Runs the whole suite inside workerd (the real Workers runtime) with a local D1 database. The migrations are applied
-for real before every test file, so a broken migration fails the tests. No network, no token and no deploy needed.
-The tests use `@cloudflare/vitest-plugin` with a matching `vitest`; both are pinned in `package.json`.
+for real before every test file, so a broken migration fails the tests. No network, no token and no deploy needed. Workers AI and certs fetches are stubbed; remote bindings are disabled in the test runner. Native Node tests also exercise the console controls and local publisher (Python 3 and git required).
+The Worker tests use `@cloudflare/vitest-plugin` with a matching `vitest`; both are pinned in `package.json`.
 
 ## Database migrations
 Files in `migrations/` are applied in order by `wrangler d1 migrations apply` (`migrations_dir` is set in
@@ -78,7 +79,7 @@ updated, everything from outside goes through `src/screen.js`:
 - URLs, bare domains, emails and `@handles` are stripped.
 - Injection-like text ("ignore previous instructions", "you are now", "system prompt", "run this command", curl or
   wget pipes, base64 blobs, requests for keys, and so on) makes the whole task **held**. A held task is never served
-  by any tool or API, and is listed at `GET /api/admin/held` (`review.sh held`) with its reason. If its issue then
+  by any public tool or API, and is listed at `GET /api/admin/held` (`review.sh held`) with its reason. If its issue then
   disappears and sync closes it, it keeps its `held_reason`, so its text stays withheld for good. Closed tasks show
   title and status only, never a brief.
 - Briefs start with the untrusted-data notice, then the project text between `BEGIN PROJECT DATA` and
@@ -104,3 +105,20 @@ optionally offers a weekly run through the app's own scheduler. `?client=claude-
 `codex`, `cursor`, `other`) tailors it. The MCP tool `setup_guide` returns the same text. The guide contains one shell
 command, the documented Claude Code `claude mcp add ...`, shown to the user for approval, and never asks for a
 download. Keep it in step with the steps in `public/js/common.js`; tests check both rules.
+
+
+## Private operator console
+
+Open `/ops` after the maintainer has configured Access and deployed migration `0005_ops.sql`. It has the weekly overview, review queue with AI notes, held-task re-screening, project pauses/capacity, a paged audit, private abuse signals and key revocation. Reviews require a reason; same-decision retries succeed without another event. The CLI keeps its existing bearer token and 409-on-repeat behavior.
+
+All `/ops*` assets run through the Worker first and are served only after verifying Access's JWT with WebCrypto. Set `ACCESS_TEAM_DOMAIN` (hostname only), `ACCESS_AUD` and comma-separated `OPS_EMAILS` in `[vars]`; the committed empty defaults fail closed with 404. Configure the **same self-hosted Access application** for `swarm.bigpicsolutions.com/ops*` and `swarm.bigpicsolutions.com/api/ops/*`, using its AUD tag. Full instructions are in [RUNBOOK.md](../docs/RUNBOOK.md#operator-console).
+
+Ops writes need JSON, `X-Swarm-Ops: 1`, and the exact production Origin. For local development, `OPS_ALLOWED_ORIGINS` can list exact origins such as `http://localhost:8787`. It does not bypass JWT verification. Never put an Access signing key or an admin token in browser code.
+
+The `[ai]` binding is named `AI`. Each new submission launches an advisory pre-screen after commit through `ctx.waitUntil`; the fixed Llama model checks format, apparent citation relevance and suspected injection. A textual duplicate check supplies `duplicate_of`. Neither the model nor the duplicate check makes a review decision, and no source links are fetched. Failed AI checks are recorded as unavailable. Local `wrangler dev` with the AI binding can use remote Workers AI; tests explicitly disable remote bindings and stub `env.AI`.
+
+## Town Hall publication
+
+From the repository root, run `TOWNHALL_SCALE=community scripts/publish-townhall.sh <submission_id>` after choosing the actual scale (`individual`, `community`, `business`, `state` or `federal`). `TOWNHALL_REPO` defaults to `~/Projects/tools/town-hall`; `SWARM_URL` and `SWARM_ADMIN_TOKEN_FILE` work as in the reviewer CLI. The helper fetches accepted Town Hall research, writes a solution using Town Hall's template, validates it with that checkout's checker, then creates a local branch and commit using the configured owner noreply identity. It prints the PR command and never pushes. Missing analysis is labelled for operator completion. Review and amend the draft before pushing and opening the PR yourself.
+
+After it merges and is live, `POST /api/admin/published` with `{ "submission_id": 123, "url": "https://townhall.bigpicsolutions.com/…" }` and bearer admin authentication records the publication. The public receipts API and site then show Published with that link. Acceptance and its credited units remain unchanged. This local publication step is deliberately separate from the private browser console.

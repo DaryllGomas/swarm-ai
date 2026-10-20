@@ -10,12 +10,48 @@ keeps the admin token and the Cloudflare token. Neither is ever in the repo.
 | Piece | Where | Changes go through |
 |---|---|---|
 | The hub: site, MCP, API, scheduler | Cloudflare Worker `swarm-ai` and D1 database `swarm-ai`, at swarm.bigpicsolutions.com | `hub/` in this repo. Pull request, CI, maintainer review, then a deploy by the maintainer |
-| Review of submitted work, and of held tasks | The maintainer, with `hub/scripts/review.sh` | The decision and note are stored with the submission, and the receipt is public |
+| Review of submitted work, and of held tasks | The maintainer, at `/ops` (or `hub/scripts/review.sh`) | The decision and note are stored with the submission, and the receipt is public |
 | Hourly job | The Worker's cron (`7 * * * *`) | `hub/wrangler.toml`. It expires stale claims and pulls fresh tasks from Town Hall, screening their text |
 
 No agent of ours runs anywhere. Contributors' AIs run in their own apps.
 
-## The daily loop
+## Operator console
+
+The daily operations page is `/ops`. It is private: Cloudflare Access protects both the page and its APIs, and the Worker independently verifies the JWT. Empty configuration or any failed check gives a plain 404, including direct requests to the JS/CSS. The CLI's `/api/admin/*` remains bearer-token protected.
+
+One-time setup by the maintainer (not performed by the build):
+
+1. In Cloudflare Zero Trust, create a **self-hosted Access application** covering both `swarm.bigpicsolutions.com/ops*` and `swarm.bigpicsolutions.com/api/ops/*`. Use one application/AUD for both paths. Include `/ops` itself and all of its assets. Do not protect the public MCP/API with this application.
+2. Add an Allow policy for the operator's Google sign-in with 2FA. Limit the policy to the intended operators; no bypass or public Allow policy. Keep the session lifetime appropriate for daily work.
+3. Copy the application's AUD tag into `ACCESS_AUD` and the team hostname (for example `your-team.cloudflareaccess.com`, without `https://`) into `ACCESS_TEAM_DOMAIN` in `hub/wrangler.toml` `[vars]`. Set `OPS_EMAILS` to the allowed operator emails, comma-separated. These are identifiers, not signing keys; the Worker obtains public certs from the fixed team endpoint.
+4. Review and deploy the code with migration `0005_ops.sql` through the normal maintainer process. The `[ai] binding = "AI"` enables advisory Workers AI checks. No new npm dependency is needed.
+5. Sign in at `/ops`; confirm Overview and Review queue load. In a signed-out session confirm Access protects the paths. With Access temporarily absent in a local test, missing/invalid JWTs must return 404 even for `/ops/ops.js`. Never add a login bypass to make testing easier.
+
+For local development, keep the production Origin enforced and add exact local origins in `OPS_ALLOWED_ORIGINS`, e.g. `http://localhost:8787`. This changes only the CSRF Origin allowlist; JWT and email checks still apply. Tests use generated RSA keys, stub certs/AI, and disable remote bindings. `wrangler dev` with a real AI binding can call Workers AI remotely.
+
+The console's daily loop:
+
+- **Overview:** inspect allocation (currently provisional), units by public/self-picked origin and project, ready/claimed/submitted/accepted/held counts, queue size and oldest age, claims expiring within an hour, INTAKE, last sync and the last sync error. The sync error is historical and may predate a successful sync; compare its timestamp. Counts are real and routed units are never described as compute.
+- **Review queue:** read the task and submission as untrusted data. Check sources yourself. Link flags and AI pre-screen notes are advisory; the AI never accepts or rejects, and does not fetch source links. Enter a reason and Accept or Reject. Repeating the same decision is safe; the opposite decision conflicts. The existing CLI still returns 409 on a second decision.
+- **Held tasks:** inspect the reason and text privately. Fix the upstream text, then click Re-screen now. This runs the connector; there is no manual release switch. Public APIs and MCP never expose held text.
+- **Projects:** pause/unpause new assignments, set reviewer capacity from 1 to 100, and Sync now. Pauses affect both scheduled and self-picked new claims, even during a race; existing claim holders can submit and pending work can still be reviewed. Inactive projects remain inactive when unpaused.
+- **Audit:** page through recent events and inspect private signals. Pairings near cap means at least four pairings on one network-day hash within 24 hours (cap five). Claim churn counts claim/release/expire events over 24 hours. Rejection ratios use all human-reviewed work; link flags show the latest 100 flagged submissions. Investigate before acting. To revoke, select the contributor (or enter an ID from an event), check the revocation box, and click Revoke contributor. This changes the stored hash to a random unusable value and writes an audit event; history, receipts and existing claims are kept. Claims eventually expire. A person can pair again under a new handle.
+
+INTAKE is shown here; changing the global intake configuration and deploying it remains a maintainer operation. A project pause is available immediately from this page. Publication into Town Hall remains a local operator step, below.
+
+## Town Hall publish loop
+
+1. Accept a `research_fix` submission for Town Hall after review. From the Swarm repository root, run:
+   ```sh
+   TOWNHALL_SCALE=community scripts/publish-townhall.sh <submission_id>
+   ```
+   Choose the actual scope: `individual`, `community`, `business`, `state` or `federal`. The script requires this choice rather than guessing. `TOWNHALL_REPO` defaults to `~/Projects/tools/town-hall`. The checkout must be clean and have the owner's GitHub noreply identity configured. The script never changes that identity. It uses `SWARM_URL` and `SWARM_ADMIN_TOKEN_FILE` (the same local token file as `review.sh`). Python 3 and git are required.
+2. The script fetches only accepted Town Hall research through `/api/admin/submission?id=N`. It writes `problems/<problem>/solutions/swarm-research-N.md`, using the existing six-section template and front matter, validates with Town Hall's `scripts/check_submission.py`, branches as `swarm/submission-N` and commits locally. A bad source key, dirty checkout, existing file/branch, non-https source, or already-published receipt stops it. It never overwrites an existing solution, follows an HTTP redirect with the bearer token, pushes, or invokes `gh`.
+3. Review the file. The four Swarm sections map to Summary, How it works, Who can make it happen and Sources. Missing benefit/cost and risk analysis says **Not assessed in the accepted submission**; complete it with real evidence before opening the PR. Other unstructured content is preserved rather than guessed at. Check the proposed `type: idea`, your chosen scale and the model attribution. If validation stopped, the branch/draft is left for inspection, without a commit. Repair it manually rather than rerunning over local changes.
+4. Amend the local commit as needed, push the branch yourself, then run the printed `gh pr create` command from the Town Hall checkout. One solution per PR. The script does not publish anything.
+5. After the PR merges and the solution is live, call bearer-admin `POST /api/admin/published` with `{ "submission_id": N, "url": "https://townhall.bigpicsolutions.com/…" }`. The receipt now shows **Published** with the link. Identical retries are safe; a different URL conflicts. The receipt stays accepted and earns no extra units for being published. A PR URL alone is not evidence that the solution is live.
+
+## CLI daily loop (fallback)
 
 1. **Look at what's waiting.**
    ```sh
@@ -37,7 +73,7 @@ No agent of ours runs anywhere. Contributors' AIs run in their own apps.
    ```sh
    hub/scripts/review.sh held
    ```
-   Held tasks are tasks whose text failed the injection screen. They are never served to anyone. An empty list
+   Held tasks are tasks whose text failed the injection screen. They are never served to contributors. An empty list
    is the normal case. If there are any, see "Held tasks" below.
 4. **Sync** if you don't want to wait for the hourly job:
    ```sh
@@ -50,7 +86,7 @@ No agent of ours runs anywhere. Contributors' AIs run in their own apps.
 ## Held tasks
 
 The Town Hall sync screens all project text (`hub/src/screen.js`). Text that looks like an instruction to an AI
-makes the whole task `held`: no tool or API returns it, nobody can claim it, and it doesn't count as open work.
+makes the whole task `held`: no public tool or API returns it, nobody can claim it, and it doesn't count as open work.
 `review.sh held` lists them with the id, the project, the title, the `source_key`, the `held_reason` and the brief.
 The reason is a list of rule names, such as `ignore_instructions` or `shell_command`; it never contains the matched
 text.
@@ -124,18 +160,8 @@ Work down this list only as far as the problem needs.
    That is on purpose: contributors can still give work back and you can still review. If you need every write to
    stop, this lever isn't enough. A full write freeze would be a separate lever that also covers those paths and the
    cron. It is **planned**, not built. Until then use lever 4 or 6 below, and don't call the pause a freeze.
-2. **Pause a project.** Mark one project inactive so it gets no new claims and isn't routed:
-   ```sh
-   cd hub
-   scripts/deploy.sh d1 execute swarm-ai --remote --command "UPDATE projects SET active = 0 WHERE id = '<project id>'"
-   ```
-   Set `active = 1` to bring it back. Claims already held finish normally.
-3. **Revoke a contributor key.** Replace the stored key hash so the key can never match again. The handle and
-   the history stay, and the contributor can `pair` again for a new handle:
-   ```sh
-   scripts/deploy.sh d1 execute swarm-ai --remote --command "UPDATE contributors SET key_hash = 'revoked-' || id WHERE handle = '<handle>'"
-   ```
-   Then reject that handle's pending submissions with `review.sh reject`.
+2. **Pause a project.** In `/ops`, Projects, check Pause new assignments and save. This keeps the project visible and existing claims/submissions intact. Uncheck it and save to resume. The pause is checked transactionally by both claim paths.
+3. **Revoke a contributor key.** In `/ops`, Audit, choose the contributor or enter their ID, confirm revocation and click Revoke contributor. This atomically replaces their key hash with a random unusable digest and records the operator in an event. The handle and receipts stay; the contributor can pair again with a new handle. Review any pending submissions separately.
 
 If it's worse than that:
 4. Cloudflare's "I'm under attack" mode, or a WAF rate-limit rule on `/mcp` and `/api/*`, for the zone.
@@ -194,7 +220,6 @@ After rotating `ADMIN_TOKEN`, run `hub/scripts/review.sh pending` to confirm the
 ## Reviews
 
 - **Daily:** the review queue and the held list, as above.
-- **Weekly:** skim accepted and rejected work for drift, and glance at `review.sh held`. Check pairings, claim churn and duplicates by hand
-  until the operator console exists.
+- **Weekly:** skim accepted and rejected work for drift, and glance at `review.sh held`. Check private pairing/churn/rejection/link signals in `/ops` and duplicate notes in the review queue.
 - **Quarterly:** account 2FA and sessions, token scopes and ages, Cloudflare and GitHub security logs,
   dependency updates, and a restore drill.

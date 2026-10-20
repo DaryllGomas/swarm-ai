@@ -10,7 +10,7 @@ export const ADMIN = () => ({ Authorization: `Bearer ${env.ADMIN_TOKEN}` });
 export function makeEnv(over = {}) {
   const e = Object.create(env);
   // defineProperty, not assignment: env may be a proxy whose set trap would write through to the shared env.
-  for (const [k, v] of Object.entries({ LIMITER: undefined, ...over })) Object.defineProperty(e, k, { value: v, enumerable: true });
+  for (const [k, v] of Object.entries({ LIMITER: undefined, AI: undefined, ...over })) Object.defineProperty(e, k, { value: v, enumerable: true });
   return e;
 }
 

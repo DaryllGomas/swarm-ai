@@ -5,7 +5,7 @@
   "description": "Swarm AI hub: Cloudflare Worker (site, MCP, API) with D1",
   "type": "module",
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run && node --test test/*.node.js",
     "dev": "wrangler dev",
     "deploy": "scripts/deploy.sh"
   },

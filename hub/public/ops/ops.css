@@ -1,0 +1,39 @@
+.ops-header { display: flex; align-items: center; gap: 18px; min-height: 78px; border-bottom: 1px solid var(--line); }
+.ops-header button { margin-left: auto; }
+.ops-title { display: flex; align-items: end; justify-content: space-between; gap: 20px; padding: 38px 0 24px; }
+.ops-title h1 { font-size: clamp(2rem, 5vw, 3.2rem); }
+.ops-eyebrow { color: var(--coral); text-transform: uppercase; letter-spacing: .13em; font-size: .75rem; }
+.ops-nav { display: flex; flex-wrap: wrap; gap: 10px 26px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.ops-nav a { text-decoration: none; }
+.ops section { padding: 28px 0; scroll-margin-top: 20px; }
+.ops section h2 { margin-bottom: 18px; }
+.ops section h3 { margin: 10px 0; }
+.ops-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 16px 0; }
+.ops-metric, .ops-card { padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: var(--navy-800); margin-bottom: 14px; }
+.ops-metric { margin-bottom: 0; }
+.ops-metric strong { display: block; font: 500 2rem var(--mono); color: var(--cream); }
+.ops-metric span { color: var(--text-2); }
+.ops-card.review { background: var(--cream); color: var(--ink); box-shadow: var(--shadow); }
+.ops-card.review .quiet { color: var(--ink-2); }
+.ops-card.review a { color: #914118; }
+.ops-card pre, .ops-text { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.ops-card pre { max-height: 460px; overflow: auto; padding: 14px; border: 1px solid currentColor; border-radius: 8px; }
+.ops details { margin: 12px 0; }
+.ops summary { cursor: pointer; font-weight: 600; }
+.ops-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 16px; }
+.ops label { display: block; margin: 10px 0; }
+.ops input, .ops textarea { display: block; max-width: 100%; padding: 10px; border: 1px solid #68758c; border-radius: 7px; background: #fffaf4; color: var(--ink); font: inherit; }
+.ops textarea { width: 100%; min-height: 76px; }
+.ops input[type=checkbox] { display: inline-block; margin-right: 8px; }
+.ops input[type=number] { width: 150px; }
+.ops-notice { border-left: 3px solid var(--coral); padding: 16px 20px; color: var(--text-2); background: var(--navy-800); }
+.ops-table-wrap { overflow: auto; margin: 16px 0; }
+.ops table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+.ops th, .ops td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+.ops th { color: var(--text-2); font-weight: 500; }
+.ops td pre { white-space: pre-wrap; min-width: 180px; margin: 0; }
+.ops #message { position: sticky; top: 0; background: var(--navy-900); z-index: 2; padding: 12px 0; margin: 0; color: var(--sunrise); }
+.ops #message:empty { padding: 0; }
+.ops .quiet { color: var(--text-2); }
+.ops .ops-age { color: #8a3915; font-weight: 600; }
+@media (max-width: 600px) { .ops-title { align-items: start; flex-direction: column; } .ops-header { gap: 8px; } .ops-card { padding: 14px; } }

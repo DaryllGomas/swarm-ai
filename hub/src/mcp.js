@@ -7,6 +7,7 @@ import { syncIfStale, UNTRUSTED } from './sync.js';
 import { byteLength, clean, iso, ipHashFor, json, readJsonResult, sha256, underRateLimit, weekOf } from './lib.js';
 import { LinkError, screenSources } from './links.js';
 import { CLIENT_IDS, normalizeClient, setupGuide } from './setup.js';
+import { prescreenSubmission } from './prescreen.js';
 import { validateArgs } from './validate.js';
 
 const MAX_MCP_BODY_BYTES = 64 * 1024; // the 20 KB submission body plus JSON escaping and the rest of the call
@@ -385,7 +386,7 @@ async function activeClaims(env, contributor) {
 
 // The task row with what the friendly refusals need: the reviewer queue and this contributor's own submissions on it.
 const readClaimTask = (env, who, taskId) => env.DB.prepare(
-  `SELECT t.*, p.max_pending, p.active,
+  `SELECT t.*, p.max_pending, p.active, p.paused,
           (SELECT COUNT(*) FROM submissions s JOIN tasks t2 ON t2.id = s.task WHERE t2.project = t.project AND s.status = 'pending') AS pending,
           (SELECT COUNT(*) FROM submissions s WHERE s.task = t.id AND s.contributor = ?2) AS mine
    FROM tasks t JOIN projects p ON p.id = t.project WHERE t.id = ?1`
@@ -395,7 +396,7 @@ const readClaimTask = (env, who, taskId) => env.DB.prepare(
 function taskRefusal(task, taskId) {
   if (!task || task.status === 'held' || task.held_reason) return new ToolError(`Task ${taskId} is not available.`);
   if (task.status !== 'ready') return new ToolError(`Task ${taskId} is ${task.status}, not ready.`);
-  if (!task.active) return new ToolError('That project is not taking work right now.');
+  if (!task.active || task.paused) return new ToolError('That project is not taking work right now.');
   if (task.mine) return new ToolError('You already handed in work on this task.');
   if (task.pending >= task.max_pending) return new ToolError(`This project's reviewer has ${task.pending} submissions waiting (limit ${task.max_pending}), so new claims are paused until some are reviewed.`);
   return null;
@@ -435,7 +436,7 @@ async function claim(c, who, taskId, routed) {
       env.DB.prepare(
         `INSERT INTO claims (task, contributor, routed, week, claimed_at, expires_at, network, op)
          SELECT t.id, ?2, ?3, ?4, ?5, ?6, ?7, ?9 FROM tasks t JOIN projects p ON p.id = t.project
-         WHERE t.id = ?1 AND t.status = 'ready' AND t.held_reason IS NULL AND p.active = 1
+         WHERE t.id = ?1 AND t.status = 'ready' AND t.held_reason IS NULL AND p.active = 1 AND p.paused = 0 AND p.reviewer != ''
            AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = t.id AND (s.contributor = ?2 OR s.status IN ('pending','accepted')))
            AND NOT EXISTS (SELECT 1 FROM claims k WHERE k.task = t.id AND k.outcome IS NULL)
            AND (SELECT COUNT(*) FROM submissions s JOIN tasks t2 ON t2.id = s.task WHERE t2.project = t.project AND s.status = 'pending') < p.max_pending
@@ -494,7 +495,7 @@ async function nextTask(c) {
     currentAllocation(env),
     unitsByProject(env, week, 1, STANDING),
     env.DB.prepare(
-      `SELECT p.id, p.name, p.max_pending,
+      `SELECT p.id, p.name, p.max_pending, p.paused,
               (SELECT COUNT(*) FROM tasks t WHERE t.project = p.id AND t.status = 'ready'
                  AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = t.id AND s.contributor = ?1)) AS ready,
               (SELECT COUNT(*) FROM submissions s JOIN tasks t ON t.id = s.task WHERE t.project = p.id AND s.status = 'pending') AS pending
@@ -502,9 +503,9 @@ async function nextTask(c) {
     ).bind(who.id).all(),
   ]);
   const total = Object.values(routed).reduce((a, b) => a + b, 0);
-  const eligible = projects.results.filter((p) => p.ready > 0 && p.pending < p.max_pending && (alloc.shares[p.id] || 0) > 0);
+  const eligible = projects.results.filter((p) => !p.paused && p.ready > 0 && p.pending < p.max_pending && (alloc.shares[p.id] || 0) > 0);
   if (!eligible.length) {
-    const why = projects.results.map((p) => (p.ready === 0 ? `${p.name}: no ready tasks` : p.pending >= p.max_pending ? `${p.name}: reviewer queue is full` : `${p.name}: no allocation`)).join('; ');
+    const why = projects.results.map((p) => (p.paused ? `${p.name}: paused by operator` : p.ready === 0 ? `${p.name}: no ready tasks` : p.pending >= p.max_pending ? `${p.name}: reviewer queue is full` : `${p.name}: no allocation`)).join('; ');
     throw new ToolError(`No work can be routed right now (${why || 'no projects'}). Nothing is invented to fill the gap. Try again later, or use list_tasks and claim_task.`);
   }
   // Weighted deficit: furthest below its allocation share of routed units this week goes first.
@@ -584,7 +585,7 @@ function cleanBody(s) {
   return s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f​-‏‪-‮⁠-⁩﻿]/g, '').replace(/\r\n?/g, '\n').trim();
 }
 
-async function submitWork({ env, args, who }) {
+async function submitWork({ env, args, who, ctx }) {
   const { task_id: taskId } = args;
   if (!Number.isInteger(taskId)) throw new ToolError('task_id must be an integer.');
   if (typeof args.body !== 'string') throw new ToolError('body must be text.');
@@ -642,6 +643,7 @@ async function submitWork({ env, args, who }) {
     throw err;
   }
   if (!res[0].meta.changes) return submitRefusal(env, who, taskId, { body, sources, flags });
+  ctx.waitUntil(prescreenSubmission(env, res[0].meta.last_row_id));
   return submitResult(res[0].meta.last_row_id, 'pending', flags);
 }
 

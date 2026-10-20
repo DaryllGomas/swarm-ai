@@ -1,17 +1,18 @@
 // Swarm AI hub: static site (public/ via ASSETS) + MCP at /mcp + JSON API at /api/* + D1.
 // Swarm never publishes into a project; submissions wait for a person to review them.
-import { PROVISIONAL_NOTE, expireClaims, newOp, weekStats } from './core.js';
+import { expireClaims, weekStats } from './core.js';
 import { handleMcp } from './mcp.js';
 import { UNTRUSTED, syncIfStale, syncTasks } from './sync.js';
-import { SECURITY_HEADERS, clean, ipHashFor, isAdmin, iso, json, readJsonResult, underRateLimit } from './lib.js';
+import { SECURITY_HEADERS, clean, ipHashFor, isAdmin, iso, json, underRateLimit } from './lib.js';
+import { adminHeld, adminPending, adminReview, adminSubmission, adminPublished } from './admin.js';
+import { handleOps } from './ops.js';
 import { normalizeClient, setupGuide } from './setup.js';
-
-const MAX_ADMIN_BODY_BYTES = 4 * 1024;
 
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     try {
+      if (url.pathname.startsWith('/ops') || url.pathname === '/api/ops' || url.pathname.startsWith('/api/ops/')) return await handleOps(req, env, url);
       if (url.pathname === '/mcp') return await handleMcp(req, env, ctx);
       if (url.pathname === '/setup' || url.pathname === '/llms.txt') return setupText(req, url);
       if (url.pathname.startsWith('/api/')) return await api(req, env, ctx, url);
@@ -45,6 +46,8 @@ async function api(req, env, ctx, url) {
   if (path.startsWith('/api/admin/')) {
     if (!(await isAdmin(req, env))) return json({ error: 'not found' }, 404);
     if (!(await underRateLimit(env, await ipHashFor(env, req)))) return json({ error: 'Slow down.' }, 429);
+    if (path === '/api/admin/submission' && req.method === 'GET') return adminSubmission(env, url);
+    if (path === '/api/admin/published' && req.method === 'POST') return adminPublished(req, env);
     if (path === '/api/admin/pending' && req.method === 'GET') return adminPending(env);
     if (path === '/api/admin/held' && req.method === 'GET') return adminHeld(env);
     if (path === '/api/admin/review' && req.method === 'POST') return adminReview(req, env);
@@ -73,7 +76,7 @@ async function receipts(env, url) {
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '10', 10) || 10, 1), 50);
   const { results } = await env.DB.prepare(
     `SELECT s.id, s.task, t.title, t.units, t.kind, t.project, p.name AS project_name, c.handle, s.reviewed_by, s.reviewed_at,
-            s.sources, s.model, s.tokens_est
+            s.sources, s.model, s.tokens_est, s.published_url, s.published_at
      FROM submissions s JOIN tasks t ON t.id = s.task JOIN projects p ON p.id = t.project JOIN contributors c ON c.id = s.contributor
      WHERE s.status = 'accepted' ORDER BY s.reviewed_at DESC, s.id DESC LIMIT ?1`
   ).bind(limit).all();
@@ -88,6 +91,7 @@ async function receipts(env, url) {
       handle: r.handle,
       reviewed_by: r.reviewed_by,
       reviewed_at: iso(r.reviewed_at),
+      publication: r.published_url ? { status: 'published', url: r.published_url, published_at: iso(r.published_at) } : null,
       self_reported: { model: r.model, tokens_est: r.tokens_est },
       evidence: { task_url: `/api/tasks/${r.task}`, sources: JSON.parse(r.sources) },
     })),
@@ -115,77 +119,4 @@ async function oneTask(env, id) {
   // A closed task is history: title and status only, no brief.
   if (t.status === 'closed') { delete pub.brief; delete pub.output_format; }
   return json({ ...pub, created: iso(t.created), notice: UNTRUSTED, ...(t.status === 'closed' ? { note: 'This task is closed.' } : {}) });
-}
-
-// ---------------------------------------------------------------- admin
-
-async function adminPending(env) {
-  const { results } = await env.DB.prepare(
-    `SELECT s.id, s.task, t.title, t.kind, t.units, t.brief, t.output_format, t.project, c.handle, s.body, s.sources, s.flags, s.model, s.tokens_est, s.created
-     FROM submissions s JOIN tasks t ON t.id = s.task JOIN contributors c ON c.id = s.contributor
-     WHERE s.status = 'pending' ORDER BY s.created`
-  ).all();
-  return json({ notice: UNTRUSTED, pending: results.map((r) => ({ ...r, sources: JSON.parse(r.sources), flags: JSON.parse(r.flags || '[]'), created: iso(r.created) })) });
-}
-
-// Tasks the text screen held back. They are never served to agents; this is where the operator sees them.
-async function adminHeld(env) {
-  const { results } = await env.DB.prepare(
-    "SELECT id, project, kind, title, units, status, source_key, held_reason, brief, created FROM tasks WHERE held_reason IS NOT NULL ORDER BY created, id"
-  ).all();
-  return json({ notice: UNTRUSTED, held: results.map((r) => ({ ...r, created: iso(r.created) })), note: 'Fix the text at its source (the project); a held task is released on the next sync once its text passes the screen.' });
-}
-
-async function adminReview(req, env) {
-  const { body, tooLarge } = await readJsonResult(req, MAX_ADMIN_BODY_BYTES);
-  if (tooLarge) return json({ error: 'Request too large.' }, 413);
-  if (!body) return json({ error: 'Send a small JSON object.' }, 400);
-  const id = body.id;
-  if (!Number.isInteger(id)) return json({ error: 'id must be a whole number' }, 400);
-  if (body.decision !== 'accept' && body.decision !== 'reject') return json({ error: 'decision must be "accept" or "reject"' }, 400);
-  if (body.note !== undefined && typeof body.note !== 'string') return json({ error: 'note must be a string (or left out)' }, 400);
-  const note = clean(body.note, 500) || null;
-
-  const s = await env.DB.prepare(
-    `SELECT s.id, s.status, s.task, s.contributor, p.reviewer FROM submissions s JOIN tasks t ON t.id = s.task JOIN projects p ON p.id = t.project WHERE s.id = ?1`
-  ).bind(id).first();
-  if (!s) return json({ error: 'no such submission' }, 404);
-  if (s.status !== 'pending') return json({ error: `already ${s.status}` }, 409);
-
-  const accept = body.decision === 'accept';
-  const verdict = accept ? 'accepted' : 'rejected';
-  const now = Date.now();
-  const op = newOp();
-  // One transaction: the submission, the task and the event commit together or not at all. The first UPDATE is the only
-  // thing that can change who wins: it applies to a pending submission whose task is waiting for review ('submitted'), and
-  // a task gets at most one accepted result. The task change and the event run only if it applied (they find this request's
-  // op on the submission), so a stale or repeated review cannot touch a task that has moved on.
-  const res = await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE submissions SET status = ?2, reviewed_by = ?3, review_note = ?4, reviewed_at = ?5, op = ?6
-       WHERE id = ?1 AND status = 'pending'
-         AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = submissions.task AND t.status = 'submitted')
-         AND (?2 != 'accepted' OR NOT EXISTS (SELECT 1 FROM submissions a WHERE a.task = submissions.task AND a.status = 'accepted'))`
-    ).bind(id, verdict, s.reviewer, note, now, op),
-    // A rejected piece of work puts the task back in the pool, up to two rejections by a reviewer; after that it stays rejected.
-    env.DB.prepare(
-      `UPDATE tasks SET status = CASE
-           WHEN ?3 = 'accepted' THEN 'accepted'
-           WHEN (SELECT COUNT(*) FROM submissions WHERE task = ?1 AND status = 'rejected' AND COALESCE(reviewed_by, '') != 'system') >= 2 THEN 'rejected'
-           ELSE 'ready' END
-       WHERE id = ?1 AND status = 'submitted' AND EXISTS (SELECT 1 FROM submissions WHERE id = ?2 AND op = ?4 AND status = ?3)`
-    ).bind(s.task, id, verdict, op),
-    env.DB.prepare(
-      `INSERT INTO events (ts, type, task, contributor, submission, actor, detail)
-       SELECT ?3, ?4, task, contributor, id, ?5, json_object('note', ?6) FROM submissions WHERE id = ?1 AND op = ?2`
-    ).bind(id, op, now, accept ? 'submission_accepted' : 'submission_rejected', s.reviewer, note),
-  ]);
-  if (!res[0].meta.changes) {
-    // Not reviewed by this request: someone else got there first, or the task is not in a state that can be reviewed.
-    const now2 = await env.DB.prepare('SELECT s.status, t.status AS task_status FROM submissions s JOIN tasks t ON t.id = s.task WHERE s.id = ?1').bind(id).first();
-    if (now2.status !== 'pending') return json({ error: `already ${now2.status}` }, 409);
-    return json({ error: `the task is ${now2.task_status}, not waiting for review, or it already has an accepted result` }, 409);
-  }
-  const task = await env.DB.prepare('SELECT status FROM tasks WHERE id = ?1').bind(s.task).first();
-  return json({ ok: true, id, decision: accept ? 'accepted' : 'rejected', reviewed_by: s.reviewer, task_status: task.status, receipt: accept ? `/api/receipts` : null, allocation_note: PROVISIONAL_NOTE });
 }

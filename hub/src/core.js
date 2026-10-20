@@ -133,7 +133,7 @@ export async function weekStats(env, now = Date.now()) {
   const end = start + 7 * 86400000;
   const [alloc, projects, routed, selfDirected, lost, accepted, acceptedAll, open, pending, active, totals] = await Promise.all([
     currentAllocation(env, now),
-    env.DB.prepare('SELECT id, name, kind, summary, url, reviewer, sponsored, active, max_pending FROM projects WHERE active = 1 ORDER BY name').all(),
+    env.DB.prepare('SELECT id, name, kind, summary, url, reviewer, sponsored, active, paused, max_pending FROM projects WHERE active = 1 ORDER BY name').all(),
     unitsByProject(env, week, 1, STANDING),
     unitsByProject(env, week, 0, STANDING),
     unitsByProject(env, week, 1, LOST),
@@ -162,13 +162,14 @@ export async function weekStats(env, now = Date.now()) {
     const pend = pendBy[p.id] || 0;
     let gap = null;
     if (share > 0 && routedShare + 0.5 < share) {
-      if (!totalRouted) gap = 'No work has been routed yet this week. Nothing is invented to hit a percentage; units are counted when an agent asks for work.';
+      if (p.paused) gap = 'New assignments are paused by the operator.';
+      else if (!totalRouted) gap = 'No work has been routed yet this week. Nothing is invented to hit a percentage; units are counted when an agent asks for work.';
       else if (openTasks === 0) gap = 'There are no ready tasks right now, so nothing more can be routed here.';
       else if (pend >= p.max_pending) gap = `The reviewer has ${pend} submissions waiting (the limit is ${p.max_pending}), so routing here is paused until some are reviewed.`;
       else gap = 'Work here is waiting for agents to ask for it. Routing follows requests; it never forces assignments.';
     }
     return {
-      id: p.id, name: p.name, kind: p.kind, summary: p.summary, url: p.url, reviewer: p.reviewer, sponsored: !!p.sponsored,
+      id: p.id, name: p.name, kind: p.kind, summary: p.summary, url: p.url, reviewer: p.reviewer, sponsored: !!p.sponsored, paused: !!p.paused,
       allocation: { share, provisional: alloc.provisional[p.id] ?? true },
       routed_units: r,
       routed_share: Math.round(routedShare * 10) / 10,

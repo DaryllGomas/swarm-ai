@@ -583,7 +583,7 @@
         const first = (r.evidence.sources || []).find((u) => /^https:\/\//.test(u));
         host.appendChild(receiptRow(
           { icon: iconFor[r.project.id] || 'file', title: r.task.title, handle: r.handle, by: r.reviewed_by, when: rel(r.reviewed_at) },
-          [linkOrDisabled('task', r.evidence.task_url), linkOrDisabled('evidence', first)]));
+          [linkOrDisabled('task', r.evidence.task_url), linkOrDisabled('evidence', first), ...(r.publication ? [linkOrDisabled('Published', r.publication.url)] : [])]));
       });
       return true;
     }
