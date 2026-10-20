@@ -3,7 +3,7 @@
 #   scripts/deploy.sh                      check the repo, run the tests, apply D1 migrations, deploy the Worker
 #   scripts/deploy.sh <wrangler args...>   run any wrangler command with the deploy token (e.g. secret put ADMIN_TOKEN);
 #                                          the checks above are skipped, since nothing is being deployed
-# Token: $CLOUDFLARE_API_TOKEN, else ~/.config/swarm-ai/cf-deploy-token.
+# Token: $CLOUDFLARE_API_TOKEN, else ~/.config/swarm-ai/cf-deploy-token (Swarm's own scoped token; never another project's).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
