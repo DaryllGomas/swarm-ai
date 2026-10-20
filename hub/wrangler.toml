@@ -8,7 +8,7 @@ routes = [{ pattern = "swarm.bigpicsolutions.com", custom_domain = true }]
 [assets]
 directory = "public"
 binding = "ASSETS"
-run_worker_first = ["/api/*", "/mcp", "/setup", "/llms.txt"]
+run_worker_first = ["/ops*", "/api/*", "/mcp", "/setup", "/llms.txt"]
 
 [[d1_databases]]
 binding = "DB"
@@ -22,6 +22,14 @@ migrations_dir = "migrations"
 # not a write freeze: release_task, claim expiry, sync, admin review and the hourly cron still write.
 # Change the value, then deploy (scripts/deploy.sh).
 INTAKE = "open"
+ACCESS_TEAM_DOMAIN = ""
+ACCESS_AUD = ""
+OPS_EMAILS = ""
+# Additional exact origins for local development only (comma-separated, no wildcards).
+OPS_ALLOWED_ORIGINS = ""
+
+[ai]
+binding = "AI"
 
 # Hourly: pull tasks from Town Hall and expire stale claims.
 [triggers]

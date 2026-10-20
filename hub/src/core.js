@@ -133,7 +133,7 @@ export async function weekStats(env, now = Date.now()) {
   const end = start + 7 * 86400000;
   const [alloc, projects, routed, selfDirected, lost, accepted, acceptedAll, open, pending, active, totals] = await Promise.all([
     currentAllocation(env, now),
-    env.DB.prepare('SELECT id, name, kind, summary, url, reviewer, sponsored, active, max_pending FROM projects WHERE active = 1 ORDER BY name').all(),
+    env.DB.prepare('SELECT id, name, kind, summary, url, reviewer, sponsored, active, paused, max_pending FROM projects WHERE active = 1 ORDER BY name').all(),
     unitsByProject(env, week, 1, STANDING),
     unitsByProject(env, week, 0, STANDING),
     unitsByProject(env, week, 1, LOST),
@@ -162,13 +162,14 @@ export async function weekStats(env, now = Date.now()) {
     const pend = pendBy[p.id] || 0;
     let gap = null;
     if (share > 0 && routedShare + 0.5 < share) {
-      if (!totalRouted) gap = 'No work has been routed yet this week. Nothing is invented to hit a percentage; units are counted when an agent asks for work.';
+      if (p.paused) gap = 'New assignments are paused by the operator.';
+      else if (!totalRouted) gap = 'No work has been routed yet this week. Nothing is invented to hit a percentage; units are counted when an agent asks for work.';
       else if (openTasks === 0) gap = 'There are no ready tasks right now, so nothing more can be routed here.';
       else if (pend >= p.max_pending) gap = `The reviewer has ${pend} submissions waiting (the limit is ${p.max_pending}), so routing here is paused until some are reviewed.`;
       else gap = 'Work here is waiting for agents to ask for it. Routing follows requests; it never forces assignments.';
     }
     return {
-      id: p.id, name: p.name, kind: p.kind, summary: p.summary, url: p.url, reviewer: p.reviewer, sponsored: !!p.sponsored,
+      id: p.id, name: p.name, kind: p.kind, summary: p.summary, url: p.url, reviewer: p.reviewer, sponsored: !!p.sponsored, paused: !!p.paused,
       allocation: { share, provisional: alloc.provisional[p.id] ?? true },
       routed_units: r,
       routed_share: Math.round(routedShare * 10) / 10,
@@ -193,15 +194,15 @@ export async function weekStats(env, now = Date.now()) {
 }
 
 // The one transactional review step, shared by the admin review endpoint and the GitHub connector (a merged or closed
-// pull request is the maintainer's review, made on GitHub). `reviewedBy` is who made the decision; it is also the actor on
-// the event. Returns { ok: true, taskStatus } when this call made the decision, or { ok: false, status, taskStatus } when
+// pull request is the maintainer's review, made on GitHub). `reviewedBy` is who made the decision; it is also the default actor on
+// the event (the ops console passes the signed-in operator as `actor`). Returns { ok: true, taskStatus } when this call made the decision, or { ok: false, status, taskStatus } when
 // it did not (someone else got there first, or the task is not waiting for review).
 //
 // One transaction: the submission, the task and the event commit together or not at all. The first UPDATE is the only thing
 // that can change who wins: it applies to a pending submission whose task is waiting for review ('submitted'), and a task
 // gets at most one accepted result. The task change and the event run only if it applied (they find this request's op on the
 // submission), so a stale or repeated review cannot touch a task that has moved on.
-export async function reviewSubmission(env, { id, task, verdict, reviewedBy, note, now = Date.now() }) {
+export async function reviewSubmission(env, { id, task, verdict, reviewedBy, note, actor = reviewedBy, now = Date.now() }) {
   const accept = verdict === 'accepted';
   const op = newOp();
   const res = await env.DB.batch([
@@ -222,7 +223,7 @@ export async function reviewSubmission(env, { id, task, verdict, reviewedBy, not
     env.DB.prepare(
       `INSERT INTO events (ts, type, task, contributor, submission, actor, detail)
        SELECT ?3, ?4, task, contributor, id, ?5, json_object('note', ?6) FROM submissions WHERE id = ?1 AND op = ?2`
-    ).bind(id, op, now, accept ? 'submission_accepted' : 'submission_rejected', reviewedBy, note),
+    ).bind(id, op, now, accept ? 'submission_accepted' : 'submission_rejected', actor, note),
   ]);
   const t = await env.DB.prepare('SELECT status FROM tasks WHERE id = ?1').bind(task).first();
   if (res[0].meta.changes) return { ok: true, taskStatus: t?.status };

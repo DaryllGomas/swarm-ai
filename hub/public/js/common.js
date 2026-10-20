@@ -573,7 +573,7 @@
       const gh = r.github;
       host.appendChild(receiptRow(
         { icon: gh ? 'github' : 'file', title: r.task.title, handle: r.handle, author: gh && gh.pr_author, by: r.reviewed_by, when: rel(r.reviewed_at) },
-        [linkOrDisabled('task', r.evidence.task_url), linkOrDisabled(gh ? 'pull request' : 'evidence', gh ? gh.pr_url : first)]));
+        [linkOrDisabled('task', r.evidence.task_url), linkOrDisabled(gh ? 'pull request' : 'evidence', gh ? gh.pr_url : first), ...(r.publication ? [linkOrDisabled('Published', r.publication.url)] : [])]));
     });
     return true;
   }
