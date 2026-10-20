@@ -24,9 +24,12 @@ export async function session(req, env) {
 async function turnstile(env, token) {
   if (typeof token !== 'string' || !token.length || token.length > 2048) return false;
   // Only an explicitly injected test binding can replace siteverify. Missing production secrets fail closed.
-  const result = env.TURNSTILE_SECRET ? await (await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-    method: 'POST', body: new URLSearchParams({ secret: env.TURNSTILE_SECRET, response: token }), signal: AbortSignal.timeout(10000),
-  })).json() : await env.TURNSTILE_TEST?.verify(token);
+  let result;
+  try {
+    result = env.TURNSTILE_SECRET ? await (await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST', body: new URLSearchParams({ secret: env.TURNSTILE_SECRET, response: token }), signal: AbortSignal.timeout(10000),
+    })).json() : await env.TURNSTILE_TEST?.verify(token);
+  } catch { return false; } // an unreachable or malformed siteverify fails closed
   return result?.success === true && result.hostname === new URL(rpOrigin(env)).hostname && result.action === 'register';
 }
 export async function handleAccount(req, env, path) {
