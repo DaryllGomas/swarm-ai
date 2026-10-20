@@ -15,10 +15,10 @@ Where they disagree, this plan wins.
 Built and live in `hub/`: the site, the MCP server (12 tools), the JSON API, the scheduler, review and receipts,
 D1 migrations, a test suite (run in CI), transactional claim, submit and review steps with database constraints, the per-network active-claim cap (4), the `INTAKE` lockdown lever,
 screening of project text with a `held` task status, a pre-screen for submission links (flags, not refusals),
-`/setup`, `/llms.txt` and the `setup_guide` tool, `docs/RUNBOOK.md`, deploy and review scripts, and (Phase 3, not yet deployed) passkey accounts, ballots and the weekly snapshot.
+`/setup`, `/llms.txt` and the `setup_guide` tool, `docs/RUNBOOK.md`, deploy and review scripts, and (Phases 3 and 4, not yet deployed) passkey accounts, ballots, the weekly snapshot, personal steering (three routing origins, link codes, the Your Swarm page, `my_week`) and MCP sign-in (OAuth).
 
 Not built yet (**planned**): the GitHub steps of Phase 0 (the local repo has no GitHub remote), a human independent
-security review, the weekly D1 export, task splitting (see `docs/ARCHITECTURE.md`), a full write freeze, the operator console, the Town Hall publish loop, Project 002, MCP OAuth, personal steering, `runner/`, and AI pre-screening of the work itself. `docs/GOVERNANCE.md`,
+security review, the weekly D1 export, task splitting (see `docs/ARCHITECTURE.md`), a full write freeze, the Town Hall publish loop, Project 002, `runner/`, and AI pre-screening of the work itself. `docs/GOVERNANCE.md`,
 `docs/MCP.md` and `publish-townhall` in the tree below don't exist yet.
 
 ## The shape in one paragraph
@@ -180,7 +180,7 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
 - Rules, Privacy and Terms pages, including the contribution license and an appeal process.
 - **Done when:** the first real snapshot is published and followed. (Needs the deploy, `TURNSTILE_SECRET`, and real voters.)
 
-**Phase 4: Your AI follows your vote** (about 2 sessions)
+**Phase 4: Your AI follows your vote** (about 2 sessions). **Built** (`hub/src/steering.js`, `me.js`, `oauth.js`, migration 0008), not yet deployed. Nothing is left behind a flag; `OAUTH = "off"` is a kill switch only.
 - MCP OAuth with passkey linking at the approve step.
 - The three routing origins, personal steering, and the fallback toggle.
 - The "Your Swarm" page and the weekly recap.
@@ -188,6 +188,14 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
   - an 80/20 ballot converges to 80/20;
   - a big contributor can't move the public comparison;
   - unlinked contributors still follow the public split.
+
+  All three are covered by tests (`hub/test/steering.test.js`). What was built, and the choices made:
+  - Linking has two routes: a short-lived single-use code (`SWARM-XXXX-XXXX`, 10 minutes, stored hashed, brute-force limited) that the voter gives their AI (`link_account`), and the OAuth approve step.
+  - MCP sign-in uses `@cloudflare/workers-oauth-provider` 1.2.3 with dynamic registration, PKCE (S256) and exact redirect URI validation. The approve page offers "continue as a pseudonymous handle" or "sign in with your passkey" (which links in the same step), then the scopes `read`, `work`, `submit`, enforced per tool on the server.
+    `swk_` keys are not OAuth tokens and keep working unchanged. A tool that needs credentials, called with none, now answers HTTP 401 with the MCP authorization challenge instead of a plain tool error, so sign-in-capable clients start the flow.
+  - A ballot that names a since-deactivated project is renormalised over the active ones for steering (the weekly snapshot stays strict).
+  - Each OAuth connection as a pseudonymous handle is a new contributor; signing in with a passkey keeps one identity per account.
+  - **Open before launch:** a human review of the OAuth flow; the maintainer deploys with the new KV binding and `OAUTH = "on"`; a real browser test of the passkey step on `/authorize` and of each client (Claude app, ChatGPT, Codex, Cursor), whose connector UIs were not available to test.
 
 **Phase 5: The runner** (1–2 sessions)
 - `runner/` in the same repo. It's human-started, with a task cap and a Thursday reminder.

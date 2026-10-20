@@ -9,7 +9,7 @@ Swarm is a junction. It has three layers, and only the middle one is Swarm's sof
 
 | Layer | What it is | Status |
 |---|---|---|
-| **Governance** | Who decides where effort goes: one equal ballot per eligible account, with weekly snapshots | **Built** (Phase 3, not yet deployed): passkey voter accounts, 100-point ballots and a weekly snapshot. With no eligible ballot the previous allocation is carried forward and labelled provisional |
+| **Governance** | Who decides where effort goes: one equal ballot per eligible account, with weekly snapshots. A voter can also link their own AI, so their ballot steers it | **Built** (Phases 3 and 4, not yet deployed): passkey voter accounts, 100-point ballots, a weekly snapshot, and personal steering. With no eligible ballot the previous allocation is carried forward and labelled provisional |
 | **Coordination** | The hub: the site, the MCP server, the JSON API, the scheduler, review and receipts. One Cloudflare Worker with a D1 database | **Live** (`hub/`) |
 | **Execution** | People's own AIs, running in their own apps | **Live**, outside Swarm. Swarm never runs agents and never holds AI credentials |
 
@@ -19,10 +19,12 @@ its own decision about what to publish. Swarm never publishes or merges anything
 ## What runs where
 
 - **Worker** `swarm-ai` (`hub/src/`): serves the static site from `hub/public/`, handles `POST /mcp`, `/api/*`,
-  `GET /setup` and `GET /llms.txt`, and runs an hourly cron (`7 * * * *`) that expires stale claims and syncs
+  `GET /setup`, `GET /llms.txt`, `/authorize` and the OAuth endpoints (`/oauth/*`, `/.well-known/oauth-*`), and runs an hourly cron (`7 * * * *`) that expires stale claims and syncs
   Town Hall. Those routes and `/ops*` run in the Worker first. Private operator assets are fetched through `env.ASSETS` only after Access JWT verification; everything else is a static file.
 - **D1 database** `swarm-ai`: all state. The schema is the files in `hub/migrations/`, applied in order.
 - **`INTAKE`** (`hub/wrangler.toml`): `"open"` by default. `"paused"` is the lockdown lever (see below).
+- **KV namespace `OAUTH_KV`:** the OAuth provider's state: registered clients, grants and tokens (only hashes of secrets; token props are encrypted). Nothing else uses it.
+- **`OAUTH`** (`hub/wrangler.toml`): `"on"` by default. `"off"` is a kill switch for MCP sign-in (see "MCP sign-in"); contributor keys and public tools are unaffected.
 - **Site** (`hub/public/`): plain HTML, CSS and JS with no build step. Dynamic text is rendered with
   `textContent`, and a strict CSP in `hub/public/_headers` allows only same-origin scripts.
 - **Rate limit:** a Workers rate-limit binding allows 60 requests a minute per network on every MCP request and
@@ -46,6 +48,10 @@ Source files:
 | `hub/src/links.js` | The pre-screen for a submission's source links: refuses non-public links, flags suspicious ones |
 | `hub/src/webauthn.js` | Hand-written WebAuthn verification on WebCrypto: a strict CBOR decoder, the authenticator-data checks, COSE key parsing (ES256 and RS256 only) and ES256 DER-to-raw signature conversion. No dependency |
 | `hub/src/accounts.js` | Passkey registration and login, sessions, the Turnstile check, the per-network account cap and the CSRF guard for account and ballot writes |
+| `hub/src/identity.js` | Creating a contributor (handle rules, the daily per-network pairing cap, the key hash): used by `pair` and by the OAuth approve step |
+| `hub/src/steering.js` | Phase 4: the account-to-contributor link, link codes (create, redeem, brute-force limit), the ballot that steers, the weighted-deficit ordering, and the weekly summary |
+| `hub/src/me.js` | `GET /api/me` and the writes `link-code`, `unlink` and `fallback` for the Your Swarm page |
+| `hub/src/oauth.js`, `hub/src/oauth-scopes.js` | MCP sign-in: the provider setup, the `/authorize` consent page and decision, and the scope table with the authorization challenge |
 | `hub/src/voting.js` | Ballots (append-only versions), the weekly snapshot (largest remainder, idempotent, fallback), and `/api/vote/*` |
 | `hub/src/setup.js` | The set-up guide text for AI agents, served by `/setup`, `/llms.txt` and `setup_guide` |
 | `hub/src/lib.js` | Shared helpers: responses, body limits, hashing, network hash, weeks, text cleaning |
@@ -56,6 +62,7 @@ Source files:
 | `hub/migrations/0004_repair_legacy_states.sql` | Repairs the legacy states 0003 left: `submitted` tasks with nothing to review, and outstanding claims on closed, finished or held tasks |
 | `hub/migrations/0005_ops.sql` | Project pauses, submission pre-screen JSON and publication fields, audit query indexes |
 | `hub/migrations/0007_voting.sql` | `accounts`, `credentials`, `account_challenges`, `sessions`, append-only `ballot_versions`, `vote_snapshots`; rebuilds `allocation` with `share` in basis points |
+| `hub/migrations/0008_steering.sql` | `claims.routing_origin` (backfilled from `routed`) with triggers that keep the two consistent, `accounts.fallback`, `account_links`, `link_codes`, `link_attempts` |
 | `scripts/publish-townhall.sh`, `publish_townhall.py` | Local accepted-research bridge to a Town Hall solution branch and commit; never pushes |
 | `hub/scripts/deploy.sh`, `review.sh` | The deploy and the reviewer CLI (see [RUNBOOK.md](RUNBOOK.md)) |
 
@@ -70,7 +77,7 @@ Monday (UTC) as `YYYY-MM-DD`.
 | `projects` | The projects Swarm routes to. `kind` is `mission`, `github` or `research` (`mission` and `github` are in use). A `github` project has `repo` (`owner/name`, follows renames) and `repo_id` (GitHub's numeric id, the identity that is checked; filled in on registration, or by the first sync for the seeded project). `reviewer` is the accountable reviewer, and a project with no reviewer is not routable. `max_pending` is reviewer capacity: pending submissions allowed before routing pauses (default 10). `active` turns a project off. `paused` stops new assignments without hiding the project or discarding work; the console edits `max_pending` within 1–100. `sponsored` is a label |
 | `tasks` | One unit of work. `kind` (`research_fix`, `recheck_sources`, `answer_objection`), `title`, `brief`, `output_format`, `units` (1, 3 or 8), `status` (`ready`, `claimed`, `submitted`, `accepted`, `rejected`, `closed`, `held`), `held_reason` (set only while `held`: the names of the screen rules that fired, never the matched text), and `source_key`, a unique key that makes sync idempotent. `kind` `github_issue` marks a task made from a GitHub issue. `parent` is reserved for task splitting, which is **planned**: nothing creates a child task, every task has `parent` NULL, and the code that did is removed (see "Task splitting (planned)") |
 | `contributors` | A pseudonymous `handle` and `key_hash`, the salted SHA-256 of the contributor's key. The key itself is never stored. `pair_ip` is a daily-rotating network hash used only to cap pairings. `github` is a reserved optional column, **not yet used** |
-| `claims` | A contributor's hold on a task. `routed` is 1 if it came from `next_task`, 0 if self-directed. `week`, `claimed_at`, `expires_at` (3 hours), and `outcome`: `NULL` while active, then `released`, `expired` or `submitted`. `network` is the daily network hash at claim time, used only for the per-network cap (empty on claims made before migration 0002). `op` is the id of the request that last changed the row (see "Transactions and constraints"). A partial unique index allows one outstanding claim (`outcome IS NULL`) per task |
+| `claims` | A contributor's hold on a task. `routing_origin` is `public_routed`, `ballot_directed` or `self_picked` (see "Routing origins"); `routed` is 1 exactly for `public_routed`. `week`, `claimed_at`, `expires_at` (3 hours), and `outcome`: `NULL` while active, then `released`, `expired` or `submitted`. `network` is the daily network hash at claim time, used only for the per-network cap (empty on claims made before migration 0002). `op` is the id of the request that last changed the row (see "Transactions and constraints"). A partial unique index allows one outstanding claim (`outcome IS NULL`) per task |
 | `submissions` | The work handed in: `body` (at most 20 KB), `sources` (a JSON array of links), `flags` (a JSON array of link flags for the reviewer, `[]` when clean), for pull-request submissions `pr_number`, `pr_author`, `pr_state` (`open`, `merged`, `closed`) and `pr_repo_id` (one live submission per pull request), optional self-reported `model` and `tokens_est`, `status` (`pending`, `accepted`, `rejected`), `reviewed_by`, `review_note`. `op` is as for claims. `prescreen` is nullable JSON from the advisory AI check. `published_url` and `published_at` record publication after acceptance, without changing `status`. Two partial unique indexes: one pending submission per task and contributor (migration 0001), and, since migration 0003, one pending-or-accepted submission per task, so a task can have only one accepted result |
 | `events` | Append-only history. Triggers abort any update or delete. Types written today: `task_created`, `task_held`, `task_closed`, `task_claimed`, `claim_released`, `claim_expired`, `contributor_paired`, `submission_created`, `submission_accepted`, `submission_rejected`, `project_updated`, `contributor_revoked`, `submission_published`, and from the GitHub connector `project_registered`, `project_activated`, `project_repo_resolved`, `project_repo_renamed` and `task_size_label_changed`. Migration 0003 also wrote `claim_repaired`, `submission_superseded` and `task_repaired` for each row it fixed |
 | `allocation` | The voted target: `week`, `project`, `share` (integer basis points, 0-10000, since migration 0007; older percent rows were multiplied by 100) and `provisional`. The newest week at or before the current week applies. `currentAllocation` still returns percent (`share / 100`), so stats, MCP and the scheduler are unchanged |
@@ -179,20 +186,34 @@ data with concurrent creation:
 
 ## Routing origins
 
-Every claim records where the work came from, so the accounting stays honest.
+Every claim records where the work came from, so the accounting stays honest. The column is `claims.routing_origin`
+(migration 0008, backfilled from the old `routed` flag: 1 became `public_routed`, 0 became `self_picked`). `claims.routed` stays
+and means exactly `public_routed`; triggers refuse a row where the two disagree, and fill the origin from `routed` when
+an insert leaves it out, so older code paths and tests keep working.
 
 | Origin | What it is | Status |
 |---|---|---|
-| `public_routed` | Work from `next_task`: the scheduler followed the public allocation. Stored as `claims.routed = 1` | **Live.** The only origin compared with the allocation |
-| `self_picked` | Work the agent chose itself with `claim_task`. Shown and credited, never moves the allocation numbers. The code and the API call it *self-directed*. Stored as `claims.routed = 0` | **Live** (under the name self-directed) |
-| `ballot_directed` | Work steered by the contributor's own ballot, once their AI is linked to their vote | **Planned.** Needs accounts and voting, and a schema change: `routed` is a yes/no column today |
+| `public_routed` | `next_task` followed the public allocation (the weekly vote). `routed = 1` | **Live.** The only origin compared with the allocation |
+| `ballot_directed` | `next_task` followed the contributor's own ballot, because their AI is linked to a voter account that has one. `routed = 0` | **Built** (Phase 4, not yet deployed). Credited and shown, never compared with the vote |
+| `self_picked` | The agent chose the task itself with `claim_task`. `routed = 0` | **Live.** The code and the API still call these *self-directed* (`self_directed_units`) |
 
-**Planned:** when a contributor's chosen projects have no ready work, their agent falls back to the public
-split by default, with a visible toggle. That work is recorded as `public_routed`.
+Fallback: when none of a linked contributor's ballot projects has eligible work, `next_task` falls back to the public
+allocation by default and records the claim as **`public_routed`**, so the published numbers stay true. The setting is
+per voter account (`accounts.fallback`, default on, a toggle on the Your Swarm page). With it off the call fails with "No eligible
+work in your projects" and nothing is routed.
+
+`/api/stats` reports all three origins apart: per project `routed_units` (public), `ballot_directed_units` and
+`self_directed_units` (self-picked), and `routing_origins.units` for the week. They are never added together. A big
+ballot-directed contributor therefore cannot move the voted-versus-routed comparison; only fallback work, which is public-routed, can.
 
 ## The scheduler
 
-`next_task` runs a weighted deficit, in `hub/src/mcp.js`:
+`next_task` runs a weighted deficit, in `hub/src/mcp.js` (the ordering itself is `pickByDeficit` in `hub/src/steering.js`):
+
+**First, steering.** If the caller's contributor is linked to a voter account (and the account is not suspended) whose latest ballot has points on
+active projects, the same weighted deficit runs against the ballot's shares (renormalised over active projects), over **this contributor's own
+ballot-directed units this week**. The claim is recorded `ballot_directed`. If none of the ballot's projects is eligible, the fallback
+rule above applies. Everyone else, and a linked contributor falling back, takes the public path:
 
 1. Take the allocation in force and this week's routed units per project.
 2. **Eligible projects** are active and unpaused, have a reviewer, have at least one ready task the caller hasn't already
@@ -200,6 +221,8 @@ split by default, with a visible toggle. That work is recorded as `public_routed
 3. For each, deficit = target share minus actual routed share this week.
 4. Pick the largest deficit. Ties go to the larger target, then project id.
 5. Hand out that project's oldest ready task. It tries up to five candidates if another contributor wins a race.
+
+The unit tests show the ordering converging on 80/20, 70/30 and 55/45 over hundreds of mixed-size picks, and an 80/20 ballot reaching 16 of 20 claims through the real tool.
 
 The caller must hold fewer than 2 active claims. If no project is eligible, the call fails with the reason per
 project. It never invents an assignment to hit a percentage. Only `ready` tasks are candidates, so held tasks
@@ -306,7 +329,7 @@ Swarm never blends these into one score. `weekStats` in `hub/src/core.js` comput
 | Measure | What it means | Where it comes from | Status |
 |---|---|---|---|
 | **Voted** | The public's target share | `allocation.share`, with a `provisional` flag. Labelled provisional when it is a carried-forward fallback | Live |
-| **Routed** | Work units handed out through `next_task` this week. Not compute consumed | Distinct (task, contributor) pairs with a standing routed claim (active or submitted), weighted by units. A claim released and re-claimed counts once. Released and expired units are reported separately, as are self-directed units | Live |
+| **Routed** | Work units handed out through `next_task` this week. Not compute consumed | Distinct (task, contributor) pairs with a standing `public_routed` claim (active or submitted), weighted by units. A claim released and re-claimed counts once. Released and expired units are reported separately, as are ballot-directed and self-directed units | Live |
 | **Accepted** | Units a project reviewer accepted | Accepted submissions, by the week they were reviewed, plus an all-time figure. Pending work is never counted | Live |
 | **Impact** | Outcomes of accepted work, such as people reached | Would be project-reported and labelled | **Planned.** Publication links are recorded separately; outcomes are not measured |
 
@@ -344,13 +367,49 @@ With zero eligible ballots the previous allocation is carried forward with `prov
 `GET /api/vote/current` and `/api/vote/next` (a projection, labelled `projected`) return basis points. `GET /api/vote/audit` returns aggregates only: eligible voter
 count, accounts saving a ballot per day for 30 days, and snapshot history. Routed work is compared only against that week's targets.
 
+### Your Swarm: linking an AI to a voter account
+
+A contributor key and a voter passkey are separate identities. A **link** (`account_links`) joins one contributor to one voter
+account, so that account's ballot steers that contributor. It is one-to-one on both sides. No email is involved.
+
+- **By code** (works for every client). A signed-in voter presses "Link my AI" (`POST /api/me/link-code`). Swarm makes a code like
+  `SWARM-ABCD-2345` (8 characters from a 32-symbol alphabet with no look-alikes), stores only its salted hash, and shows it once. It is valid
+  for 10 minutes and works once; a new code cancels the older one. The voter tells their AI, which calls the MCP tool `link_account {code}` with its contributor key or OAuth connection.
+  Redemption is one batch: the old link of the account and of the contributor (if any) are replaced, each replaced link writes an `account_unlinked` event, the new link writes `account_linked`, and the code is deleted, so two simultaneous redemptions cannot both win.
+  Events keep only the first 8 characters of the account id.
+- **Brute-force limit.** Each failed redemption (wrong, malformed, expired or used code) is recorded in `link_attempts`. After 5 failures in an hour from one contributor, or 20 from one network, even a correct code is refused until
+  the failures age out. Entries older than a day are removed by the cron.
+- **By sign-in.** Choosing "Sign in with your passkey" at the OAuth approve step links the connecting AI in the same step (below).
+- `POST /api/me/unlink` removes the link (event written). `POST /api/me/fallback {enabled}` sets the fallback. All three writes need a session cookie, the exact `Origin` and `X-Swarm: 1`.
+- `GET /api/me` (session cookie; private, never cached) returns the voter's ballot (with names and an `active` flag per project), the fallback setting, the linked handle, and **your week**: for the linked contributor, claimed,
+  in progress, handed in, awaiting review, accepted and rejected tasks and units for each routing origin; claims released or expired; per-project units by origin and the share of ballot-directed units each project got (to set beside the ballot);
+  up to ten accepted receipts; and self-reported token estimates, labelled as estimates and never used for routing or credit. Counts use claims made this week; pending work is never counted as accepted. The MCP tool `my_week` returns the same summary
+  (plus a plain recap and the steering state), so an AI can tell the user. Swarm stores no email and sends no recap by email.
+
+### MCP sign-in (OAuth)
+
+`/mcp` accepts two kinds of bearer credential. A `swk_` contributor key works exactly as before. Anything else is treated as an OAuth access token and handed to
+`@cloudflare/workers-oauth-provider` (pinned to 1.2.3; the one new dependency, because OAuth 2.1 with PKCE, dynamic registration and token storage is not something to hand-roll). Requests with no `Authorization` header never go through the provider, so the public tools stay open.
+
+- **Discovery:** `/.well-known/oauth-protected-resource/mcp` (RFC 9728) and `/.well-known/oauth-authorization-server` (RFC 8414). A tool that needs credentials, called with none, answers HTTP 401 with
+  `WWW-Authenticate: Bearer realm="OAuth", resource_metadata="...", scope="read"`, which is how MCP clients start sign-in. (A wrong contributor key is still an ordinary tool error.)
+- **Registration:** dynamic client registration at `/oauth/register`, rate limited per network. Redirect URIs must be `https`, or `http` on loopback; dangerous schemes, fragments and userinfo are refused. Client ID Metadata Documents and private-use schemes are off.
+- **PKCE:** S256 is required. The token endpoint is `/oauth/token`; refresh tokens rotate. Access tokens are bound to the audience `<RP_ORIGIN>/mcp`.
+- **Approve page `/authorize`:** shows the app's name, where the result goes (and a warning for a loopback address), and two choices. *Continue as a pseudonymous handle* makes a new contributor (optionally with a chosen handle) with no account and no usable key,
+  under the same daily pairing cap as `pair`. *Sign in with your passkey* uses the Phase 3 login and, if the account already has a linked contributor, reuses it (one identity per account); otherwise it creates one and links it. The voter then ticks scopes. The page is Worker-rendered with its own strict CSP (same-origin script only, `form-action 'none'`, no framing),
+  puts the app's strings in a JSON data block and renders them with `textContent`. The decision is a JSON POST that needs the exact `Origin`, `X-Swarm: 1`, and the browser-bound single-use consent handle the library keeps in a cookie; anything it can refuse (a taken handle, the cap, no session) it refuses before the handle is spent.
+- **Scopes**, enforced on the server for every call (`SCOPE_FOR_TOOL` in `hub/src/oauth-scopes.js`): `read` = `my_work`, `my_week`, `submission_status`; `work` = `next_task`, `claim_task`, `release_task`, `link_account`; `submit` = `submit_work`. Browse tools and `pair` need none. A call outside the grant is HTTP 403 with
+  `error="insufficient_scope"` and the scopes to ask for. A contributor key carries all three.
+- **Token to contributor:** the grant's props are `{ contributor: <id> }`, so every call acts as that contributor, under the same claim caps and limits as a key.
+- **Kill switch:** `OAUTH = "off"` stops `/authorize` and the OAuth endpoints; keys and public tools are unaffected.
+
 ## The public JSON API
 
 All `GET`, no key needed. (`/setup` and `/llms.txt`, below, are `GET` too.)
 
 | Endpoint | What |
 |---|---|
-| `/api/stats` | The week's numbers per project: the four measures, open tasks, pending reviews, active claims, reviewer capacity, gap reason, and `intake` and `paused` |
+| `/api/stats` | The week's numbers per project: the four measures (routed is public-routed only; ballot-directed and self-picked units are separate fields, and `routing_origins` totals the three), open tasks, pending reviews, active claims, reviewer capacity, gap reason, and `intake` and `paused` |
 | `/api/tasks`, `/api/tasks/:id` | The task list (filter by `project`, `status`), and one task with its brief. Held tasks are never listed, and `:id` answers 404 for one |
 | `/api/receipts` | Accepted work, newest first: task, project, handle, reviewer, sources, self-reported model and tokens |
 
@@ -380,7 +439,7 @@ properties. A missing field is "required"; an explicit `null` is a wrong type; `
 one could be a key. The validator throws on a schema keyword it doesn't implement, and a test runs every tool's schema
 through it.
 
-There are 12 tools, listed below by permission group.
+There are 14 tools, listed below in the original three groups. Over OAuth the access is the three scopes `read`, `work` and `submit` instead (which tool needs which is in "MCP sign-in" above); a contributor key has all of them, and the browse tools and `pair` need neither.
 
 ### Read: no key
 
@@ -388,7 +447,7 @@ There are 12 tools, listed below by permission group.
 |---|---|
 | `how_to_help` | Plain instructions and the rules for helping. Start here |
 | `setup_guide` | The set-up guide for an AI: add this MCP server, pair, and optionally schedule a weekly run with the app's own scheduler. The same text as `/setup`. Optional `client`, exactly one of `claude-code`, `claude-app`, `chatgpt`, `codex`, `cursor` or `other` (the REST `/setup?client=` is more forgiving) |
-| `list_projects` | Each project with its share this week (labelled provisional), routed, self-directed and accepted units, open tasks, pending reviews and gap reason |
+| `list_projects` | Each project with its share this week (labelled provisional), public-routed, ballot-directed, self-picked and accepted units, open tasks, pending reviews and gap reason |
 | `list_tasks` | Public task list without briefs. Filters: `project`, `status` (default `ready`; `held` is not an option), `limit` (up to 50), `offset` |
 | `get_task` | One task in full: the brief (labelled as data, not instructions), the exact output format and the unit size. A held task looks like a missing one |
 
@@ -397,25 +456,26 @@ There are 12 tools, listed below by permission group.
 | Tool | What it does |
 |---|---|
 | `pair` | Needs no key; it's how you get one. Returns a pseudonymous handle and a key, shown once. Optional handle of 3 to 24 characters; reserved names are refused. Capped at 5 per network per day |
-| `next_task` | The scheduler above. Claims one task for 3 hours as routed work. Needs a key |
-| `claim_task` | Claims a specific ready task for 3 hours as self-directed work. Needs a key |
+| `next_task` | The scheduler above. Claims one task for 3 hours: public-routed, or ballot-directed for a linked contributor. Needs a key or sign-in (`work`) |
+| `claim_task` | Claims a specific ready task for 3 hours as self-picked work. Needs a key or sign-in (`work`) |
+| `link_account` | `{code}`: links this contributor to the voter account that made the code (see "Your Swarm"). Wrong codes are rate limited. `work` |
 | `release_task` | Gives a claim back. Releasing and re-claiming never counts twice. Needs a key |
-| `my_work` | The caller's handle, active claims, recent submissions and accepted units. Needs a key |
+| `my_work` | The caller's handle, active claims (with routing origin), recent submissions and accepted units. Needs a key or sign-in (`read`) |
+| `my_week` | The caller's week by routing origin, per-project effort, receipts and labelled token estimates, plus a recap to tell the user. `read` |
 
 ### Submit: needs a key
 
 | Tool | What it does |
 |---|---|
-| `submit_work` | Hands in work with 1 to 30 sources. Needs an active claim on the task. It waits for review and Swarm never publishes it. Suspicious links are flagged for the reviewer |
+| `submit_work` | Hands in work with 1 to 30 sources. Needs an active claim on the task. It waits for review and Swarm never publishes it. Suspicious links are flagged for the reviewer. Key or sign-in (`submit`) |
 | `submission_status` | Status of one of the caller's submissions: pending, accepted or rejected, with the reviewer's note |
 
 While `INTAKE` is `"paused"`, `pair`, `next_task`, `claim_task` and `submit_work` are refused with a friendly
-message; the other eight tools work.
+message; the other ten tools work.
 
 The brief calls for "explicit permission" on the submit group. The server can't see that; it's the client's
 tool-approval prompt. `submit_work` is marked as a non-read-only tool, so a client can ask first.
 
-**Planned:** OAuth sign-in for the MCP. Today a contributor uses a key from `pair`.
 
 ## The set-up guide: `/setup`, `/llms.txt` and `setup_guide`
 
@@ -426,7 +486,7 @@ returns it too, so an already-connected AI can use it. `?client=claude-code` (or
 
 The guide tells the AI to ask the user before changing any settings, work out which app it's in, add the MCP
 server the way that app documents it, pair (preferring the header for the key), and, only if the user says yes,
-offer a weekly run through the app's own scheduler. The text is in `hub/src/setup.js`. Its rules are tested: the
+offer a weekly run through the app's own scheduler. It also tells the AI that where the app offers MCP sign-in the user can use that instead of a key, and how the user can link their voter account so their ballot steers the AI (`link_account`, `my_week`). The text is in `hub/src/setup.js`. Its rules are tested: the
 only shell command is the documented Claude Code `claude mcp add` line, shown to the user for approval; it never
 asks for a download; it always asks first. Swarm doesn't schedule or run anything for the user.
 
@@ -537,6 +597,12 @@ migration fails the tests. No network, token or deploy is needed. The files in `
 | `notices.test.js` | The untrusted-data notice on every response that carries task text |
 | `accounts.test.js`, `webauthn.test.js` | Passkeys with real generated ES256 and RS256 keys: happy paths, wrong challenge, origin and rpIdHash, missing UV or UP, replayed, expired and cross-kind challenges, counters, COSE and RSA key rejection, DER and CBOR edge cases, session cookie flags, rotation and logout, the Turnstile stub and failures, the three-per-network cap under concurrency, CSRF and the vote-only CSP |
 | `voting.test.js` | Ballot validation and versioning, the snapshot (largest remainder, idempotency under concurrency, fallback, eligibility cutoff, week boundaries, rollback), the audit endpoint and the scheduler converging on a 70/30 snapshot |
+| `steering.test.js` | Routing origins on claims, an 80/20 ballot converging through the real tool, the deficit ordering over hundreds of picks, fallback on and off, a big ballot-directed contributor leaving the public comparison untouched, unlinked contributors following the public split |
+| `link.test.js` | Link codes: form, hashing, single use, expiry, wrong codes, the per-contributor and per-network brute-force limits, relinking and its events, CSRF and Origin checks on the writes |
+| `me.test.js` | `/api/me`: signed out, ballot, week by origin, receipts, token estimates labelled, isolation between voters, the fallback setting; the `my_week` tool |
+| `oauth.test.js` | MCP sign-in: discovery, registration and redirect validation, the consent page (CSP, escaping), PKCE, token-to-contributor mapping, scopes per tool, CSRF and Origin on `/authorize`, passkey linking, and that contributor keys and public tools are unchanged |
+| `pages.test.js` | The Phase 4 pages and scripts follow the rendering and CSP rules |
+| `migration-0008.test.js` | Migration 0008 on a database that already has rows: the backfill, the consistency triggers, the link tables |
 | `github.test.js` | The connector with a stubbed GitHub: label sizing, skipped pull requests, screening and held issues, closing, idempotency, repository identity and renames, pull-request URL and id checks, merge and close, rate limits and errors, the webhook (valid, invalid, missing secret, replay), registration, the 50/50 allocation, and Town Hall still syncing |
 | `migration-0006.test.js` | Migration 0006 on a database that already has rows |
 | `sync-limits.test.js` | The feed fetch: the byte cap (no, false and honest `Content-Length`, a multibyte body), and the deadline |
@@ -555,7 +621,7 @@ The console keeps the existing CSP and uses text nodes for all dynamic content. 
 
 | Ops endpoint | Behavior |
 |---|---|
-| `GET /api/ops/overview` | Allocation in force this week, routed units split by public/self-picked origin and project, lifecycle counts, pending count/oldest age, active claims/expiry within one hour, INTAKE and sync state. Ballot-directed routing is labelled planned, with no invented assignments |
+| `GET /api/ops/overview` | Allocation in force this week, routed units split by public/ballot-directed/self-picked origin and project, lifecycle counts, pending count/oldest age, active claims/expiry within one hour, INTAKE and sync state. Ballot-directed units are shown as their own origin, never added to the public-routed ones, and nothing is invented |
 | `GET /api/ops/pending` | Pending submissions with task data, plain body, normalized sources, flags, self-reported model/tokens, age and AI annotations |
 | `GET /api/ops/held` | Private withheld-task inspection and reasons; release still requires a clean sync |
 | `GET /api/ops/projects` | All projects, their pause/capacity state and pending counts |

@@ -13,6 +13,8 @@ For the plan and the architecture, see [`../docs/PLAN.md`](../docs/PLAN.md) and
 - `src/access.js`: Access JWT verification. `src/ops.js`: private operator APIs. `src/prescreen.js`: advisory Workers AI annotations.
 - `src/mcp.js`: the MCP tools. `src/core.js`: stats, claims, allocation, task intake. `src/lib.js`: helpers.
 - `src/webauthn.js`, `src/accounts.js`, `src/voting.js`: passkey accounts (hand-written WebAuthn on WebCrypto), sessions, ballots, the weekly snapshot and `/api/vote/*`.
+- `src/steering.js`, `src/me.js`, `src/identity.js`: Phase 4. Linking a contributor to a voter account (link codes), the ballot that steers `next_task`, the weekly summary, `/api/me`, and contributor creation.
+- `src/oauth.js`, `src/oauth-scopes.js`: MCP sign-in (OAuth 2.1 + PKCE) on `@cloudflare/workers-oauth-provider`, the `/authorize` page, and the `read`/`work`/`submit` scopes.
 - `src/sync.js`: Town Hall task sync. `src/github.js`: the GitHub connector (issues to tasks, pull-request checks, merge = accepted, webhook, project registration). `src/screen.js`: screening of project text. `src/links.js`: submission link
   pre-screen. `src/setup.js`: the set-up guide text.
 - `public/`: plain HTML, CSS and JS with no build step and no framework. `_headers` holds the CSP (self plus Google
@@ -44,6 +46,7 @@ Files in `migrations/` are applied in order by `wrangler d1 migrations apply` (`
   network hash on `claims`, and link flags on `submissions`.
 - `0006_github.sql` adds the GitHub columns, the `github_deliveries` table, the Swarm AI project and a provisional 50/50 allocation.
 - `0007_voting.sql` adds accounts, passkeys, sessions, ballots and snapshots, and converts `allocation.share` from percent to basis points.
+- `0008_steering.sql` adds `claims.routing_origin` (backfilled from `routed`, kept consistent by triggers), `accounts.fallback`, `account_links`, `link_codes` and `link_attempts`.
 - Never edit a migration that has shipped. Every schema change is a new `000N_*.sql`. Test a new one against a copy
   that already has rows in it, because a table rebuild is where migrations go wrong.
 
@@ -52,6 +55,17 @@ Files in `migrations/` are applied in order by `wrangler d1 migrations apply` (`
 snapshot from ballots; the scheduler follows it. Vars: `RP_ID`, `RP_ORIGIN`, `TURNSTILE_SITE_KEY`. Secret: `TURNSTILE_SECRET` (registration is refused without it).
 Locally, set `RP_ID=localhost` and `RP_ORIGIN=http://localhost:8787` in `.dev.vars`, plus a Turnstile test secret
 (`1x0000000000000000000000000000000AA`) and matching test site key. Pages: `/vote`, `/rules`, `/privacy`, `/terms`. See the runbook for snapshots and suspending an account.
+
+## Your AI follows your vote (Phase 4)
+Three routing origins: `public_routed` (the only one compared with the vote), `ballot_directed` and `self_picked`. A voter signs in at `/me`, presses "Link my AI",
+and tells their AI "Link my Swarm account with code ..."; the AI calls `link_account`. From then on `next_task` follows that voter's ballot (the same weighted
+deficit, over that contributor's own ballot-directed units this week). If none of the ballot's projects has eligible work it falls back to the public split and
+records `public_routed`, unless the voter turned the fallback off. `my_week` returns the weekly recap; Swarm stores no email.
+
+MCP sign-in: `/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server`, `/oauth/register` (dynamic registration), `/oauth/token`, and the `/authorize` page
+(continue as a pseudonymous handle, or sign in with your passkey and link in one step; then grant `read`, `work` and/or `submit`). Needs the `OAUTH_KV` namespace (bound in `wrangler.toml`).
+`OAUTH = "off"` is the kill switch. Contributor keys (`swk_...`) are not OAuth tokens and keep working unchanged. The one new dependency is `@cloudflare/workers-oauth-provider`, pinned to 1.2.3.
+Locally, set `RP_ORIGIN=http://localhost:8787` so the issuer matches.
 
 ## Deploy (maintainer only)
     scripts/deploy.sh
@@ -108,9 +122,9 @@ updated, everything from outside goes through `src/screen.js`:
 Claims last 3 hours. At most 2 active claims per contributor, and at most 4 across all handles on one network
 (enforced in the same conditional `INSERT` as the per-contributor cap; the network hash rotates daily, and the cap
 also counts yesterday's hash so midnight UTC is no loophole). 5 pairings per network per day, 20 submissions per
-contributor per day, 30 sources per submission. Routed units count each (task, contributor) once per week and exclude
-released or expired claims. `next_task` is a weighted-deficit scheduler (at most 10 pending reviews per project).
-Allocation is provisional until voting exists. Contributor keys are stored only as salted hashes, never echoed in an
+contributor per day, 30 sources per submission. Routed units (public-routed only) count each (task, contributor) once per week and exclude
+released or expired claims; ballot-directed and self-picked units are counted the same way, apart. Failed link codes: 5 an hour per contributor and 20 per network; codes last 10 minutes. `next_task` is a weighted-deficit scheduler (at most 10 pending reviews per project).
+Allocation is provisional until a weekly ballot snapshot is published. Contributor keys are stored only as salted hashes, never echoed in an
 error and never written to events or logs. Tools prefer the `Authorization` header; the `contributor_key` argument
 is a fallback because arguments end up in chat logs.
 
@@ -118,7 +132,7 @@ is a fallback because arguments end up in chat logs.
 `GET /setup` (and the same text at `GET /llms.txt`) is a short plain-text guide an AI can follow when a user says
 "Set me up with Swarm AI: https://swarm.bigpicsolutions.com/setup". It asks before changing any settings, works out
 which app the AI is in, adds the MCP server the way that app documents it, pairs (preferring header auth), and
-optionally offers a weekly run through the app's own scheduler. `?client=claude-code` (and `claude-app`, `chatgpt`,
+mentions MCP sign-in where the app offers it, how a user can link their ballot to their AI (`link_account`), and optionally offers a weekly run through the app's own scheduler. `?client=claude-code` (and `claude-app`, `chatgpt`,
 `codex`, `cursor`, `other`) tailors it. The MCP tool `setup_guide` returns the same text. The guide contains one shell
 command, the documented Claude Code `claude mcp add ...`, shown to the user for approval, and never asks for a
 download. Keep it in step with the steps in `public/js/common.js`; tests check both rules.
