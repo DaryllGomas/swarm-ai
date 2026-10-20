@@ -1,6 +1,7 @@
 // Swarm AI hub: static site (public/ via ASSETS) + MCP at /mcp + JSON API at /api/* + D1.
 // Swarm never publishes into a project; submissions wait for a person to review them.
-import { PROVISIONAL_NOTE, expireClaims, newOp, weekStats } from './core.js';
+import { PROVISIONAL_NOTE, expireClaims, reviewSubmission, weekStats } from './core.js';
+import { adminActivateProject, adminRegisterGithub, handleGithubWebhook } from './github.js';
 import { handleMcp } from './mcp.js';
 import { UNTRUSTED, syncIfStale, syncTasks } from './sync.js';
 import { SECURITY_HEADERS, clean, ipHashFor, isAdmin, iso, json, readJsonResult, underRateLimit } from './lib.js';
@@ -42,6 +43,7 @@ function setupText(req, url) {
 
 async function api(req, env, ctx, url) {
   const path = url.pathname;
+  if (path === '/api/github/webhook') return handleGithubWebhook(req, env, ctx); // 404 until GITHUB_WEBHOOK_SECRET is set
   if (path.startsWith('/api/admin/')) {
     if (!(await isAdmin(req, env))) return json({ error: 'not found' }, 404);
     if (!(await underRateLimit(env, await ipHashFor(env, req)))) return json({ error: 'Slow down.' }, 429);
@@ -49,6 +51,9 @@ async function api(req, env, ctx, url) {
     if (path === '/api/admin/held' && req.method === 'GET') return adminHeld(env);
     if (path === '/api/admin/review' && req.method === 'POST') return adminReview(req, env);
     if (path === '/api/admin/sync' && req.method === 'POST') return json(await syncTasks(env, { force: true }));
+    if (path === '/api/admin/projects/github' && req.method === 'POST') return adminRegisterGithub(req, env);
+    const act = path.match(/^\/api\/admin\/projects\/([a-z0-9][a-z0-9-]{0,59})\/activate$/);
+    if (act && req.method === 'POST') return adminActivateProject(env, ctx, act[1]);
     return json({ error: 'not found' }, 404);
   }
   if (req.method !== 'GET' && req.method !== 'HEAD') return json({ error: 'Use GET.' }, 405, { Allow: 'GET, HEAD' });
@@ -72,8 +77,8 @@ async function api(req, env, ctx, url) {
 async function receipts(env, url) {
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '10', 10) || 10, 1), 50);
   const { results } = await env.DB.prepare(
-    `SELECT s.id, s.task, t.title, t.units, t.kind, t.project, p.name AS project_name, c.handle, s.reviewed_by, s.reviewed_at,
-            s.sources, s.model, s.tokens_est
+    `SELECT s.id, s.task, t.title, t.units, t.kind, t.project, p.name AS project_name, p.repo, c.handle, s.reviewed_by, s.reviewed_at,
+            s.sources, s.model, s.tokens_est, s.pr_number, s.pr_author
      FROM submissions s JOIN tasks t ON t.id = s.task JOIN projects p ON p.id = t.project JOIN contributors c ON c.id = s.contributor
      WHERE s.status = 'accepted' ORDER BY s.reviewed_at DESC, s.id DESC LIMIT ?1`
   ).bind(limit).all();
@@ -90,6 +95,8 @@ async function receipts(env, url) {
       reviewed_at: iso(r.reviewed_at),
       self_reported: { model: r.model, tokens_est: r.tokens_est },
       evidence: { task_url: `/api/tasks/${r.task}`, sources: JSON.parse(r.sources) },
+      // A merged pull request: credits the GitHub account that wrote it, beside the Swarm handle. The two need not match.
+      ...(r.pr_number ? { github: { repo: r.repo, pr_number: r.pr_number, pr_author: r.pr_author, pr_url: `https://github.com/${r.repo}/pull/${r.pr_number}` } } : {}),
     })),
   }, 200, { 'Cache-Control': 'public, max-age=30' });
 }
@@ -121,7 +128,7 @@ async function oneTask(env, id) {
 
 async function adminPending(env) {
   const { results } = await env.DB.prepare(
-    `SELECT s.id, s.task, t.title, t.kind, t.units, t.brief, t.output_format, t.project, c.handle, s.body, s.sources, s.flags, s.model, s.tokens_est, s.created
+    `SELECT s.id, s.task, t.title, t.kind, t.units, t.brief, t.output_format, t.project, c.handle, s.body, s.sources, s.flags, s.model, s.tokens_est, s.pr_number, s.pr_author, s.pr_state, s.created
      FROM submissions s JOIN tasks t ON t.id = s.task JOIN contributors c ON c.id = s.contributor
      WHERE s.status = 'pending' ORDER BY s.created`
   ).all();
@@ -153,39 +160,12 @@ async function adminReview(req, env) {
   if (s.status !== 'pending') return json({ error: `already ${s.status}` }, 409);
 
   const accept = body.decision === 'accept';
-  const verdict = accept ? 'accepted' : 'rejected';
-  const now = Date.now();
-  const op = newOp();
-  // One transaction: the submission, the task and the event commit together or not at all. The first UPDATE is the only
-  // thing that can change who wins: it applies to a pending submission whose task is waiting for review ('submitted'), and
-  // a task gets at most one accepted result. The task change and the event run only if it applied (they find this request's
-  // op on the submission), so a stale or repeated review cannot touch a task that has moved on.
-  const res = await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE submissions SET status = ?2, reviewed_by = ?3, review_note = ?4, reviewed_at = ?5, op = ?6
-       WHERE id = ?1 AND status = 'pending'
-         AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = submissions.task AND t.status = 'submitted')
-         AND (?2 != 'accepted' OR NOT EXISTS (SELECT 1 FROM submissions a WHERE a.task = submissions.task AND a.status = 'accepted'))`
-    ).bind(id, verdict, s.reviewer, note, now, op),
-    // A rejected piece of work puts the task back in the pool, up to two rejections by a reviewer; after that it stays rejected.
-    env.DB.prepare(
-      `UPDATE tasks SET status = CASE
-           WHEN ?3 = 'accepted' THEN 'accepted'
-           WHEN (SELECT COUNT(*) FROM submissions WHERE task = ?1 AND status = 'rejected' AND COALESCE(reviewed_by, '') != 'system') >= 2 THEN 'rejected'
-           ELSE 'ready' END
-       WHERE id = ?1 AND status = 'submitted' AND EXISTS (SELECT 1 FROM submissions WHERE id = ?2 AND op = ?4 AND status = ?3)`
-    ).bind(s.task, id, verdict, op),
-    env.DB.prepare(
-      `INSERT INTO events (ts, type, task, contributor, submission, actor, detail)
-       SELECT ?3, ?4, task, contributor, id, ?5, json_object('note', ?6) FROM submissions WHERE id = ?1 AND op = ?2`
-    ).bind(id, op, now, accept ? 'submission_accepted' : 'submission_rejected', s.reviewer, note),
-  ]);
-  if (!res[0].meta.changes) {
+  const r = await reviewSubmission(env, { id, task: s.task, verdict: accept ? 'accepted' : 'rejected', reviewedBy: s.reviewer, note });
+  if (!r.ok) {
     // Not reviewed by this request: someone else got there first, or the task is not in a state that can be reviewed.
-    const now2 = await env.DB.prepare('SELECT s.status, t.status AS task_status FROM submissions s JOIN tasks t ON t.id = s.task WHERE s.id = ?1').bind(id).first();
-    if (now2.status !== 'pending') return json({ error: `already ${now2.status}` }, 409);
-    return json({ error: `the task is ${now2.task_status}, not waiting for review, or it already has an accepted result` }, 409);
+    if (r.status !== 'pending') return json({ error: `already ${r.status}` }, 409);
+    return json({ error: `the task is ${r.taskStatus}, not waiting for review, or it already has an accepted result` }, 409);
   }
-  const task = await env.DB.prepare('SELECT status FROM tasks WHERE id = ?1').bind(s.task).first();
+  const task = { status: r.taskStatus };
   return json({ ok: true, id, decision: accept ? 'accepted' : 'rejected', reviewed_by: s.reviewer, task_status: task.status, receipt: accept ? `/api/receipts` : null, allocation_note: PROVISIONAL_NOTE });
 }

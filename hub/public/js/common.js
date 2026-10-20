@@ -64,38 +64,33 @@
     document.querySelectorAll('[data-updated]').forEach((n) => { n.textContent = 'Week of ' + fmtShort(n.dataset.week) + ' · updated ' + rel(n.dataset.updated); });
   }, 30000);
 
-  // ---- the five projects. Town Hall is the only real one: its numbers come from /api/stats, never from this table.
-  // The other four are a preview with made-up numbers (the mockup's), always drawn dimmed and labeled "Example".
-  // Town Hall's voted/routed/accepted/open below are NOT shown anywhere; only the example donut on the home page
-  // reads META's `voted`, and that panel is labeled Example data as a whole.
+  // ---- the projects. Every figure shown comes from /api/stats; this table only holds how a project looks.
+  // A project the hub lists but this table does not know gets a look from FALLBACK, by its kind.
   const META = [
-    { id: 'town-hall', name: 'Town Hall', focus: 'Civic information & local governance', icon: 'landmark', color: '#f2605f', beam: ['#ff5d52', '#ff9a3c'], voted: 28, real: true },
-    { id: 'opentransit', name: 'OpenTransit Docs', focus: 'Transit data & documentation', icon: 'bus', color: '#4aa8ff', beam: ['#2d6bff', '#4fd0ff'], voted: 22, routed: 18, accepted: 936, open: 42 },
-    { id: 'accessmap', name: 'AccessMap Research', focus: 'Accessibility mapping & research', icon: 'search', color: '#a56cf5', beam: ['#8a4cf0', '#c7a0ff'], voted: 18, routed: 20, accepted: 712, open: 68 },
-    { id: 'library', name: 'Library Commons OCR', focus: 'Digitize and structure public knowledge', icon: 'book', color: '#5fd08a', beam: ['#36c46f', '#ffc94d'], voted: 20, routed: 18, accepted: 1120, open: 64 },
-    { id: 'climate', name: 'Climate FAQ', focus: 'Clear, sourced answers on climate', icon: 'leaf', color: '#f5c542', beam: ['#f2c230', '#46d38f'], voted: 12, routed: 12, accepted: 504, open: 36 },
+    { id: 'town-hall', name: 'Town Hall', focus: 'Civic information & local governance', icon: 'landmark', color: '#f2605f', beam: ['#ff5d52', '#ff9a3c'] },
+    { id: 'swarm-ai', name: 'Swarm AI', focus: 'Open-source work on Swarm itself', icon: 'github', color: '#a56cf5', beam: ['#8a4cf0', '#c7a0ff'] },
   ];
-  const PREVIEW_LABEL = 'Preview: example projects, not real yet';
-  // Display rows: Town Hall from the live API only (throws if the API has no row for it, so nothing fake is shown in
-  // its place), then the four examples flagged `preview`. A real row never carries a made-up number.
+  const FALLBACK = [
+    { color: '#4aa8ff', beam: ['#2d6bff', '#4fd0ff'] },
+    { color: '#5fd08a', beam: ['#36c46f', '#ffc94d'] },
+    { color: '#f5c542', beam: ['#f2c230', '#46d38f'] },
+  ];
+  const KIND_ICON = { github: 'github', mission: 'file', research: 'search' };
+  // Display rows, in the order the API lists the projects. Throws if the API lists none, so nothing is invented.
   function projects(stats) {
-    const live = stats && stats.projects && stats.projects.find((p) => p.id === 'town-hall');
-    if (!live) throw new Error('no live data for Town Hall');
-    return META.map((m) => {
-      const o = Object.assign({}, m);
-      if (m.real) {
-        o.voted = live.allocation.share;
-        o.provisional = !!live.allocation.provisional;
-        o.routed = live.routed_share;
-        o.routedUnits = live.routed_units;
-        o.accepted = live.accepted_units;
-        o.open = live.open_tasks;
-        o.live = live;
-      } else {
-        o.preview = true;
-      }
-      return o;
+    const live = (stats && stats.projects) || [];
+    if (!live.length) throw new Error('no live projects');
+    let extra = 0;
+    const known = META.filter((m) => live.some((p) => p.id === m.id));
+    const rows = live.map((l) => {
+      const m = META.find((x) => x.id === l.id) || Object.assign({ id: l.id, name: l.name, focus: l.summary, icon: KIND_ICON[l.kind] || 'file' }, FALLBACK[extra++ % FALLBACK.length]);
+      return Object.assign({}, m, {
+        voted: l.allocation.share, provisional: !!l.allocation.provisional,
+        routed: l.routed_share, routedUnits: l.routed_units,
+        accepted: l.accepted_units, open: l.open_tasks, live: l,
+      });
     });
+    return rows.sort((x, y) => (known.findIndex((m) => m.id === x.id) + 1 || 99) - (known.findIndex((m) => m.id === y.id) + 1 || 99));
   }
 
   // "Swarm is paused for maintenance" banner, driven by /api/stats (intake = "paused"). Safe to call on every refresh.
@@ -129,13 +124,13 @@
       clear(box);
       if (!q) { box.hidden = true; return; }
       await load();
-      const names = { 'town-hall': 'Town Hall' };
-      const hits = tasks.filter((t) => t.title.toLowerCase().includes(q) || (names[t.project] || t.project).toLowerCase().includes(q));
+      const nameOf = (id) => (META.find((m) => m.id === id) || { name: id }).name;
+      const hits = tasks.filter((t) => t.title.toLowerCase().includes(q) || nameOf(t.project).toLowerCase().includes(q));
       const projHits = META.filter((m) => m.name.toLowerCase().includes(q) || m.focus.toLowerCase().includes(q));
       projHits.slice(0, 3).forEach((m) => {
         const a = el('a', 'sr-item'); a.href = '/#projects';
         a.appendChild(icon(m.icon)); a.appendChild(el('span', null, m.name));
-        a.appendChild(el('em', null, m.real ? 'project' : 'example project'));
+        a.appendChild(el('em', null, 'project'));
         box.appendChild(a);
       });
       hits.slice(0, 6).forEach((t) => {
@@ -306,11 +301,9 @@
   // ---- the Flow: a glowing core, a tapered luminous beam to each project, a ringed node at the end of each beam.
   const POS = {
     'town-hall': { x: 128, y: 62, side: 'r' },
-    opentransit: { x: 92, y: 168, side: 'r' },
-    accessmap: { x: 388, y: 210, side: 'r' },
-    library: { x: 688, y: 64, side: 'r' },
-    climate: { x: 762, y: 168, side: 'r' },
+    'swarm-ai': { x: 688, y: 64, side: 'r' },
   };
+  const SPARE_POS = [{ x: 388, y: 210, side: 'r' }, { x: 92, y: 168, side: 'r' }, { x: 762, y: 168, side: 'r' }];
   function beamGeometry(a, b, w0, w1, bend) {
     const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
     const ux = dx / len, uy = dy / len, nx = -uy, ny = ux;
@@ -321,9 +314,9 @@
     const c = 'M' + A.x.toFixed(1) + ',' + A.y.toFixed(1) + ' Q' + m.x.toFixed(1) + ',' + m.y.toFixed(1) + ' ' + B.x.toFixed(1) + ',' + B.y.toFixed(1);
     return { d, c, A, B };
   }
-  // Label lines for a node or list row. Real: allocation share (provisional) and real routed share. Example: made up.
-  function shareText(p) { return p.preview ? pct(p.voted) + ' voted' : pct(p.voted) + ' share' + (p.provisional ? ' (provisional)' : ''); }
-  function routedText(p) { return p.preview ? pct(p.routed) + ' routed' : pct(p.routed) + ' routed · ' + n0(p.routedUnits) + (p.routedUnits === 1 ? ' unit' : ' units'); }
+  // Label lines for a node or list row: the allocation share (provisional until voting opens) and the real routed share.
+  function shareText(p) { return pct(p.voted) + ' share' + (p.provisional ? ' (provisional)' : ''); }
+  function routedText(p) { return pct(p.routed) + ' routed · ' + n0(p.routedUnits) + (p.routedUnits === 1 ? ' unit' : ' units'); }
 
   function flow(host, list, opts) {
     opts = opts || {};
@@ -331,7 +324,7 @@
     const dy = opts.tall ? 10 : 0;
     clear(host);
     const s = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'flow', role: 'group' });
-    s.setAttribute('aria-label', 'The Flow: the Swarm AI core with a beam to each of ' + list.map((p) => p.name).join(', ') + '. Beam width is the routed share, the dotted ring is the voted share. Town Hall shows live numbers; the other four are dimmed examples with made-up numbers.');
+    s.setAttribute('aria-label', 'The Flow: the Swarm AI core with a beam to each of ' + list.map((p) => p.name).join(', ') + '. Beam width is the routed share, the dotted ring is the voted share.');
     const defs = svg('defs');
     const blur = (id, sd) => { const f = svg('filter', { id, x: '-30%', y: '-60%', width: '160%', height: '220%' }); f.appendChild(svg('feGaussianBlur', { stdDeviation: sd })); defs.appendChild(f); };
     blur('fb6', 7); blur('fb3', 3); blur('fb12', 14);
@@ -359,15 +352,16 @@
     const nodes = svg('g');
     const anim = [];
     const names = el('ul', 'flow-names');
+    let spare = 0;
     list.forEach((p, idx) => {
-      const pos = Object.assign({}, POS[p.id]); pos.y += dy;
+      const pos = Object.assign({}, POS[p.id] || SPARE_POS[spare++ % SPARE_POS.length]); pos.y += dy;
       const hw = Math.min(5 + p.routed * 0.62, 27);
       const g = beamGeometry(pos, core, hw, 1.6, (pos.y < core.y ? 1 : -1) * (pos.x < core.x ? 1 : -1) * -12);
       const gid = 'bg' + idx;
       const lg = svg('linearGradient', { id: gid, gradientUnits: 'userSpaceOnUse', x1: g.A.x, y1: g.A.y, x2: g.B.x, y2: g.B.y });
       [['0', p.beam[0], '0.95'], ['0.5', p.beam[1], '0.85'], ['1', '#ffe9c4', '1']].forEach((st) => lg.appendChild(svg('stop', { offset: st[0], 'stop-color': st[1], 'stop-opacity': st[2] })));
       defs.appendChild(lg);
-      const bgrp = svg('g', { class: 'bgrp' + (p.preview ? ' preview' : ''), 'data-id': p.id });
+      const bgrp = svg('g', { class: 'bgrp', 'data-id': p.id });
       bgrp.appendChild(svg('path', { d: g.d, fill: 'url(#' + gid + ')', filter: 'url(#fb12)', opacity: '0.55', class: 'beam-glow' }));
       bgrp.appendChild(svg('path', { d: g.d, fill: 'url(#' + gid + ')', filter: 'url(#fb6)', opacity: '0.8', class: 'beam-glow' }));
       bgrp.appendChild(svg('path', { d: g.d, fill: 'url(#' + gid + ')', opacity: '0.92', class: 'beam' }));
@@ -379,9 +373,7 @@
 
       // node
       const share = shareText(p), routedLine = routedText(p);
-      const n = svg('g', { class: 'node' + (p.preview ? ' preview' : ''), tabindex: '0', role: 'link', 'aria-label': p.preview
-        ? p.name + ' (example, preview only, made-up numbers): ' + share + ', ' + routedLine + '. Open the Flow.'
-        : p.name + ' (live): ' + share + ', ' + routedLine + ', ' + n0(p.open) + ' open tasks. Open the Flow.' });
+      const n = svg('g', { class: 'node', tabindex: '0', role: 'link', 'aria-label': p.name + ' (live): ' + share + ', ' + routedLine + ', ' + n0(p.open) + ' open tasks. Open the Flow.' });
       const nglow = svg('circle', { cx: pos.x, cy: pos.y, r: 36, fill: p.color, opacity: '0.22', filter: 'url(#fb6)' });
       n.appendChild(nglow);
       const ping = svg('circle', { cx: pos.x, cy: pos.y, r: 37, fill: 'none', stroke: p.color, 'stroke-width': 2, opacity: '0', class: 'ping' });
@@ -397,9 +389,9 @@
       n.appendChild(svg('text', { x: lx, y: ly, class: 'lbl-name lbl' }, p.name));
       n.appendChild(svg('text', { x: lx, y: ly + 19, class: 'lbl-sub lbl' }, share));
       n.appendChild(svg('text', { x: lx, y: ly + 36, class: 'lbl-sub lbl' }, routedLine));
-      const tag = p.preview ? 'Example' : 'Live · ' + n0(p.open) + ' open tasks';
+      const tag = 'Live · ' + n0(p.open) + ' open tasks';
       const tw = tag.length * 5.7 + 14;
-      const pg = svg('g', { class: 'lbl pill-svg' + (p.real ? ' live' : '') });
+      const pg = svg('g', { class: 'lbl pill-svg live' });
       pg.appendChild(svg('rect', { x: lx, y: ly + 44, width: tw, height: 15, rx: 7.5 }));
       pg.appendChild(svg('text', { x: lx + tw / 2, y: ly + 55, 'text-anchor': 'middle' }, tag));
       n.appendChild(pg);
@@ -412,11 +404,11 @@
       n.addEventListener('focus', () => hot(true)); n.addEventListener('blur', () => hot(false));
       nodes.appendChild(n);
 
-      const li = el('li', p.preview ? 'preview' : '');
+      const li = el('li');
       const dot = el('i'); dot.style.background = p.color; li.appendChild(dot);
       li.appendChild(el('strong', null, p.name));
       li.appendChild(el('span', null, share + ' · ' + routedLine));
-      li.appendChild(el('em', null, p.preview ? 'Example' : 'Live'));
+      li.appendChild(el('em', null, 'Live'));
       names.appendChild(li);
     });
     s.appendChild(beams);
@@ -545,15 +537,9 @@
   }
 
   // ---- receipts
-  const EXAMPLE_RECEIPTS = [
-    { icon: 'file', title: 'Add 2024 meeting summaries (OCR)', handle: 'maplebyte', by: 'townhall-team', when: '2h ago' },
-    { icon: 'bus', title: 'Extract transit routes from PDF', handle: 'datanaut', by: 'transit-maintainer', when: '4h ago' },
-    { icon: 'search', title: 'Clean accessibility data (Batch 17)', handle: 'civicbits', by: 'accessmap-team', when: '7h ago' },
-    { icon: 'leaf', title: 'Verify climate FAQ sources (Q12)', handle: 'greenparse', by: 'climate-team', when: '1d ago' },
-  ];
   function linkOrDisabled(label, href) {
     if (href && /^https:\/\//.test(href)) { const a = el('a', null, label); a.href = href; a.target = '_blank'; a.rel = 'noopener noreferrer'; return a; }
-    const s = el('span', 'dis', label); s.setAttribute('aria-disabled', 'true'); s.title = 'Example data: no link';
+    const s = el('span', 'dis', label); s.setAttribute('aria-disabled', 'true'); s.title = 'No link';
     return s;
   }
   function receiptRow(r, links) {
@@ -564,7 +550,8 @@
     li.appendChild(main);
     const who = el('div', 'rc-who');
     who.appendChild(el('span', null, '@' + r.handle));
-    who.appendChild(el('small', null, 'reviewed by @' + r.by));
+    if (r.author) who.appendChild(el('small', null, 'GitHub: @' + r.author));
+    who.appendChild(el('small', null, 'Review: ' + r.by));
     li.appendChild(who);
     li.appendChild(el('time', 'rc-when', r.when));
     const ln = el('div', 'rc-links');
@@ -572,23 +559,23 @@
     li.appendChild(ln);
     return li;
   }
-  // data: /api/receipts payload; returns true if real receipts were shown.
+  // data: /api/receipts payload; returns true if real receipts were shown. With none, it says so (nothing is invented).
   function renderReceipts(host, data, opts) {
     opts = opts || {};
     clear(host);
     const real = data && data.receipts && data.receipts.length;
-    if (real) {
-      const iconFor = { 'town-hall': 'file' };
-      data.receipts.slice(0, opts.limit || 4).forEach((r) => {
-        const first = (r.evidence.sources || []).find((u) => /^https:\/\//.test(u));
-        host.appendChild(receiptRow(
-          { icon: iconFor[r.project.id] || 'file', title: r.task.title, handle: r.handle, by: r.reviewed_by, when: rel(r.reviewed_at) },
-          [linkOrDisabled('task', r.evidence.task_url), linkOrDisabled('evidence', first)]));
-      });
-      return true;
+    if (!real) {
+      host.appendChild(el('li', 'rc-empty', 'No accepted work yet. A receipt appears here when a reviewer accepts a submission, or a pull request is merged.'));
+      return false;
     }
-    EXAMPLE_RECEIPTS.slice(0, opts.limit || 4).forEach((r) => host.appendChild(receiptRow(r, ['task', 'submission', 'review', 'evidence'].map((l) => linkOrDisabled(l, null)))));
-    return false;
+    data.receipts.slice(0, opts.limit || 4).forEach((r) => {
+      const first = (r.evidence.sources || []).find((u) => /^https:\/\//.test(u));
+      const gh = r.github;
+      host.appendChild(receiptRow(
+        { icon: gh ? 'github' : 'file', title: r.task.title, handle: r.handle, author: gh && gh.pr_author, by: r.reviewed_by, when: rel(r.reviewed_at) },
+        [linkOrDisabled('task', r.evidence.task_url), linkOrDisabled(gh ? 'pull request' : 'evidence', gh ? gh.pr_url : first)]));
+    });
+    return true;
   }
 
   function errorNote(host, msg) {
@@ -628,5 +615,5 @@
   }
   document.addEventListener('DOMContentLoaded', () => { wireStaticCopy(); initSearch(); initMotion(); });
 
-  window.Swarm = { SAY_LINE, shareText, routedText, showBanner, PREVIEW_LABEL, MCP_URL, el, svg, icon, clear, fmtDate, fmtShort, rel, n0, pct, getJson, renderStamp, buildConnect, flow, renderReceipts, errorNote, projects, META, reduce, copyText, revealBars, setBar };
+  window.Swarm = { SAY_LINE, shareText, routedText, showBanner, MCP_URL, el, svg, icon, clear, fmtDate, fmtShort, rel, n0, pct, getJson, renderStamp, buildConnect, flow, renderReceipts, errorNote, projects, META, reduce, copyText, revealBars, setBar };
 })();

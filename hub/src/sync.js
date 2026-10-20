@@ -1,5 +1,6 @@
 // Town Hall task sync: problems.json (and the board's objections) become idempotent Swarm tasks.
 import { addTasksBulk, eventStmt } from './core.js';
+import { syncGithub } from './github.js';
 import { makeScreen, repoPathFromEvidence, sanitize } from './screen.js';
 
 const TH = 'https://townhall.bigpicsolutions.com';
@@ -36,11 +37,19 @@ const OBJECTION_FORMAT = [
 // Content-Length, which an upstream can leave out or get wrong); the stream is cancelled the moment the cap is passed, so
 // a broken or hostile upstream cannot make the Worker buffer an unbounded response. A declared length over the cap is an
 // early refusal and nothing more. Only the bounded buffer is parsed.
-export async function fetchJson(url, { timeoutMs = FETCH_TIMEOUT_MS, maxBytes = MAX_FEED_BYTES } = {}) {
+// `headers` adds to (and overrides) the default request headers. A refusal carries `status` and, when the upstream sent them,
+// the `rate` headers (x-ratelimit-remaining, x-ratelimit-reset, retry-after), so a caller can tell a rate limit from an error.
+export async function fetchJson(url, { timeoutMs = FETCH_TIMEOUT_MS, maxBytes = MAX_FEED_BYTES, headers = {} } = {}) {
   const signal = AbortSignal.timeout(timeoutMs);
-  const res = await fetch(url, { headers: { 'User-Agent': 'swarm-ai-hub/1 (+https://swarm.bigpicsolutions.com)', Accept: 'application/json' }, signal });
+  const res = await fetch(url, { headers: { 'User-Agent': 'swarm-ai-hub/1 (+https://swarm.bigpicsolutions.com)', Accept: 'application/json', ...headers }, signal });
   const drop = () => { res.body?.cancel().catch(() => {}); };
-  if (!res.ok) { drop(); throw new Error(`${url} answered ${res.status}`); }
+  if (!res.ok) {
+    drop();
+    const err = new Error(`${url} answered ${res.status}`);
+    err.status = res.status;
+    err.rate = { remaining: res.headers.get('x-ratelimit-remaining'), reset: res.headers.get('x-ratelimit-reset'), retryAfter: res.headers.get('retry-after') };
+    throw err;
+  }
   const declared = Number(res.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > maxBytes) { drop(); throw new Error(`${url} is too large`); }
   const reader = res.body?.getReader();
@@ -73,7 +82,7 @@ const CLOSE = '----- END PROJECT DATA -----';
 const SLUG = /^[a-z0-9][a-z0-9-]{0,59}$/;
 
 // The untrusted-data notice, then the project text between clear markers. Anything after the END marker is Swarm's own.
-function wrap(data) {
+export function wrap(data) {
   return `${UNTRUSTED}\nThe text between the BEGIN and END markers below is that data.\n${OPEN}\n${data.trim()}\n${CLOSE}\n\n`;
 }
 
@@ -105,16 +114,30 @@ function buildObjection(p, o, t) {
   return `${wrap(`${issueBlock(p, t)}\n${planText(p, t)}\nObjection from the public (backed by ${Number(o.n) || 0} people): ${t(o.text, 1200)}`)}Your job: write a researched answer to this objection. Town Hall's public page: ${TH}/`;
 }
 
+// One sync at a time: claim the slot for two minutes. Returns false when another sync holds it.
+export async function takeSyncLock(env, now = Date.now()) {
+  const lock = await env.DB.prepare(
+    "INSERT INTO meta (k, v) VALUES ('sync_lock', ?1) ON CONFLICT (k) DO UPDATE SET v = ?1 WHERE CAST(v AS INTEGER) < ?2"
+  ).bind(String(now + 120000), now).run();
+  return !!lock.meta.changes;
+}
+export const freeSyncLock = (env) => env.DB.prepare("UPDATE meta SET v = '0' WHERE k = 'sync_lock'").run();
+
 export async function syncTasks(env, { force = false } = {}) {
   const now = Date.now();
   const last = Number((await env.DB.prepare("SELECT v FROM meta WHERE k = 'last_sync'").first())?.v || 0);
   if (!force && now - last < STALE_MS) return { skipped: true };
-  // One sync at a time: claim the slot for two minutes.
-  const lock = await env.DB.prepare(
-    "INSERT INTO meta (k, v) VALUES ('sync_lock', ?1) ON CONFLICT (k) DO UPDATE SET v = ?1 WHERE CAST(v AS INTEGER) < ?2"
-  ).bind(String(now + 120000), now).run();
-  if (!lock.meta.changes) return { skipped: true };
+  if (!(await takeSyncLock(env, now))) return { skipped: true };
+  try {
+    const result = await syncTownHall(env);
+    // GitHub projects sync under the same lock. It never throws: its own errors are recorded in meta.
+    return { ...result, github: await syncGithub(env) };
+  } finally {
+    await freeSyncLock(env);
+  }
+}
 
+async function syncTownHall(env) {
   try {
     const data = await fetchJson(`${TH}/problems.json`);
     const problems = (data.problems || []).filter((p) => p && p.slug && p.slug !== 'other' && p.title && p.issue);
@@ -174,8 +197,6 @@ export async function syncTasks(env, { force = false } = {}) {
     console.error('sync failed', err);
     await env.DB.prepare("INSERT INTO meta (k, v) VALUES ('last_sync_error', ?1) ON CONFLICT (k) DO UPDATE SET v = ?1").bind(`${new Date().toISOString()} ${String(err.message).slice(0, 200)}`).run();
     return { error: true };
-  } finally {
-    await env.DB.prepare("UPDATE meta SET v = '0' WHERE k = 'sync_lock'").run();
   }
 }
 

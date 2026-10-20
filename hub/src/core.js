@@ -191,3 +191,41 @@ export async function weekStats(env, now = Date.now()) {
     totals: { contributors: totals[0].results[0].n, submissions: totals[1].results[0].n, accepted: totals[2].results[0].n },
   };
 }
+
+// The one transactional review step, shared by the admin review endpoint and the GitHub connector (a merged or closed
+// pull request is the maintainer's review, made on GitHub). `reviewedBy` is who made the decision; it is also the actor on
+// the event. Returns { ok: true, taskStatus } when this call made the decision, or { ok: false, status, taskStatus } when
+// it did not (someone else got there first, or the task is not waiting for review).
+//
+// One transaction: the submission, the task and the event commit together or not at all. The first UPDATE is the only thing
+// that can change who wins: it applies to a pending submission whose task is waiting for review ('submitted'), and a task
+// gets at most one accepted result. The task change and the event run only if it applied (they find this request's op on the
+// submission), so a stale or repeated review cannot touch a task that has moved on.
+export async function reviewSubmission(env, { id, task, verdict, reviewedBy, note, now = Date.now() }) {
+  const accept = verdict === 'accepted';
+  const op = newOp();
+  const res = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE submissions SET status = ?2, reviewed_by = ?3, review_note = ?4, reviewed_at = ?5, op = ?6
+       WHERE id = ?1 AND status = 'pending'
+         AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = submissions.task AND t.status = 'submitted')
+         AND (?2 != 'accepted' OR NOT EXISTS (SELECT 1 FROM submissions a WHERE a.task = submissions.task AND a.status = 'accepted'))`
+    ).bind(id, verdict, reviewedBy, note, now, op),
+    // A rejected piece of work puts the task back in the pool, up to two rejections by a reviewer; after that it stays rejected.
+    env.DB.prepare(
+      `UPDATE tasks SET status = CASE
+           WHEN ?3 = 'accepted' THEN 'accepted'
+           WHEN (SELECT COUNT(*) FROM submissions WHERE task = ?1 AND status = 'rejected' AND COALESCE(reviewed_by, '') != 'system') >= 2 THEN 'rejected'
+           ELSE 'ready' END
+       WHERE id = ?1 AND status = 'submitted' AND EXISTS (SELECT 1 FROM submissions WHERE id = ?2 AND op = ?4 AND status = ?3)`
+    ).bind(task, id, verdict, op),
+    env.DB.prepare(
+      `INSERT INTO events (ts, type, task, contributor, submission, actor, detail)
+       SELECT ?3, ?4, task, contributor, id, ?5, json_object('note', ?6) FROM submissions WHERE id = ?1 AND op = ?2`
+    ).bind(id, op, now, accept ? 'submission_accepted' : 'submission_rejected', reviewedBy, note),
+  ]);
+  const t = await env.DB.prepare('SELECT status FROM tasks WHERE id = ?1').bind(task).first();
+  if (res[0].meta.changes) return { ok: true, taskStatus: t?.status };
+  const now2 = await env.DB.prepare('SELECT s.status, t.status AS task_status FROM submissions s JOIN tasks t ON t.id = s.task WHERE s.id = ?1').bind(id).first();
+  return { ok: false, status: now2?.status, taskStatus: now2?.task_status };
+}

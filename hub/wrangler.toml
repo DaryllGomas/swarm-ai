@@ -37,3 +37,5 @@ simple = { limit = 60, period = 60 }
 # Secrets (wrangler secret put ...), never committed. Locally they live in .dev.vars (gitignored):
 #   ADMIN_TOKEN  long random string; Bearer token for /api/admin/* (anything else gets a 404)
 #   HASH_SALT    long random string; salts contributor-key hashes and the daily network hash
+#   GITHUB_TOKEN (optional) read-only fine-grained token for public repos; only raises GitHub's rate limit
+#   GITHUB_WEBHOOK_SECRET (optional) enables POST /api/github/webhook; without it that path is a 404

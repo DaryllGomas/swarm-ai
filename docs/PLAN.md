@@ -167,9 +167,10 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
 
 **Phase 2: Project 002, the swarm builds the swarm** (1–2 sessions)
 - GitHub connector v1: operator-registered public repos, read-only, a signed webhook, PR-link submissions, and
-  merge = accept.
+  merge = accept. **Built** (`hub/src/github.js`, migration 0006), not yet deployed. Merge = accept is the maintainer's
+  review, made on GitHub.
 - Seed 10–15 well-scoped issues from this plan.
-- Remove the example projects from the site.
+- Remove the example projects from the site. **Built** (the site shows Town Hall and Swarm AI, provisional 50/50).
 - **Done when:** a PR from someone outside the maintainer's team is merged and shows as a receipt.
 
 **Phase 3: Accounts and voting, "Public Voting Beta"** (about 2 sessions)
