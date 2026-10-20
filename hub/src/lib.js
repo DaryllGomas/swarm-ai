@@ -12,30 +12,36 @@ export function json(data, status = 200, extra = {}) {
   return new Response(JSON.stringify(data), { status, headers });
 }
 
-// Parsed JSON body, or null for anything malformed, oversized or not an object. Counts real bytes as they arrive.
-export async function readJson(req, maxBytes, allowArray = false) {
-  if (Number(req.headers.get('Content-Length') || 0) > maxBytes) return null;
+// Read a JSON body. Returns { body, tooLarge }: body is null for anything malformed, oversized or not an object.
+// Counts real bytes as they arrive, so a chunked body with no Content-Length cannot slip past the limit.
+export async function readJsonResult(req, maxBytes, allowArray = false) {
+  if (Number(req.headers.get('Content-Length') || 0) > maxBytes) return { body: null, tooLarge: true };
   try {
     const reader = req.body?.getReader();
-    if (!reader) return null;
+    if (!reader) return { body: null, tooLarge: false };
     const chunks = [];
     let size = 0;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > maxBytes) { await reader.cancel(); return null; }
+      if (size > maxBytes) { await reader.cancel(); return { body: null, tooLarge: true }; }
       chunks.push(value);
     }
     const bytes = new Uint8Array(size);
     let at = 0;
     for (const c of chunks) { bytes.set(c, at); at += c.byteLength; }
     const b = JSON.parse(new TextDecoder().decode(bytes));
-    if (!b || typeof b !== 'object') return null;
-    return Array.isArray(b) && !allowArray ? null : b;
+    if (!b || typeof b !== 'object') return { body: null, tooLarge: false };
+    return { body: Array.isArray(b) && !allowArray ? null : b, tooLarge: false };
   } catch {
-    return null;
+    return { body: null, tooLarge: false };
   }
+}
+
+// Parsed JSON body, or null for anything malformed, oversized or not an object.
+export async function readJson(req, maxBytes, allowArray = false) {
+  return (await readJsonResult(req, maxBytes, allowArray)).body;
 }
 
 export async function sha256(s) {
@@ -65,9 +71,10 @@ export function networkOf(ip) {
   return full.slice(0, 4).map((x) => (x || '0').toLowerCase().replace(/^0+(?=.)/, '')).join(':') + '::/64';
 }
 
-// sha256 of salt, day and network: rotates daily, used only for rate limits and pairing caps.
-export async function ipHashFor(env, req) {
-  const day = new Date().toISOString().slice(0, 10);
+// sha256 of salt, day and network: rotates daily, used only for rate limits and the pairing and claim caps.
+// daysAgo = 1 gives yesterday's hash, so a cap still sees claims made just before UTC midnight.
+export async function ipHashFor(env, req, daysAgo = 0) {
+  const day = new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10);
   return sha256(`${env.HASH_SALT}|ip|${day}|${networkOf(req.headers.get('CF-Connecting-IP') || '')}`);
 }
 

@@ -2,7 +2,8 @@
 import { weekOf, weekStartMs } from './lib.js';
 
 export const CLAIM_TTL_MS = 3 * 60 * 60 * 1000; // 3 hours
-export const MAX_ACTIVE_CLAIMS = 2;
+export const MAX_ACTIVE_CLAIMS = 2; // per contributor
+export const MAX_ACTIVE_CLAIMS_PER_NETWORK = 4; // across all handles on one network (anti-squatting)
 export const UNITS = [1, 3, 8];
 export const PROVISIONAL_NOTE = 'Provisional — public voting opens soon';
 
@@ -25,6 +26,7 @@ export async function addTask(env, t) {
     `INSERT OR IGNORE INTO tasks (project, parent, kind, title, brief, output_format, units, status, source_key, created)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'ready', ?8, ?9)`
   ).bind(t.project, t.parent ?? null, t.kind, t.title, t.brief, t.output_format, t.units, t.source_key ?? null, Date.now()).run();
+  // (addTask is for operator-made tasks; text from outside goes through addTasksBulk, which screens it first.)
   if (res.meta.changes) {
     await eventStmt(env, { type: 'task_created', task: res.meta.last_row_id, actor: 'sync', detail: { source_key: t.source_key, units: t.units } }).run();
     return res.meta.last_row_id;
@@ -33,25 +35,41 @@ export async function addTask(env, t) {
 }
 
 // Many root tasks in one D1 call (sync). Idempotent on source_key; the creation event is written once per task.
+// Each task arrives already screened: status is 'ready' or 'held' (injection-like text, never served), with held_reason.
+// A task that already exists and has not been claimed yet follows its source: changed text is updated, and it moves
+// between ready and held as the screen result changes. Claimed, submitted and finished tasks are never touched.
 export async function addTasksBulk(env, tasks) {
+  const PER_TASK = 4;
   const stmts = [];
   const now = Date.now();
   for (const t of tasks) {
     if (!UNITS.includes(t.units)) throw new Error('units must be 1, 3 or 8');
+    const status = t.status === 'held' ? 'held' : 'ready';
+    const reason = status === 'held' ? t.held_reason || 'screen' : null;
     stmts.push(env.DB.prepare(
-      `INSERT OR IGNORE INTO tasks (project, parent, kind, title, brief, output_format, units, status, source_key, created)
-       VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, 'ready', ?7, ?8)`
-    ).bind(t.project, t.kind, t.title, t.brief, t.output_format, t.units, t.source_key, now));
+      `INSERT OR IGNORE INTO tasks (project, parent, kind, title, brief, output_format, units, status, held_reason, source_key, created)
+       VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?9, ?10, ?7, ?8)`
+    ).bind(t.project, t.kind, t.title, t.brief, t.output_format, t.units, t.source_key, now, status, reason));
+    stmts.push(env.DB.prepare(
+      `UPDATE tasks SET title = ?2, brief = ?3, output_format = ?4, status = ?5, held_reason = ?6
+       WHERE source_key = ?1 AND status IN ('ready','held') AND (brief != ?3 OR title != ?2 OR output_format != ?4 OR status != ?5)`
+    ).bind(t.source_key, t.title, t.brief, t.output_format, status, reason));
     stmts.push(env.DB.prepare(
       `INSERT INTO events (ts, type, task, actor, detail)
        SELECT ?2, 'task_created', id, 'sync', ?3 FROM tasks
        WHERE source_key = ?1 AND NOT EXISTS (SELECT 1 FROM events e WHERE e.type = 'task_created' AND e.task = tasks.id)`
     ).bind(t.source_key, now, JSON.stringify({ source_key: t.source_key, units: t.units })));
+    stmts.push(env.DB.prepare(
+      `INSERT INTO events (ts, type, task, actor, detail)
+       SELECT ?2, 'task_held', id, 'sync', ?3 FROM tasks
+       WHERE source_key = ?1 AND status = 'held' AND NOT EXISTS (SELECT 1 FROM events e WHERE e.type = 'task_held' AND e.task = tasks.id AND e.detail = ?3)`
+    ).bind(t.source_key, now, JSON.stringify({ reason: reason ?? 'screen' })));
   }
   let created = 0;
-  for (let i = 0; i < stmts.length; i += 80) {
-    const res = await env.DB.batch(stmts.slice(i, i + 80));
-    for (let j = 0; j < res.length; j += 2) created += res[j].meta.changes;
+  const chunk = PER_TASK * 20;
+  for (let i = 0; i < stmts.length; i += chunk) {
+    const res = await env.DB.batch(stmts.slice(i, i + chunk));
+    for (let j = 0; j < res.length; j += PER_TASK) created += res[j].meta.changes;
   }
   return created;
 }

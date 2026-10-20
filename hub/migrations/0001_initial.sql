@@ -1,4 +1,7 @@
--- Swarm AI hub (D1). Safe to run more than once: only creates what is missing and seeds the one real project.
+-- Swarm AI hub (D1), migration 0001: the schema the live database was created with, plus the seed.
+-- Idempotent on purpose: the live remote DB was created by hand from this file before migrations existed, so applying
+-- 0001 there must be harmless (everything is IF NOT EXISTS / INSERT OR IGNORE). Never edit this file after it ships;
+-- every later change goes in a new 000N_*.sql file.
 
 CREATE TABLE IF NOT EXISTS projects (
   id          TEXT PRIMARY KEY,                    -- slug

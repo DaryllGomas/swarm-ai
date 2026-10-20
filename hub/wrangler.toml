@@ -8,12 +8,19 @@ routes = [{ pattern = "swarm.bigpicsolutions.com", custom_domain = true }]
 [assets]
 directory = "public"
 binding = "ASSETS"
-run_worker_first = ["/api/*", "/mcp"]
+run_worker_first = ["/api/*", "/mcp", "/setup", "/llms.txt"]
 
 [[d1_databases]]
 binding = "DB"
 database_name = "swarm-ai"
 database_id = "c678de31-f2dd-4329-b484-660a06caa864"
+migrations_dir = "migrations"
+
+[vars]
+# Lockdown lever. "open" (default) or "paused". Paused stops new pairings, claims and submissions
+# (pair, next_task, claim_task, submit_work); reads, the API and admin review keep working.
+# Change the value, then deploy (scripts/deploy.sh).
+INTAKE = "open"
 
 # Hourly: pull tasks from Town Hall and expire stale claims.
 [triggers]

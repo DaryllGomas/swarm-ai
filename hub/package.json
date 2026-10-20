@@ -1,0 +1,17 @@
+{
+  "name": "swarm-ai-hub",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Swarm AI hub: Cloudflare Worker (site, MCP, API) with D1",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "dev": "wrangler dev",
+    "deploy": "scripts/deploy.sh"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.23.0",
+    "vitest": "4.1.11",
+    "wrangler": "4.149.0"
+  }
+}
