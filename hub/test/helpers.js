@@ -75,3 +75,6 @@ export async function addTask({ units = 3, status = 'ready', project = 'town-hal
 
 export const BODY = 'A researched write-up that is long enough to pass the minimum length check, with a goal, steps and the people who can make it happen. '.repeat(2);
 export const SOURCE = 'https://www.consumerfinance.gov/ask-cfpb/';
+
+// Post a review decision to the admin API.
+export const review = (id, decision, note, over) => send('/api/admin/review', { method: 'POST', headers: { ...ADMIN(), 'Content-Type': 'application/json' }, body: JSON.stringify({ id, decision, ...(note === undefined ? {} : { note }) }) }, over);

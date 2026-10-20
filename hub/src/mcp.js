@@ -1,7 +1,7 @@
 // The Swarm MCP server: Streamable HTTP, stateless JSON mode, JSON-RPC 2.0, no SDK.
 // Permission groups are enforced here, not by the client: Read (nothing), Pairing, Work (key), Submit (key + active claim).
 import {
-  CLAIM_TTL_MS, MAX_ACTIVE_CLAIMS, MAX_ACTIVE_CLAIMS_PER_NETWORK, PROVISIONAL_NOTE, STANDING, currentAllocation, eventStmt, expireClaims, unitsByProject, weekStats,
+  CLAIM_TTL_MS, MAX_ACTIVE_CLAIMS, MAX_ACTIVE_CLAIMS_PER_NETWORK, PROVISIONAL_NOTE, STANDING, closeClaimStmts, currentAllocation, eventStmt, expireClaims, newOp, unitsByProject, weekStats,
 } from './core.js';
 import { syncIfStale, UNTRUSTED } from './sync.js';
 import { byteLength, clean, iso, ipHashFor, json, readJsonResult, sha256, underRateLimit, weekOf } from './lib.js';
@@ -43,6 +43,9 @@ const HOW_TO_HELP = {
   ],
   allocation: PROVISIONAL_NOTE,
 };
+
+const ROUTED_AS = 'routed work: it counts toward the allocation this week';
+const SELF_DIRECTED_AS = 'self-directed work: credited and shown, but it does not move the allocation numbers';
 
 class ToolError extends Error {}
 
@@ -376,35 +379,76 @@ async function activeClaims(env, contributor) {
   return results;
 }
 
+// The task row with what the friendly refusals need: the reviewer queue and this contributor's own submissions on it.
+const readClaimTask = (env, who, taskId) => env.DB.prepare(
+  `SELECT t.*, p.max_pending, p.active,
+          (SELECT COUNT(*) FROM submissions s JOIN tasks t2 ON t2.id = s.task WHERE t2.project = t.project AND s.status = 'pending') AS pending,
+          (SELECT COUNT(*) FROM submissions s WHERE s.task = t.id AND s.contributor = ?2) AS mine
+   FROM tasks t JOIN projects p ON p.id = t.project WHERE t.id = ?1`
+).bind(taskId, who.id).first();
+
+// Why a task cannot be claimed right now, as the refusal to show (or null). Only for messages: the real checks are in the INSERT.
+function taskRefusal(task, taskId) {
+  if (!task || task.status === 'held' || task.held_reason) return new ToolError(`Task ${taskId} is not available.`);
+  if (task.status !== 'ready') return new ToolError(`Task ${taskId} is ${task.status}, not ready.`);
+  if (!task.active) return new ToolError('That project is not taking work right now.');
+  if (task.mine) return new ToolError('You already handed in work on this task.');
+  if (task.pending >= task.max_pending) return new ToolError(`This project's reviewer has ${task.pending} submissions waiting (limit ${task.max_pending}), so new claims are paused until some are reviewed.`);
+  return null;
+}
+
+const myOutstandingClaim = (env, who, taskId, now) => env.DB.prepare(
+  'SELECT id, routed, expires_at FROM claims WHERE task = ?1 AND contributor = ?2 AND outcome IS NULL AND expires_at > ?3'
+).bind(taskId, who.id, now).first();
+
 async function claim(c, who, taskId, routed) {
   const { env } = c;
-  const task = await env.DB.prepare(
-    `SELECT t.*, p.max_pending, p.active,
-            (SELECT COUNT(*) FROM submissions s JOIN tasks t2 ON t2.id = s.task WHERE t2.project = t.project AND s.status = 'pending') AS pending,
-            (SELECT COUNT(*) FROM submissions s WHERE s.task = t.id AND s.contributor = ?2) AS mine
-     FROM tasks t JOIN projects p ON p.id = t.project WHERE t.id = ?1`
-  ).bind(taskId, who.id).first();
-  if (!task || task.status === 'held' || task.held_reason) throw new ToolError(`Task ${taskId} is not available.`);
-  if (task.status !== 'ready') throw new ToolError(`Task ${taskId} is ${task.status}, not ready.`);
-  if (!task.active) throw new ToolError('That project is not taking work right now.');
-  if (task.mine) throw new ToolError('You already handed in work on this task.');
-  if (task.pending >= task.max_pending) throw new ToolError(`This project's reviewer has ${task.pending} submissions waiting (limit ${task.max_pending}), so new claims are paused until some are reviewed.`);
-
-  // Both caps are enforced inside the one INSERT, so concurrent requests cannot slip past either: at most
-  // MAX_ACTIVE_CLAIMS per contributor, and at most MAX_ACTIVE_CLAIMS_PER_NETWORK across every handle on one network
-  // (today's and yesterday's network hash, so a claim made just before UTC midnight still counts).
+  // An expired claim that nobody has swept yet must not block this one: close this task's stale claims first.
+  await expireClaims(env, { task: taskId });
   const now = Date.now();
+  let task = await readClaimTask(env, who, taskId);
+  // A repeat of a claim this contributor already holds is not an error: it returns that claim.
+  const held = task?.status === 'claimed' ? await myOutstandingClaim(env, who, taskId, now) : null;
+  if (held) return { task, claim: { id: held.id, routed: !!held.routed, expires_at: iso(held.expires_at) } };
+  const refusal = taskRefusal(task, taskId);
+  if (refusal) throw refusal;
+
+  // Everything that decides eligibility is inside the one INSERT, so concurrent requests cannot slip past it:
+  //  - the task is ready, not held, and its project is taking work;
+  //  - this contributor has handed in nothing on it, and nobody has a pending or accepted submission on it;
+  //  - nobody holds an outstanding claim on it (the unique index enforces this too);
+  //  - the project's reviewer queue has room;
+  //  - at most MAX_ACTIVE_CLAIMS per contributor, and at most MAX_ACTIVE_CLAIMS_PER_NETWORK across every handle on one
+  //    network (today's and yesterday's network hash, so a claim made just before UTC midnight still counts).
   const yesterday = await ipHashFor(env, c.req, 1);
-  const ins = await env.DB.prepare(
-    `INSERT INTO claims (task, contributor, routed, week, claimed_at, expires_at, network)
-     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
-     WHERE (SELECT COUNT(*) FROM claims WHERE contributor = ?2 AND outcome IS NULL AND expires_at > ?5) < ${MAX_ACTIVE_CLAIMS}
-       AND (SELECT COUNT(*) FROM claims WHERE network IN (?7, ?8) AND outcome IS NULL AND expires_at > ?5) < ${MAX_ACTIVE_CLAIMS_PER_NETWORK}`
-  ).bind(taskId, who.id, routed, weekOf(now), now, now + CLAIM_TTL_MS, c.ipHash, yesterday).run();
+  let ins;
+  try {
+    ins = await env.DB.prepare(
+      `INSERT INTO claims (task, contributor, routed, week, claimed_at, expires_at, network)
+       SELECT t.id, ?2, ?3, ?4, ?5, ?6, ?7 FROM tasks t JOIN projects p ON p.id = t.project
+       WHERE t.id = ?1 AND t.status = 'ready' AND t.held_reason IS NULL AND p.active = 1
+         AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = t.id AND (s.contributor = ?2 OR s.status IN ('pending','accepted')))
+         AND NOT EXISTS (SELECT 1 FROM claims k WHERE k.task = t.id AND k.outcome IS NULL)
+         AND (SELECT COUNT(*) FROM submissions s JOIN tasks t2 ON t2.id = s.task WHERE t2.project = t.project AND s.status = 'pending') < p.max_pending
+         AND (SELECT COUNT(*) FROM claims WHERE contributor = ?2 AND outcome IS NULL AND expires_at > ?5) < ${MAX_ACTIVE_CLAIMS}
+         AND (SELECT COUNT(*) FROM claims WHERE network IN (?7, ?8) AND outcome IS NULL AND expires_at > ?5) < ${MAX_ACTIVE_CLAIMS_PER_NETWORK}`
+    ).bind(taskId, who.id, routed, weekOf(now), now, now + CLAIM_TTL_MS, c.ipHash, yesterday).run();
+  } catch (err) {
+    if (!/UNIQUE/i.test(String(err.message))) throw err;
+    throw new ToolError('Someone else just claimed that task. Try again.'); // the unique index caught a claim that raced this one
+  }
   if (!ins.meta.changes) {
+    // Not claimed: say why, from the current state. A repeat that raced its own first call finds its claim here.
+    task = await readClaimTask(env, who, taskId);
+    const again = await myOutstandingClaim(env, who, taskId, Date.now());
+    if (again) return { task, claim: { id: again.id, routed: !!again.routed, expires_at: iso(again.expires_at) } };
+    const why = taskRefusal(task, taskId);
+    if (why) throw why;
     const mine = await env.DB.prepare('SELECT COUNT(*) AS n FROM claims WHERE contributor = ?1 AND outcome IS NULL AND expires_at > ?2').bind(who.id, now).first();
     if (mine.n >= MAX_ACTIVE_CLAIMS) throw new CapError(`You already hold ${MAX_ACTIVE_CLAIMS} active claims. Submit or release one first (my_work lists them).`);
-    throw new CapError(`Too many tasks are claimed from your network right now (limit ${MAX_ACTIVE_CLAIMS_PER_NETWORK} at a time across all handles). Submit or release some, or try again when they expire.`);
+    const net = await env.DB.prepare('SELECT COUNT(*) AS n FROM claims WHERE network IN (?1, ?2) AND outcome IS NULL AND expires_at > ?3').bind(c.ipHash, yesterday, now).first();
+    if (net.n >= MAX_ACTIVE_CLAIMS_PER_NETWORK) throw new CapError(`Too many tasks are claimed from your network right now (limit ${MAX_ACTIVE_CLAIMS_PER_NETWORK} at a time across all handles). Submit or release some, or try again when they expire.`);
+    throw new ToolError('Someone else just claimed that task. Try again.');
   }
   const claimId = ins.meta.last_row_id;
   const upd = await env.DB.prepare("UPDATE tasks SET status = 'claimed' WHERE id = ?1 AND status = 'ready' AND held_reason IS NULL").bind(taskId).run();
@@ -425,7 +469,8 @@ const claimedView = ({ task, claim: c }, extra = {}) => ({
 
 async function claimTask(c) {
   const { args, who } = c;
-  return claimedView(await claim(c, who, args.id, 0), { counted_as: 'self-directed work: credited and shown, but it does not move the allocation numbers' });
+  const got = await claim(c, who, args.id, 0);
+  return claimedView(got, { counted_as: got.claim.routed ? ROUTED_AS : SELF_DIRECTED_AS });
 }
 
 async function nextTask(c) {
@@ -470,7 +515,7 @@ async function nextTask(c) {
       const got = await claim(c, who, cand.id, 1);
       const pct = (x) => `${Math.round(x * 1000) / 10}%`;
       return claimedView(got, {
-        counted_as: 'routed work: it counts toward the allocation this week',
+        counted_as: ROUTED_AS,
         why: `${pick.p.name} is furthest below its share this week (target ${pct(pick.target)}, routed so far ${pct(pick.actual)}${alloc.provisional[pick.p.id] ? '; target is provisional' : ''}). This is its oldest ready task.`,
       });
     } catch (err) {
@@ -481,15 +526,26 @@ async function nextTask(c) {
   throw lastErr ?? new ToolError('No task could be claimed. Try again.');
 }
 
+const RELEASE_NOTE = 'The task is ready for others again. Releasing and re-claiming it never counts twice toward routed units.';
+
 async function releaseTask({ env, args, who }) {
-  const c = await env.DB.prepare('SELECT id FROM claims WHERE task = ?1 AND contributor = ?2 AND outcome IS NULL AND expires_at > ?3').bind(args.id, who.id, Date.now()).first();
-  if (!c) throw new ToolError(`You do not hold an active claim on task ${args.id}.`);
-  await env.DB.batch([
-    env.DB.prepare("UPDATE claims SET released = 1, outcome = 'released' WHERE id = ?1 AND outcome IS NULL").bind(c.id),
-    env.DB.prepare("UPDATE tasks SET status = 'ready' WHERE id = ?1 AND status = 'claimed'").bind(args.id),
-    eventStmt(env, { type: 'claim_released', task: args.id, contributor: who.id, actor: who.handle, detail: { claim: c.id } }),
-  ]);
-  return { released: args.id, note: 'The task is ready for others again. Releasing and re-claiming it never counts twice toward routed units.' };
+  const now = Date.now();
+  const c = await env.DB.prepare('SELECT id FROM claims WHERE task = ?1 AND contributor = ?2 AND outcome IS NULL AND expires_at > ?3').bind(args.id, who.id, now).first();
+  if (!c) return releaseRefusal(env, args.id, who);
+  // One transaction: the claim, the task and the event change only if this request wins THIS claim (see closeClaimStmts).
+  // A stale or repeated release finds the claim already closed and changes nothing, in particular not the task of the
+  // contributor who claimed it after us.
+  const res = await env.DB.batch(closeClaimStmts(env, { claim: c.id, task: args.id, contributor: who.id, outcome: 'released', actor: who.handle, now }));
+  if (!res[0].meta.changes) return releaseRefusal(env, args.id, who);
+  return { released: args.id, note: RELEASE_NOTE };
+}
+
+// No live claim to release. If this contributor's latest claim on the task is already released, this is a repeat of a
+// release that went through: answer it the same way. Anything else is a real refusal.
+async function releaseRefusal(env, taskId, who) {
+  const last = await env.DB.prepare('SELECT outcome FROM claims WHERE task = ?1 AND contributor = ?2 ORDER BY id DESC LIMIT 1').bind(taskId, who.id).first();
+  if (last?.outcome === 'released') return { released: taskId, already: true, note: RELEASE_NOTE };
+  throw new ToolError(`You do not hold an active claim on task ${taskId}.`);
 }
 
 async function myWork({ env, who }) {

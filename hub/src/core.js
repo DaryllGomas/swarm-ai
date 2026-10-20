@@ -74,21 +74,48 @@ export async function addTasksBulk(env, tasks) {
   return created;
 }
 
+// A fresh id for one request's transition. Statements that win a row stamp it there (claims.op, submissions.op), and the
+// later statements of the same transaction run only when the row carries their own id.
+export const newOp = () => crypto.randomUUID();
+
+// Close ONE claim as 'released' or 'expired', and reopen its task, as one set of three statements for env.DB.batch.
+// D1 batches are transactional. The task change and the event run only if THIS request won the transition of THIS claim
+// (the claim now has this outcome and this op), so a stale or repeated request changes nothing: it can never reopen a task
+// that a newer claim, submission or review now owns. res[0].meta.changes tells the caller whether it won.
+//   outcome 'released': a live claim only (expires_at > now), 'expired': one that has run out (expires_at <= now).
+export function closeClaimStmts(env, { claim, task, contributor, outcome, actor, now = Date.now(), op = newOp() }) {
+  const expired = outcome === 'expired';
+  return [
+    env.DB.prepare(
+      `UPDATE claims SET outcome = ?2, released = ?3, op = ?4
+       WHERE id = ?1 AND outcome IS NULL AND ((?6 = 1 AND expires_at <= ?5) OR (?6 = 0 AND expires_at > ?5))`
+    ).bind(claim, outcome, expired ? 0 : 1, op, now, expired ? 1 : 0),
+    env.DB.prepare(
+      `UPDATE tasks SET status = 'ready'
+       WHERE id = ?2 AND status = 'claimed' AND EXISTS (SELECT 1 FROM claims WHERE id = ?1 AND outcome = ?3 AND op = ?4)`
+    ).bind(claim, task, outcome, op),
+    env.DB.prepare(
+      `INSERT INTO events (ts, type, task, contributor, submission, actor, detail)
+       SELECT ?5, ?6, ?2, ?7, NULL, ?8, json_object('claim', id) FROM claims WHERE id = ?1 AND outcome = ?3 AND op = ?4`
+    ).bind(claim, task, outcome, op, now, `claim_${outcome}`, contributor, actor),
+  ];
+}
+
 // Claims that ran past their 3 hours go back to the pool. Cheap enough to run before any work call and hourly in cron.
-export async function expireClaims(env) {
+// Each claim is its own conditional transition (see closeClaimStmts), so two overlapping sweeps, or a sweep racing a release,
+// change a task once, and never touch a task that has since been claimed by someone else.
+// { task } limits the sweep to one task: claim() runs it so an expired claim never blocks a new claim on that task.
+export async function expireClaims(env, { task = null } = {}) {
   const now = Date.now();
   const { results } = await env.DB.prepare(
-    'SELECT id, task, contributor FROM claims WHERE outcome IS NULL AND expires_at <= ?1'
-  ).bind(now).all();
+    'SELECT id, task, contributor FROM claims WHERE outcome IS NULL AND expires_at <= ?1 AND (?2 IS NULL OR task = ?2)'
+  ).bind(now, task).all();
   if (!results.length) return 0;
-  const stmts = [];
-  for (const c of results) {
-    stmts.push(env.DB.prepare("UPDATE claims SET outcome = 'expired' WHERE id = ?1 AND outcome IS NULL").bind(c.id));
-    stmts.push(env.DB.prepare("UPDATE tasks SET status = 'ready' WHERE id = ?1 AND status = 'claimed'").bind(c.task));
-    stmts.push(eventStmt(env, { type: 'claim_expired', task: c.task, contributor: c.contributor, actor: 'system', detail: { claim: c.id } }));
-  }
-  await env.DB.batch(stmts);
-  return results.length;
+  const stmts = results.flatMap((c) => closeClaimStmts(env, { claim: c.id, task: c.task, contributor: c.contributor, outcome: 'expired', actor: 'system', now }));
+  const res = await env.DB.batch(stmts);
+  let won = 0;
+  for (let i = 0; i < res.length; i += 3) won += res[i].meta.changes;
+  return won;
 }
 
 // The allocation in force: the newest week at or before this one.

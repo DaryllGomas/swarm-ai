@@ -152,10 +152,19 @@ async function adminReview(req, env) {
 
   const accept = body.decision === 'accept';
   const now = Date.now();
+  // A review is a valid transition only for a pending submission whose task is waiting for review ('submitted'), and a task
+  // gets at most one accepted result. Both are conditions of the UPDATE itself, so a concurrent request cannot slip past.
   const upd = await env.DB.prepare(
-    "UPDATE submissions SET status = ?2, reviewed_by = ?3, review_note = ?4, reviewed_at = ?5 WHERE id = ?1 AND status = 'pending'"
+    `UPDATE submissions SET status = ?2, reviewed_by = ?3, review_note = ?4, reviewed_at = ?5
+     WHERE id = ?1 AND status = 'pending'
+       AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = submissions.task AND t.status = 'submitted')
+       AND (?2 != 'accepted' OR NOT EXISTS (SELECT 1 FROM submissions a WHERE a.task = submissions.task AND a.status = 'accepted'))`
   ).bind(id, accept ? 'accepted' : 'rejected', s.reviewer, note, now).run();
-  if (!upd.meta.changes) return json({ error: 'already reviewed' }, 409);
+  if (!upd.meta.changes) {
+    const now2 = await env.DB.prepare('SELECT s.status, t.status AS task_status FROM submissions s JOIN tasks t ON t.id = s.task WHERE s.id = ?1').bind(id).first();
+    if (now2.status !== 'pending') return json({ error: `already ${now2.status}` }, 409);
+    return json({ error: `the task is ${now2.task_status}, not waiting for review, or it already has an accepted result` }, 409);
+  }
 
   const stmts = [];
   if (accept) {

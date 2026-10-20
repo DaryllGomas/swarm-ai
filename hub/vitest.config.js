@@ -12,6 +12,7 @@ export default defineConfig(async () => {
         main: './src/worker.js',
         wrangler: { configPath: './wrangler.toml' },
         miniflare: {
+          d1Databases: ['MIG_DB'], // a scratch database for the migration upgrade tests (the tests build it from the migrations)
           compatibilityDate: '2026-08-15', // the test runtime (workerd bundled with the pool) is older than production's date
           bindings: {
             TEST_MIGRATIONS: migrations,
