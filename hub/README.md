@@ -29,7 +29,7 @@ Local dev fetches the real Town Hall feed. To reset the local database: `rm -rf 
     npm test
 Runs the whole suite inside workerd (the real Workers runtime) with a local D1 database. The migrations are applied
 for real before every test file, so a broken migration fails the tests. No network, no token and no deploy needed.
-The tests use `@cloudflare/vitest-pool-workers` with a matching `vitest`; both are pinned in `package.json`.
+The tests use `@cloudflare/vitest-plugin` with a matching `vitest`; both are pinned in `package.json`.
 
 ## Database migrations
 Files in `migrations/` are applied in order by `wrangler d1 migrations apply` (`migrations_dir` is set in

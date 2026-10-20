@@ -2,7 +2,7 @@
 // No network and no deploy token needed: `npm test`.
 import path from 'node:path';
 import { defineConfig } from 'vitest/config';
-import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-pool-workers';
+import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin';
 
 export default defineConfig(async () => {
   const migrations = await readD1Migrations(path.join(import.meta.dirname, 'migrations'));
@@ -13,7 +13,6 @@ export default defineConfig(async () => {
         wrangler: { configPath: './wrangler.toml' },
         miniflare: {
           d1Databases: ['MIG_DB'], // a scratch database for the migration upgrade tests (the tests build it from the migrations)
-          compatibilityDate: '2026-08-15', // the test runtime (workerd bundled with the pool) is older than production's date
           bindings: {
             TEST_MIGRATIONS: migrations,
             ADMIN_TOKEN: 'test-admin-token-0123456789',
