@@ -121,7 +121,8 @@ export async function syncTasks(env, { force = false } = {}) {
 
     const created = await addTasksBulk(env, all);
 
-    // An issue that no longer exists on Town Hall: close its ready tasks (claimed ones finish normally).
+    // An issue that no longer exists on Town Hall: close its ready tasks (claimed ones finish normally). A held task
+    // keeps its held_reason when it is closed, so its rejected text stays withheld for good.
     let closed = 0;
     if (slugs.size >= 3) { // a near-empty feed is more likely a broken fetch than a real removal
       const { results } = await env.DB.prepare("SELECT id, source_key FROM tasks WHERE project = ?1 AND status IN ('ready','held') AND source_key LIKE 'townhall:%'").bind(PROJECT).all();
@@ -129,7 +130,7 @@ export async function syncTasks(env, { force = false } = {}) {
         const slug = t.source_key.split(':')[1];
         if (!slugs.has(slug)) {
           await env.DB.batch([
-            env.DB.prepare("UPDATE tasks SET status = 'closed', held_reason = NULL WHERE id = ?1 AND status IN ('ready','held')").bind(t.id),
+            env.DB.prepare("UPDATE tasks SET status = 'closed' WHERE id = ?1 AND status IN ('ready','held')").bind(t.id),
             eventStmt(env, { type: 'task_closed', task: t.id, actor: 'sync', detail: { reason: 'issue no longer on Town Hall' } }),
           ]);
           closed++;

@@ -70,10 +70,15 @@ The admin API answers 404 to anything without the right bearer token.
 ## Task text screening
 Contributors' AIs read task briefs, so project text is treated as hostile. In `sync.js`, before a task is created or
 updated, everything from outside goes through `src/screen.js`:
-- URLs, bare domains, emails and `@handles` are stripped; control and hidden characters are dropped.
+- Text is normalized first (Unicode NFKC, control and invisible characters removed, whitespace collapsed) and the
+  normalized text is what gets screened and served. Lookalike letters and letters spelled out with spaces, dots or
+  dashes are matched too.
+- URLs, bare domains, emails and `@handles` are stripped.
 - Injection-like text ("ignore previous instructions", "you are now", "system prompt", "run this command", curl or
   wget pipes, base64 blobs, requests for keys, and so on) makes the whole task **held**. A held task is never served
-  by any tool or API, and is listed at `GET /api/admin/held` (`review.sh held`) with its reason.
+  by any tool or API, and is listed at `GET /api/admin/held` (`review.sh held`) with its reason. If its issue then
+  disappears and sync closes it, it keeps its `held_reason`, so its text stays withheld for good. Closed tasks show
+  title and status only, never a brief.
 - Briefs start with the untrusted-data notice, then the project text between `BEGIN PROJECT DATA` and
   `END PROJECT DATA` markers. Only Swarm's own text comes after the END marker.
 - Sync re-screens every task that has not been claimed. Fix the text at its source and the task is released on the

@@ -286,6 +286,48 @@ describe('held tasks (injection-flagged) are never served', () => {
   });
 });
 
+describe('withheld and closed tasks', () => {
+  it('a task that carries a held_reason is never served, whatever its status', async () => {
+    for (const status of ['ready', 'closed', 'rejected', 'accepted']) {
+      const id = await addTask({ status, title: `Withheld ${status}`, held_reason: 'ignore_instructions' });
+      const g = await tool('get_task', { id });
+      expect(g.isError, status).toBe(true);
+      expect(g.text, status).toMatch(/not available/i);
+      expect((await send(`/api/tasks/${id}`)).status, status).toBe(404);
+      const list = await (await send('/api/tasks')).json();
+      expect(list.tasks.map((t) => t.id), status).not.toContain(id);
+      const mcpList = await tool('list_tasks', { status });
+      expect(mcpList.data.tasks.map((t) => t.id), status).not.toContain(id);
+    }
+    // ...and a withheld "ready" task cannot be claimed either.
+    const ready = await addTask({ title: 'Withheld but ready', held_reason: 'ignore_instructions' });
+    const user = await newUser();
+    expect((await user.call('claim_task', { id: ready })).isError).toBe(true);
+  });
+
+  it('closed tasks show title and status only, never the brief', async () => {
+    const id = await addTask({ status: 'closed', title: 'An old closed task' });
+    const g = await tool('get_task', { id });
+    expect(g.isError).toBe(false);
+    expect(g.data).toMatchObject({ id, title: 'An old closed task', status: 'closed' });
+    expect(g.data.brief).toBeUndefined();
+    expect(g.data.output_format).toBeUndefined();
+    expect(g.text).not.toContain('Test brief');
+
+    const res = await send(`/api/tasks/${id}`);
+    expect(res.status).toBe(200);
+    const api = await res.json();
+    expect(api).toMatchObject({ id, title: 'An old closed task', status: 'closed' });
+    expect(api.brief).toBeUndefined();
+    expect(api.output_format).toBeUndefined();
+
+    // An open task still shows its brief.
+    const open = await addTask({ title: 'An open task' });
+    expect((await tool('get_task', { id: open })).data.brief).toMatch(/Test brief/);
+    expect((await (await send(`/api/tasks/${open}`)).json()).brief).toMatch(/Test brief/);
+  });
+});
+
 describe('INTAKE lever', () => {
   const paused = { INTAKE: 'paused' };
 
