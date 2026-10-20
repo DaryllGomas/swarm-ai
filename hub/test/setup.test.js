@@ -66,6 +66,24 @@ describe('the guide text', () => {
   });
 });
 
+describe('Phase 4 additions to the guide', () => {
+  const all = setupGuide();
+  it('mentions MCP sign-in, link_account and that the ballot steers the AI', () => {
+    for (const phrase of ['MCP sign-in (OAuth)', 'pseudonymous handle', 'passkey', 'read (see their own work', 'work (ask for', 'submit (hand work in)', 'link_account', 'SWARM-XXXX-XXXX', 'ballot', 'my_week', 'ballot-directed', 'There is no email']) expect(all, phrase).toContain(phrase);
+    expect(all).toMatch(/fallback setting/);
+    expect(all).toMatch(/never reported as accepted/);
+  });
+  it('still asks first, still has one shell command and no download, in every tailored guide', () => {
+    for (const c of CLIENT_IDS) {
+      const g = setupGuide(c);
+      expect(g, c).toContain('Ask the user before changing any settings');
+      expect(g, c).toContain('link_account');
+      expect(g.match(/claude mcp/g)?.length ?? 0, c).toBe(c === 'claude-code' ? 1 : 0);
+    }
+    expect(all).not.toMatch(/\bcodex mcp\b|\bnpx\b|\bnpm\b|\bcurl\b|\bdownload (?:and|the|a|this)\b/i);
+  });
+});
+
 describe('setup_guide tool', () => {
   it('is in the read group: no key, same text as /setup', async () => {
     const r = await tool('setup_guide');

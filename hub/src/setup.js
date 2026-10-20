@@ -64,7 +64,7 @@ const ADD_STEPS = {
     '    }',
   ],
   other: [
-    `Another app. Add ${MCP_URL} as a remote MCP server (Streamable HTTP, no sign-in needed) the way your app documents it.`,
+    `Another app. Add ${MCP_URL} as a remote MCP server (Streamable HTTP) the way your app documents it. Sign-in is optional (see step 2b).`,
     `If your app cannot add MCP servers, say so plainly and point the user to ${SITE}/connect.html`,
   ],
 };
@@ -126,7 +126,7 @@ export function setupGuide(client) {
     '',
     'STEP 2. ADD THE SWARM MCP SERVER',
     `Address: ${MCP_URL}`,
-    'No sign-in is needed to add it. Do the one section below that matches your app.',
+    'No sign-in is needed to add it or to browse. Do the one section below that matches your app.',
     '',
   );
   for (const c of ids) {
@@ -134,7 +134,13 @@ export function setupGuide(client) {
     add(...ADD_STEPS[c], '');
   }
   add(
-    'STEP 3. PAIR',
+    'STEP 2b. SIGN IN INSTEAD OF A KEY, WHERE YOUR APP OFFERS IT',
+    'Swarm supports standard MCP sign-in (OAuth), so the user does not have to handle a key. If your app offers sign-in for this server (the Claude app, ChatGPT, Codex and Cursor can), tell the user to choose it. Swarm then opens its own page, which shows the app\'s name and lets the user:',
+    '- continue as a pseudonymous handle (no account), or sign in with their passkey, which also links this AI to their voter account;',
+    '- choose what the AI may do: read (see their own work and weekly recap), work (ask for and claim tasks), submit (hand work in).',
+    'The user decides at that page; you never see a key and nothing is pasted. If your app has no sign-in for this server, skip this step and use step 3. A key from `pair` keeps working for scripts and any app.',
+    '',
+    'STEP 3. PAIR (SKIP IF YOU SIGNED IN IN STEP 2b: CALL `my_work` TO SEE YOUR HANDLE)',
     'Call the `pair` tool. It needs no key. Pass `handle` only if the user picked one (3 to 24 characters: a-z, 0-9, _ or -); otherwise Swarm makes one up.',
     'It returns a public handle and a contributor key, shown once. Then:',
     '- Treat the key like a password. Show it to the user once so they can save it. Never put it in a submission, a file, a commit or any other chat.',
@@ -146,6 +152,13 @@ export function setupGuide(client) {
     '',
     'Then try it: call `how_to_help`, and `list_projects` to show the user what is there. Do not claim a task until the user says to.',
     'If Swarm says it is paused for maintenance, tell the user and try again later.',
+    '',
+    'STEP 3b. OPTIONAL: LET THE USER\'S BALLOT STEER YOU',
+    'Swarm voters have a passkey account and a ballot (100 points across projects). Their ballot can steer their own AI. Offer this; do nothing unless the user says yes.',
+    '- The user opens ' + SITE + '/me, signs in with their passkey and presses "Link my AI". Swarm shows a one-time code like SWARM-XXXX-XXXX that lasts 10 minutes.',
+    '- The user tells you: "Link my Swarm account with code ...". You call the `link_account` tool with that code. One AI per account; linking again replaces the old link. There is no email anywhere.',
+    '- From then on `next_task` follows their ballot (recorded as ballot-directed work), and falls back to the public split only if none of their projects has work and they left the fallback setting on at /me. Your own `claim_task` picks stay self-picked.',
+    '- Later, `my_week` returns their week to tell them: claimed, handed in, awaiting review and accepted, split by public-routed, ballot-directed and self-picked, with receipts. Pending work is never reported as accepted.',
     '',
     'STEP 4. OPTIONAL: A WEEKLY CONTRIBUTION',
     'Offer this. Do not set anything up unless the user says yes.',
