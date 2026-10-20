@@ -29,7 +29,9 @@ export default {
     if (oauthEnabled(env) && isOAuthRoute(req, url)) {
       try {
         // Registration and token calls are open to the internet: one burst limit per network, like every other write.
-        if (url.pathname.startsWith('/oauth/') && req.method === 'POST' && !(await underRateLimit(env, await ipHashFor(env, req)))) return json({ error: 'Slow down.' }, 429);
+        // GET /authorize writes a consent transaction to KV, so it is limited too, before anything is written.
+        const limited = (url.pathname.startsWith('/oauth/') && req.method === 'POST') || (url.pathname === '/authorize' && req.method === 'GET');
+        if (limited && !(await underRateLimit(env, await ipHashFor(env, req)))) return json({ error: 'Slow down.' }, 429, { 'Cache-Control': 'no-store' });
         return await providerFor(env, (r, e, c) => handleMcp(r, e, c), (r, e, c) => app(r, e, c)).fetch(req, env, ctx);
       } catch (err) {
         console.error(err);

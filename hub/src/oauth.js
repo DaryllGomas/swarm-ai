@@ -11,7 +11,7 @@ import { privateJson, rpOrigin, session, writeGuard } from './accounts.js';
 import { IdentityError, MAX_PAIRS_PER_NETWORK_PER_DAY, checkHandle, createContributor } from './identity.js';
 import { SCOPES, SCOPE_TEXT } from './oauth-scopes.js';
 import { SECURITY_HEADERS, ipHashFor, readJson } from './lib.js';
-import { linkDirect, linkOfAccount } from './steering.js';
+import { linkDirect, ownedContributor } from './steering.js';
 
 export { oauthEnabled } from './oauth-scopes.js';
 
@@ -162,7 +162,9 @@ async function decide(req, env, oauth) {
   }
 
   const ipHash = await ipHashFor(env, req);
-  let contributor = account ? await linkOfAccount(env, account.id) : null;
+  // Passkey mode acts only for a contributor this account OWNS (created here, or first linked to it): the steering link alone,
+  // which a link code can move, is not proof of ownership.
+  let contributor = account ? await ownedContributor(env, account.id) : null;
   if (!contributor) {
     // Refuse what is certain to fail before the consent handle is spent; createContributor below enforces the same rules atomically.
     if (chosen && await env.DB.prepare('SELECT 1 AS n FROM contributors WHERE handle = ?1').bind(chosen).first()) return privateJson({ error: 'That handle is taken. Pick another.' }, 409);
@@ -173,7 +175,7 @@ async function decide(req, env, oauth) {
 
   const approved = await oauth.approveConsent(req, body.consent, { scope });
   if (!contributor) {
-    try { contributor = await createContributor(env, req, ipHash, chosen); } catch (err) {
+    try { contributor = await createContributor(env, req, ipHash, chosen, account?.id ?? null); } catch (err) {
       if (err instanceof IdentityError) return privateJson({ error: err.message }, 409);
       throw err;
     }

@@ -4,7 +4,7 @@ import {
   CLAIM_TTL_MS, MAX_ACTIVE_CLAIMS, MAX_ACTIVE_CLAIMS_PER_NETWORK, PROVISIONAL_NOTE, STANDING, closeClaimStmts, currentAllocation, expireClaims, isRouted, newOp, originUnitsByProject, unitsByProject, weekStats,
 } from './core.js';
 import { IdentityError, createContributor, keyHash } from './identity.js';
-import { SCOPE_FOR_TOOL, oauthChallenge, oauthEnabled } from './oauth-scopes.js';
+import { SCOPES, SCOPE_FOR_TOOL, oauthChallenge, oauthEnabled } from './oauth-scopes.js';
 import { pickByDeficit, recapLines, redeemLinkCode, steeringFor, weekSummary, linkOfContributor } from './steering.js';
 import { PrError, checkPrSubmission } from './github.js';
 import { syncIfStale, UNTRUSTED } from './sync.js';
@@ -627,8 +627,16 @@ async function myWeek({ env, who }) {
   };
 }
 
-async function linkAccount({ env, args, who, ipHash }) {
-  const r = await redeemLinkCode(env, who.id, ipHash, args.code);
+async function linkAccount({ env, args, who, ipHash, req, oauth }) {
+  // A connection that was not granted every scope must not use a link to make someone's account the OWNER of this contributor:
+  // ownership is what passkey sign-in trusts, so that would hand out the scopes the user withheld (Codex review 4, finding 1).
+  // It may still relink to the account that already owns the contributor. A contributor key (or a full grant) may take ownership.
+  if (oauth && !SCOPES.every((sc) => oauth.scope.includes(sc))) {
+    const row = await env.DB.prepare('SELECT owner_account FROM contributors WHERE id = ?1').bind(who.id).first();
+    if (!row?.owner_account) throw new ToolError('This connection was not given every permission (read, work and submit), so it cannot link this contributor to a Swarm account. Connect again with all three permissions, or sign in with your passkey when you connect, then link.');
+  }
+  const r = await redeemLinkCode(env, who.id, ipHash, args.code, Date.now(), await ipHashFor(env, req, 1));
+  if (!r.ok && r.reason === 'owned') throw new ToolError('This contributor already belongs to a different Swarm account, so it cannot be linked to this one. A contributor is never moved between accounts. Pair a new contributor for the other account, or use the account that owns this one.');
   if (!r.ok && r.reason === 'rate') throw new ToolError('Too many wrong link codes from this contributor or network. Wait an hour, then ask the user for a fresh code.');
   if (!r.ok) throw new ToolError('That link code is not valid. It may be wrong, expired (they last 10 minutes) or already used. Ask the user to create a fresh one on https://swarm.bigpicsolutions.com/me.');
   const steer = await steeringFor(env, who.id);
@@ -638,7 +646,7 @@ async function linkAccount({ env, args, who, ipHash }) {
     note: steer
       ? 'This contributor is now linked to the voter account. From now on next_task is steered by their ballot; if none of their projects has eligible work it falls back to the public split unless they turned fallback off on /me.'
       : 'This contributor is now linked to the voter account, but that account has no usable ballot yet, so next_task still follows the public allocation until they save one at https://swarm.bigpicsolutions.com/vote.',
-    replaces: 'Any earlier link of this account (or of this contributor) was replaced. One contributor per account.',
+    replaces: 'Any earlier link of this account was replaced. One contributor per account. The first account a contributor is linked to owns it for good.',
   };
 }
 

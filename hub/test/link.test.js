@@ -149,14 +149,28 @@ describe('relinking', () => {
     expect(JSON.stringify(ev)).not.toContain(v.id + '"'); // only the short id is ever written
   });
 
-  it('moves a contributor that was linked to another account: one account per contributor', async () => {
+  it('finding 1: REFUSES to move a contributor owned by a different account (one account owns it for good)', async () => {
     const v1 = await voter(), v2 = await voter();
     const a = await newUser();
-    await a.call('link_account', { code: await newCode(v1) });
-    await a.call('link_account', { code: await newCode(v2) });
-    expect((await links()).map((r) => r.account)).toEqual([v2.id]);
-    expect((await (await send('/api/me', { headers: { Cookie: v1.cookie } })).json()).linked).toBeNull();
-    expect((await eventTypes()).map((e) => e.type)).toEqual(['account_linked', 'account_unlinked', 'account_linked']);
+    expect((await a.call('link_account', { code: await newCode(v1) })).isError).toBe(false);
+    const code2 = await newCode(v2);
+    const r = await a.call('link_account', { code: code2 });
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/already belongs to a different Swarm account/);
+    expect((await links()).map((x) => x.account)).toEqual([v1.id]);
+    expect((await env.DB.prepare('SELECT owner_account FROM contributors WHERE handle = ?1').bind(a.handle).first()).owner_account).toBe(v1.id);
+    expect((await (await send('/api/me', { headers: { Cookie: v2.cookie } })).json()).linked).toBeNull();
+    expect((await eventTypes()).map((e) => e.type)).toEqual(['account_linked']);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM link_codes WHERE account = ?1').bind(v2.id).first()).n).toBe(1); // the refused code was not spent
+  });
+
+  it('an account may link another contributor of its own (it becomes the owner of both), replacing its steering link', async () => {
+    const v = await voter();
+    const a = await newUser(), b = await newUser();
+    await a.call('link_account', { code: await newCode(v) });
+    await b.call('link_account', { code: await newCode(v) });
+    expect((await links()).map((x) => x.account)).toEqual([v.id]);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM contributors WHERE owner_account = ?1').bind(v.id).first()).n).toBe(2);
   });
 
   it('linking the same pair again leaves one link and no unlink event', async () => {

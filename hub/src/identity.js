@@ -28,7 +28,7 @@ export function checkHandle(handle) {
 
 // Create a contributor (a pseudonymous handle and a key hash). Returns { id, handle, key }; the raw key exists only here and in
 // the caller's hands. The daily per-network pairing cap is checked inside the INSERT, so concurrent calls cannot all pass.
-export async function createContributor(env, req, ipHash, handle) {
+export async function createContributor(env, req, ipHash, handle, ownerAccount = null) {
   if (handle !== undefined) checkHandle(handle);
   const key = newKey();
   const hash = await keyHash(env, key);
@@ -39,10 +39,10 @@ export async function createContributor(env, req, ipHash, handle) {
     try {
       const now = Date.now();
       const res = await env.DB.prepare(
-        `INSERT INTO contributors (handle, key_hash, created, pair_ip)
-         SELECT ?1, ?2, ?3, ?4
+        `INSERT INTO contributors (handle, key_hash, created, pair_ip, owner_account)
+         SELECT ?1, ?2, ?3, ?4, ?7
          WHERE (SELECT COUNT(*) FROM contributors WHERE pair_ip IN (?4, ?6) AND created >= ?5) < ${MAX_PAIRS_PER_NETWORK_PER_DAY}`
-      ).bind(h, hash, now, ipHash, now - 86400000, yesterday).run();
+      ).bind(h, hash, now, ipHash, now - 86400000, yesterday, ownerAccount).run();
       if (!res.meta.changes) throw new IdentityError('Too many pairings from this network today. Try again tomorrow.');
       await eventStmt(env, { type: 'contributor_paired', contributor: res.meta.last_row_id, actor: 'system' }).run();
       return { id: res.meta.last_row_id, handle: h, key };

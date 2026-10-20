@@ -43,24 +43,45 @@ export async function createLinkCode(env, account, now = Date.now()) {
   return { code, expires_at: iso(now + LINK_CODE_TTL_MS) };
 }
 
-// Redeem a code for a contributor. One atomic batch: the code is found, the old link of the account and of the contributor are
-// replaced (each replaced link writes an `account_unlinked` event), the new link and its `account_linked` event are written,
-// and the code is deleted. Two concurrent redemptions of one code cannot both succeed.
-// Returns { ok: true } or { ok: false, reason: 'rate' | 'invalid' }.
-export async function redeemLinkCode(env, contributor, networkHash, rawCode, now = Date.now()) {
-  const me = `c:${contributor}`, net = `n:${networkHash}`;
-  const hourAgo = now - 3600000;
-  const [mine, theirs] = await env.DB.batch([
-    env.DB.prepare('SELECT COUNT(*) AS n FROM link_attempts WHERE who = ?1 AND ts > ?2').bind(me, hourAgo),
-    env.DB.prepare('SELECT COUNT(*) AS n FROM link_attempts WHERE who = ?1 AND ts > ?2').bind(net, hourAgo),
+// Ownership is not the steering link. A contributor is OWNED by the account that created it (OAuth passkey mode) or by the first
+// account it was linked to (contributors.owner_account, set once, never changed). The steering link (account_links) is what a
+// voter may move; ownership is what OAuth passkey mode trusts. A link may make an unowned contributor owned, or relink a
+// contributor to its own owner, and never takes a contributor from a different owner.
+const ownerOk = (contributorParam, accountExpr) =>
+  `NOT EXISTS (SELECT 1 FROM contributors o WHERE o.id = ${contributorParam} AND o.owner_account IS NOT NULL AND o.owner_account != ${accountExpr})`;
+
+// The contributor an account owns, preferring the one its steering link points at. Used by OAuth passkey mode.
+export const ownedContributor = (env, account) => env.DB.prepare(
+  `SELECT c.id, c.handle FROM contributors c LEFT JOIN account_links l ON l.contributor = c.id AND l.account = ?1
+   WHERE c.owner_account = ?1 ORDER BY (l.account IS NOT NULL) DESC, c.id LIMIT 1`
+).bind(account).first();
+
+// Redeem a code for a contributor. The attempt is RESERVED first, atomically: one conditional INSERT checks both budgets (this
+// contributor's, and this network's today and yesterday, since the network hash rotates daily) and writes the attempt row in the
+// same statement, so parallel guesses cannot all pass one stale count. A successful redemption gives its reservation back.
+// Then one atomic batch: the code is found, the old link of the account and of the contributor are replaced (each replaced link
+// writes an `account_unlinked` event), ownership is set if the contributor had none, the new link and its `account_linked`
+// event are written, and the code is deleted. Two concurrent redemptions of one code cannot both succeed, and a contributor
+// owned by another account is refused.
+// Returns { ok: true } or { ok: false, reason: 'rate' | 'invalid' | 'owned' }.
+export async function redeemLinkCode(env, contributor, networkHash, rawCode, now = Date.now(), prevNetworkHash = null) {
+  const me = `c:${contributor}`, net = `n:${networkHash}`, prevNet = `n:${prevNetworkHash ?? networkHash}`;
+  const [mineRes, netRes] = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO link_attempts (who, ts) SELECT ?1, ?3
+       WHERE (SELECT COUNT(*) FROM link_attempts WHERE who = ?1 AND ts > ?4) < ${MAX_LINK_FAILURES_PER_CONTRIBUTOR_PER_HOUR}
+         AND (SELECT COUNT(*) FROM link_attempts WHERE who IN (?2, ?5) AND ts > ?4) < ${MAX_LINK_FAILURES_PER_NETWORK_PER_HOUR}`
+    ).bind(me, net, now, now - 3600000, prevNet),
+    env.DB.prepare('INSERT INTO link_attempts (who, ts) SELECT ?1, ?2 WHERE changes() > 0').bind(net, now),
   ]);
-  if (mine.results[0].n >= MAX_LINK_FAILURES_PER_CONTRIBUTOR_PER_HOUR || theirs.results[0].n >= MAX_LINK_FAILURES_PER_NETWORK_PER_HOUR) return { ok: false, reason: 'rate' };
+  if (!mineRes.meta.changes) return { ok: false, reason: 'rate' };
+  const reserved = [mineRes.meta.last_row_id, netRes.meta.last_row_id];
 
   const code = normalizeCode(rawCode);
   const hash = CODE_SHAPE.test(code) ? await codeHash(env, code) : null;
   let linked = false;
   if (hash) {
-    const valid = 'EXISTS (SELECT 1 FROM link_codes k JOIN accounts a ON a.id = k.account WHERE k.hash = ?1 AND k.expires > ?2 AND a.suspended = 0)';
+    const valid = `EXISTS (SELECT 1 FROM link_codes k JOIN accounts a ON a.id = k.account WHERE k.hash = ?1 AND k.expires > ?2 AND a.suspended = 0 AND ${ownerOk('?3', 'k.account')})`;
     const codeAccount = '(SELECT account FROM link_codes WHERE hash = ?1)';
     const res = await env.DB.batch([
       // A link that is about to be replaced is recorded first (unless it is the very same pair).
@@ -70,41 +91,54 @@ export async function redeemLinkCode(env, contributor, networkHash, rawCode, now
          FROM account_links l WHERE ${valid} AND (l.account = ${codeAccount} OR l.contributor = ?3) AND NOT (l.account = ${codeAccount} AND l.contributor = ?3)`
       ).bind(hash, now, contributor),
       env.DB.prepare(`DELETE FROM account_links WHERE ${valid} AND (account = ${codeAccount} OR contributor = ?3)`).bind(hash, now, contributor),
+      env.DB.prepare(`UPDATE contributors SET owner_account = ${codeAccount} WHERE id = ?3 AND owner_account IS NULL AND ${valid}`).bind(hash, now, contributor),
       env.DB.prepare(
         `INSERT INTO account_links (account, contributor, linked_at, via)
-         SELECT k.account, ?3, ?2, 'code' FROM link_codes k JOIN accounts a ON a.id = k.account WHERE k.hash = ?1 AND k.expires > ?2 AND a.suspended = 0`
+         SELECT k.account, ?3, ?2, 'code' FROM link_codes k JOIN accounts a ON a.id = k.account
+         WHERE k.hash = ?1 AND k.expires > ?2 AND a.suspended = 0 AND ${ownerOk('?3', 'k.account')}`
       ).bind(hash, now, contributor),
       env.DB.prepare(
         `INSERT INTO events (ts, type, contributor, actor, detail)
          SELECT ?2, 'account_linked', ?3, 'system', json_object('account', substr(account, 1, 8), 'via', 'code')
          FROM account_links WHERE contributor = ?3 AND linked_at = ?2 AND via = 'code'`
       ).bind(hash, now, contributor),
-      env.DB.prepare('DELETE FROM link_codes WHERE hash = ?1').bind(hash),
+      env.DB.prepare("DELETE FROM link_codes WHERE hash = ?1 AND EXISTS (SELECT 1 FROM account_links WHERE contributor = ?3 AND linked_at = ?2 AND via = 'code')").bind(hash, now, contributor),
     ]);
-    linked = res[2].meta.changes > 0;
+    linked = res[3].meta.changes > 0;
   }
-  if (linked) return { ok: true };
-  await env.DB.prepare('INSERT INTO link_attempts (who, ts) VALUES (?1, ?3), (?2, ?3)').bind(me, net, now).run();
+  if (linked) {
+    await env.DB.prepare('DELETE FROM link_attempts WHERE id IN (?1, ?2)').bind(...reserved).run(); // a success is not a failure
+    return { ok: true };
+  }
+  if (hash) {
+    const owned = await env.DB.prepare(
+      'SELECT 1 AS n FROM link_codes k JOIN contributors o ON o.id = ?3 WHERE k.hash = ?1 AND k.expires > ?2 AND o.owner_account IS NOT NULL AND o.owner_account != k.account'
+    ).bind(hash, now, contributor).first();
+    if (owned) return { ok: false, reason: 'owned' };
+  }
   return { ok: false, reason: 'invalid' };
 }
 
 // Link a contributor to an account directly (the OAuth sign-in step, where the voter just proved their passkey).
-// Replaces any earlier link of either side, with events. Returns true when the link now exists.
+// Replaces any earlier link of either side, with events, unless the contributor is owned by a different account.
+// Returns true when the link now exists.
 export async function linkDirect(env, account, contributor, via = 'oauth', now = Date.now()) {
+  const ok = `EXISTS (SELECT 1 FROM accounts WHERE id = ?1 AND suspended = 0) AND ${ownerOk('?2', '?1')}`;
   const res = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO events (ts, type, contributor, actor, detail)
        SELECT ?3, 'account_unlinked', l.contributor, 'system', json_object('account', substr(l.account, 1, 8), 'reason', 'replaced')
-       FROM account_links l WHERE (l.account = ?1 OR l.contributor = ?2) AND NOT (l.account = ?1 AND l.contributor = ?2)`
+       FROM account_links l WHERE ${ok} AND (l.account = ?1 OR l.contributor = ?2) AND NOT (l.account = ?1 AND l.contributor = ?2)`
     ).bind(account, contributor, now),
-    env.DB.prepare('DELETE FROM account_links WHERE (account = ?1 OR contributor = ?2) AND NOT (account = ?1 AND contributor = ?2)').bind(account, contributor),
-    env.DB.prepare('INSERT OR IGNORE INTO account_links (account, contributor, linked_at, via) SELECT id, ?2, ?3, ?4 FROM accounts WHERE id = ?1 AND suspended = 0').bind(account, contributor, now, via),
+    env.DB.prepare(`DELETE FROM account_links WHERE ${ok} AND (account = ?1 OR contributor = ?2) AND NOT (account = ?1 AND contributor = ?2)`).bind(account, contributor),
+    env.DB.prepare(`UPDATE contributors SET owner_account = ?1 WHERE id = ?2 AND owner_account IS NULL AND ${ok}`).bind(account, contributor),
+    env.DB.prepare(`INSERT OR IGNORE INTO account_links (account, contributor, linked_at, via) SELECT id, ?2, ?3, ?4 FROM accounts WHERE id = ?1 AND suspended = 0 AND ${ownerOk('?2', '?1')}`).bind(account, contributor, now, via),
     env.DB.prepare(
       `INSERT INTO events (ts, type, contributor, actor, detail)
        SELECT ?3, 'account_linked', ?2, 'system', json_object('account', substr(?1, 1, 8), 'via', ?4) WHERE changes() > 0`
     ).bind(account, contributor, now, via),
   ]);
-  return res[2].meta.changes > 0;
+  return res[3].meta.changes > 0;
 }
 
 export async function unlinkAccount(env, account, now = Date.now()) {
