@@ -2,6 +2,7 @@
 // Swarm never publishes into a project; submissions wait for a person to review them.
 import { handleAccount } from './accounts.js';
 import { handleMe } from './me.js';
+import { handleAuthorize, oauthEnabled, providerFor } from './oauth.js';
 import { handleVoting, publishSnapshot } from './voting.js';
 import { expireClaims, weekStats } from './core.js';
 import { adminActivateProject, adminRegisterGithub, handleGithubWebhook } from './github.js';
@@ -12,8 +13,29 @@ import { adminHeld, adminPending, adminReview, adminSubmission, adminPublished }
 import { handleOps } from './ops.js';
 import { normalizeClient, setupGuide } from './setup.js';
 
+// Requests the OAuth provider owns: discovery metadata, registration, the token endpoint, /authorize (through its default
+// handler) and /mcp when it carries an OAuth access token. A request with no Authorization header, or a Swarm contributor key
+// (swk_...), never goes through the provider, so public tools and existing keys work exactly as before.
+function isOAuthRoute(req, url) {
+  const p = url.pathname;
+  if (p === '/authorize' || p.startsWith('/oauth/') || p.startsWith('/.well-known/oauth-')) return true;
+  if (p === '/mcp' || p.startsWith('/mcp/')) return /^Bearer\s+(?!swk_)\S/i.test(req.headers.get('Authorization') || '');
+  return false;
+}
+
 export default {
   async fetch(req, env, ctx) {
+    const url = new URL(req.url);
+    if (oauthEnabled(env) && isOAuthRoute(req, url)) {
+      try {
+        // Registration and token calls are open to the internet: one burst limit per network, like every other write.
+        if (url.pathname.startsWith('/oauth/') && req.method === 'POST' && !(await underRateLimit(env, await ipHashFor(env, req)))) return json({ error: 'Slow down.' }, 429);
+        return await providerFor(env, (r, e, c) => handleMcp(r, e, c), (r, e, c) => app(r, e, c)).fetch(req, env, ctx);
+      } catch (err) {
+        console.error(err);
+        return json({ error: 'Something went wrong. Try again in a moment.' }, 500);
+      }
+    }
     return app(req, env, ctx);
   },
 
@@ -40,6 +62,7 @@ async function app(req, env, ctx) {
   try {
     if (url.pathname.startsWith('/ops') || url.pathname === '/api/ops' || url.pathname.startsWith('/api/ops/')) return await handleOps(req, env, url);
     if (url.pathname === '/mcp') return await handleMcp(req, env, ctx);
+    if (url.pathname === '/authorize') return await handleAuthorize(req, env);
     if (url.pathname === '/setup' || url.pathname === '/llms.txt') return setupText(req, url);
     if (url.pathname.startsWith('/api/')) return await api(req, env, ctx, url);
   } catch (err) {
