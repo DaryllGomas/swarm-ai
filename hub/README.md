@@ -12,10 +12,11 @@ For the plan and the architecture, see [`../docs/PLAN.md`](../docs/PLAN.md) and
 - `src/worker.js`: routing, public API, `/setup`, `/llms.txt` and cron. `src/admin.js`: bearer admin API and shared transactional review.
 - `src/access.js`: Access JWT verification. `src/ops.js`: private operator APIs. `src/prescreen.js`: advisory Workers AI annotations.
 - `src/mcp.js`: the MCP tools. `src/core.js`: stats, claims, allocation, task intake. `src/lib.js`: helpers.
+- `src/webauthn.js`, `src/accounts.js`, `src/voting.js`: passkey accounts (hand-written WebAuthn on WebCrypto), sessions, ballots, the weekly snapshot and `/api/vote/*`.
 - `src/sync.js`: Town Hall task sync. `src/github.js`: the GitHub connector (issues to tasks, pull-request checks, merge = accepted, webhook, project registration). `src/screen.js`: screening of project text. `src/links.js`: submission link
   pre-screen. `src/setup.js`: the set-up guide text.
 - `public/`: plain HTML, CSS and JS with no build step and no framework. `_headers` holds the CSP (self plus Google
-  Fonts). Dynamic text is rendered with `textContent`.
+  Fonts). Dynamic text is rendered with `textContent`. Only `/vote` also allows Cloudflare Turnstile (`challenges.cloudflare.com`).
 - `migrations/`: D1 migrations, the one source of truth for the schema. `test/`: the test suite.
 - `scripts/deploy.sh` and `scripts/review.sh`: the deploy and the reviewer CLI.
 
@@ -42,8 +43,15 @@ Files in `migrations/` are applied in order by `wrangler d1 migrations apply` (`
 - `0002_hardening.sql` adds the `held` task status (rebuilding `tasks`, since SQLite can't change a CHECK), the
   network hash on `claims`, and link flags on `submissions`.
 - `0006_github.sql` adds the GitHub columns, the `github_deliveries` table, the Swarm AI project and a provisional 50/50 allocation.
+- `0007_voting.sql` adds accounts, passkeys, sessions, ballots and snapshots, and converts `allocation.share` from percent to basis points.
 - Never edit a migration that has shipped. Every schema change is a new `000N_*.sql`. Test a new one against a copy
   that already has rows in it, because a table rebuild is where migrations go wrong.
+
+## Accounts and voting
+`/vote` lets anyone create a passkey voter account (no email, no password) and split 100 points. Each Monday 00:00 UTC the cron publishes the week's
+snapshot from ballots; the scheduler follows it. Vars: `RP_ID`, `RP_ORIGIN`, `TURNSTILE_SITE_KEY`. Secret: `TURNSTILE_SECRET` (registration is refused without it).
+Locally, set `RP_ID=localhost` and `RP_ORIGIN=http://localhost:8787` in `.dev.vars`, plus a Turnstile test secret
+(`1x0000000000000000000000000000000AA`) and matching test site key. Pages: `/vote`, `/rules`, `/privacy`, `/terms`. See the runbook for snapshots and suspending an account.
 
 ## Deploy (maintainer only)
     scripts/deploy.sh

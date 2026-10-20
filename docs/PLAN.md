@@ -15,11 +15,10 @@ Where they disagree, this plan wins.
 Built and live in `hub/`: the site, the MCP server (12 tools), the JSON API, the scheduler, review and receipts,
 D1 migrations, a test suite (run in CI), transactional claim, submit and review steps with database constraints, the per-network active-claim cap (4), the `INTAKE` lockdown lever,
 screening of project text with a `held` task status, a pre-screen for submission links (flags, not refusals),
-`/setup`, `/llms.txt` and the `setup_guide` tool, `docs/RUNBOOK.md`, and deploy and review scripts.
+`/setup`, `/llms.txt` and the `setup_guide` tool, `docs/RUNBOOK.md`, deploy and review scripts, and (Phase 3, not yet deployed) passkey accounts, ballots and the weekly snapshot.
 
 Not built yet (**planned**): the GitHub steps of Phase 0 (the local repo has no GitHub remote), a human independent
-security review, the weekly D1 export, task splitting (see `docs/ARCHITECTURE.md`), a full write freeze, the operator console, the Town Hall publish loop, Project 002, accounts and
-voting, MCP OAuth, personal steering, `runner/`, and AI pre-screening of the work itself. `docs/GOVERNANCE.md`,
+security review, the weekly D1 export, task splitting (see `docs/ARCHITECTURE.md`), a full write freeze, the operator console, the Town Hall publish loop, Project 002, MCP OAuth, personal steering, `runner/`, and AI pre-screening of the work itself. `docs/GOVERNANCE.md`,
 `docs/MCP.md` and `publish-townhall` in the tree below don't exist yet.
 
 ## The shape in one paragraph
@@ -173,13 +172,13 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
 - Remove the example projects from the site. **Built** (the site shows Town Hall and Swarm AI, provisional 50/50).
 - **Done when:** a PR from someone outside the maintainer's team is merged and shows as a receipt.
 
-**Phase 3: Accounts and voting, "Public Voting Beta"** (about 2 sessions)
+**Phase 3: Accounts and voting, "Public Voting Beta"** (about 2 sessions). **Built** (`hub/src/webauthn.js`, `accounts.js`, `voting.js`, migration 0007), not yet deployed. The appeal contact on the Rules page is a TODO for the maintainer.
 - Passkey accounts with Turnstile.
 - 100-point ballots that persist until changed.
 - A Monday 00:00 UTC snapshot that the scheduler follows.
 - Current vs next allocation, and a public audit.
 - Rules, Privacy and Terms pages, including the contribution license and an appeal process.
-- **Done when:** the first real snapshot is published and followed.
+- **Done when:** the first real snapshot is published and followed. (Needs the deploy, `TURNSTILE_SECRET`, and real voters.)
 
 **Phase 4: Your AI follows your vote** (about 2 sessions)
 - MCP OAuth with passkey linking at the approve step.
