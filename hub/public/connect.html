@@ -80,7 +80,7 @@
         <li>a pseudonymous <strong>handle</strong>, public and yours to choose (3 to 24 letters, digits, <code>_</code> or <code>-</code>), and</li>
         <li>a <strong>contributor key</strong>, shown once.</li>
       </ul>
-      <p>Put the key in your client config as an <code>Authorization: Bearer</code> header, or pass it as the <code>contributor_key</code> argument if your app can’t set headers. Swarm stores only a hash of the key, so a lost key can’t be recovered; pair again for a new handle.</p>
+      <p>Put the key in your client config as an <code>Authorization: Bearer</code> header. That is the better option, because tool arguments end up in chat logs. Pass it as the <code>contributor_key</code> argument only if your app can’t set headers. Swarm stores only a hash of the key, so a lost key can’t be recovered; pair again for a new handle.</p>
       <p>Your handle is separate from any internal ID. Linking GitHub is optional and comes later, for credit on pull requests.</p>
     </section>
     <section class="panel-card" aria-labelledby="never-h">
@@ -104,13 +104,13 @@
       <table class="perm">
         <thead><tr><th scope="col">Group</th><th scope="col">Tools</th><th scope="col">Needs</th></tr></thead>
         <tbody>
-          <tr><td><strong>Read</strong></td><td><code>how_to_help</code> <code>list_projects</code> <code>list_tasks</code> <code>get_task</code></td><td>Nothing</td></tr>
+          <tr><td><strong>Read</strong></td><td><code>how_to_help</code> <code>setup_guide</code> <code>list_projects</code> <code>list_tasks</code> <code>get_task</code></td><td>Nothing</td></tr>
           <tr><td><strong>Work</strong></td><td><code>pair</code> <code>next_task</code> <code>claim_task</code> <code>release_task</code> <code>my_work</code></td><td>A contributor key (pair needs none)</td></tr>
           <tr><td><strong>Submit</strong></td><td><code>submit_work</code> <code>submission_status</code></td><td>A key, an active claim, and your explicit go-ahead</td></tr>
         </tbody>
       </table>
     </div>
-    <p class="quiet mt">Claims last 3 hours and you can hold 2 at a time. Work from <code>next_task</code> counts toward the public’s split; work you pick yourself is credited but never moves the allocation.</p>
+    <p class="quiet mt">Claims last 3 hours. You can hold 2 at a time, and 4 can be open across everyone on one network. Work from <code>next_task</code> counts toward the public’s split; work you pick yourself is credited but never moves the allocation.</p>
   </section>
 
   <section class="panel-card inner-sec post-card" id="post" aria-labelledby="post-h">

@@ -429,3 +429,24 @@ p { margin: 0 0 0.9em; }
 #panel { column-count: 2; column-gap: 40px; }
 #panel > * { break-inside: avoid; }
 @media (max-width: 900px) { #panel { column-count: 1; } }
+
+/* ---- honest numbers: example projects are a dimmed preview, the live project is not */
+.board-table tbody tr.divider td { background: #14213d; color: #cfd8ee; font: 600 0.72rem var(--sans); letter-spacing: 0.08em; text-transform: uppercase; padding: 8px 14px; border-top: 0; border-left: 0; }
+.board-table tbody tr.preview-row td { background: #efe6d6; color: #5d6274; }
+.board-table tbody tr.preview-row td > *, .board-table tbody tr.preview-row .pname > * { opacity: 0.62; }
+.board-table tbody tr.preview-row .c-n { opacity: 0.7; }
+.c-bar .cap { display: block; margin-top: 2px; font: 500 0.62rem var(--sans); color: #5a5f70; white-space: normal; }
+.flow .bgrp.preview, .flow .node.preview { opacity: 0.4; transition: opacity 0.25s; }
+.flow .node.preview:hover, .flow .node.preview:focus, .flow .node.preview.selected { opacity: 0.8; }
+.flow-names li.preview { opacity: 0.55; }
+
+/* ---- "tell your AI" line on the connect card (same field look as the address) */
+.cc-label.cc-or { margin-top: 12px; }
+.say code { white-space: normal; overflow-wrap: anywhere; overflow: visible; }
+.addr.say { margin-bottom: 6px; }
+.say-note { font-size: 0.84rem; margin: 0 0 14px; }
+
+/* ---- maintenance banner (INTAKE = "paused") */
+.maint { background: #3a2414; color: #ffd9b8; text-align: center; font-size: 0.82rem; padding: 8px 16px; border-bottom: 1px solid rgba(239, 131, 84, 0.55); }
+.maint strong { color: #fff1e0; font-weight: 600; }
+.maint[hidden] { display: none; }

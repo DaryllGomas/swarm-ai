@@ -7,7 +7,7 @@
 
   function meter(label, value, color) {
     const w = S.el('div');
-    w.appendChild(S.el('span', 'mlab', label + ': ' + value + '%'));
+    w.appendChild(S.el('span', 'mlab', label + ': ' + S.pct(value)));
     const b = S.el('span', 'mbar'); const i = S.el('i'); i.style.width = Math.min(100, value * 2.1) + '%'; i.style.background = color; b.appendChild(i); w.appendChild(b);
     return w;
   }
@@ -17,25 +17,32 @@
     if (!p) return;
     const head = S.el('div', 'pname'); const ic = S.icon(p.icon, 'pic'); ic.style.color = p.color; head.appendChild(ic);
     head.appendChild(S.el('h3', null, p.name));
-    head.appendChild(S.el('em', p.real ? 'tag live' : 'tag', p.real ? 'Live tasks' : 'Example'));
+    head.appendChild(S.el('em', p.preview ? 'tag' : 'tag live', p.preview ? 'Example' : 'Live'));
     host.appendChild(head);
-    host.appendChild(S.el('p', 'mt', p.real && p.live ? p.live.summary : p.focus));
-    host.appendChild(meter('Voted (provisional example)', p.voted, p.color));
-    host.appendChild(meter('Routed share (example)', p.routed, '#f48a4c'));
     const kv = S.el('dl', 'kv');
-    const rows = [['Accepted units, this week' + (p.real ? '' : ' (example)'), S.n0(p.accepted)], ['Open tasks' + (p.real ? '' : ' (example)'), S.n0(p.open)]];
-    if (p.real && p.live) {
+    let rows;
+    if (p.preview) {
+      // An example project: every figure is made up, and says so.
+      host.appendChild(S.el('p', 'mt', p.focus));
+      host.appendChild(meter('Voted (example)', p.voted, p.color));
+      host.appendChild(meter('Routed share (example)', p.routed, '#f48a4c'));
+      rows = [['Accepted units (example)', S.n0(p.accepted)], ['Open tasks (example)', S.n0(p.open)]];
+    } else {
+      // Town Hall: only values from /api/stats.
       const l = p.live;
-      rows.push(['Routed units (live)', S.n0(l.routed_units)], ['Self-directed units (live)', S.n0(l.self_directed_units)], ['Accepted, all time (live)', S.n0(l.accepted_units_all_time)], ['Active claims (live)', S.n0(l.active_claims)], ['Pending reviews (live)', l.pending_reviews + ' of ' + l.reviewer_capacity.max_pending]);
+      host.appendChild(S.el('p', 'mt', l.summary));
+      host.appendChild(meter('Allocation share' + (p.provisional ? ' (provisional)' : ''), p.voted, p.color));
+      host.appendChild(meter('Routed share, this week', p.routed, '#f48a4c'));
+      rows = [['Routed units, this week', S.n0(l.routed_units)], ['Self-directed units, this week', S.n0(l.self_directed_units)], ['Accepted units, this week', S.n0(l.accepted_units)], ['Accepted, all time', S.n0(l.accepted_units_all_time)], ['Open tasks', S.n0(l.open_tasks)], ['Active claims', S.n0(l.active_claims)], ['Pending reviews', l.pending_reviews + ' of ' + l.reviewer_capacity.max_pending]];
     }
     rows.forEach((r) => { kv.appendChild(S.el('dt', null, r[0])); kv.appendChild(S.el('dd', null, r[1])); });
     host.appendChild(kv);
     const why = S.el('div', 'why');
-    if (p.real && p.live) { why.appendChild(S.el('strong', null, 'Where the live numbers stand')); why.appendChild(document.createTextNode(p.live.gap_reason || 'Routed work is at or near the voted share.')); }
-    else { why.appendChild(S.el('strong', null, 'An example project')); why.appendChild(document.createTextNode('This project is a demonstration of what the Flow will show. None of its numbers are real.')); }
+    if (!p.preview) { why.appendChild(S.el('strong', null, 'Where the live numbers stand')); why.appendChild(document.createTextNode(p.live.gap_reason || 'Routed work is at or near the allocation share.')); }
+    else { why.appendChild(S.el('strong', null, 'An example project')); why.appendChild(document.createTextNode(S.PREVIEW_LABEL + '. This shows what the Flow will look like with more projects. None of its numbers are real.')); }
     host.appendChild(why);
-    host.appendChild(S.el('p', 'quiet', 'Voting isn’t open yet; voted and routed shares are a provisional example.'));
-    if (p.real && p.live) {
+    host.appendChild(S.el('p', 'quiet', p.preview ? 'Preview only.' : 'Voting isn’t open yet, so the 100% share is provisional: Town Hall is the only live project.'));
+    if (!p.preview) {
       const q = S.el('p', 'quiet'); q.appendChild(document.createTextNode('Reviewer: ' + p.live.reviewer + ' · '));
       if (/^https:\/\//.test(p.live.url || '')) { const a = S.el('a', null, 'Visit ' + p.name); a.href = p.live.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; q.appendChild(a); }
       host.appendChild(q);
