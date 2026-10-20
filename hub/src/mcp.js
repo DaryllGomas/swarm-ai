@@ -270,15 +270,20 @@ async function pair({ env, args, ipHash }) {
     if (typeof handle !== 'string' || !/^[a-z0-9_-]{3,24}$/.test(handle)) throw new ToolError('A handle is 3 to 24 characters: lowercase letters, digits, underscore or hyphen.');
     if (RESERVED_EXACT.has(handle) || RESERVED_PART.test(handle)) throw new ToolError('That handle is reserved. Pick another.');
   }
-  const day = await env.DB.prepare('SELECT COUNT(*) AS n FROM contributors WHERE pair_ip = ?1 AND created >= ?2').bind(ipHash, Date.now() - 86400000).first();
-  if (day.n >= MAX_PAIRS_PER_NETWORK_PER_DAY) throw new ToolError('Too many pairings from this network today. Try again tomorrow.');
-
   const key = `swk_${b64url(crypto.getRandomValues(new Uint8Array(24)))}`;
   const hash = await keyHash(env, key);
   for (let attempt = 0; attempt < 5; attempt++) {
     const h = handle ?? `helper-${randomId(6)}`;
     try {
-      const res = await env.DB.prepare('INSERT INTO contributors (handle, key_hash, created, pair_ip) VALUES (?1, ?2, ?3, ?4)').bind(h, hash, Date.now(), ipHash).run();
+      // The daily cap is checked inside the INSERT itself (like the claim caps), so concurrent pairs from one network
+      // cannot all pass a separate count first. No row inserted means the cap was hit.
+      const now = Date.now();
+      const res = await env.DB.prepare(
+        `INSERT INTO contributors (handle, key_hash, created, pair_ip)
+         SELECT ?1, ?2, ?3, ?4
+         WHERE (SELECT COUNT(*) FROM contributors WHERE pair_ip = ?4 AND created >= ?5) < ${MAX_PAIRS_PER_NETWORK_PER_DAY}`
+      ).bind(h, hash, now, ipHash, now - 86400000).run();
+      if (!res.meta.changes) throw new ToolError('Too many pairings from this network today. Try again tomorrow.');
       await eventStmt(env, { type: 'contributor_paired', contributor: res.meta.last_row_id, actor: 'system' }).run();
       return {
         handle: h,

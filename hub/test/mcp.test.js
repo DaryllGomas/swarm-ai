@@ -95,6 +95,18 @@ describe('pair', () => {
     expect((await tool('pair', {}, { ip: nextIp() })).isError).toBe(false);
   });
 
+  it('holds the daily cap under concurrency: 16 simultaneous pairs from one network make exactly 5 contributors', async () => {
+    const ip = nextIp();
+    const eventsBefore = (await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'contributor_paired'").first()).n;
+    const results = await Promise.all(Array.from({ length: 16 }, () => tool('pair', {}, { ip })));
+    expect(results.filter((r) => !r.isError)).toHaveLength(5);
+    const refused = results.filter((r) => r.isError);
+    expect(refused).toHaveLength(11);
+    for (const r of refused) expect(r.text).toMatch(/Too many pairings/);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM contributors').first()).n).toBe(5);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'contributor_paired'").first()).n - eventsBefore).toBe(5);
+  });
+
   it('never echoes a key in errors and never stores one in events', async () => {
     const user = await newUser();
     const fake = `swk_${'A'.repeat(32)}`;
