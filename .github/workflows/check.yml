@@ -25,6 +25,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0 # the migration check compares against the base commit
 
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -39,7 +40,28 @@ jobs:
       - name: Test (Worker runtime, local D1, all migrations)
         run: npm test
 
-      - name: Migrations are numbered and append-only
+      - name: Migrations are numbered, contiguous and append-only
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
-          ls migrations/*.sql | xargs -n1 basename | sort -c
-          ls migrations/*.sql | xargs -n1 basename | grep -Ev '^[0-9]{4}_[a-z0-9_]+\.sql$' && exit 1 || true
+          set -euo pipefail
+          # Names: 0001_name.sql, 0002_name.sql, ... with no gaps or duplicates.
+          n=0
+          for f in $(ls migrations | sort); do
+            n=$((n + 1))
+            want=$(printf '%04d' "$n")
+            [[ "$f" =~ ^[0-9]{4}_[a-z0-9_]+\.sql$ ]] || { echo "Bad migration name: $f"; exit 1; }
+            [ "${f:0:4}" = "$want" ] || { echo "Migration $f is out of sequence (expected $want)"; exit 1; }
+          done
+          echo "$n migrations, numbered 0001..$(printf '%04d' "$n")"
+          # Shipped migrations never change: compared with the base, only additions are allowed.
+          base=""
+          if [ "$EVENT" = pull_request ]; then base=$PR_BASE; fi
+          if [ "$EVENT" = push ] && [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ]; then base=$PUSH_BEFORE; fi
+          if [ -n "$base" ]; then
+            changed=$(git diff --name-status --no-renames "$base" HEAD -- migrations | grep -v '^A' || true)
+            if [ -n "$changed" ]; then echo "Shipped migrations were modified, renamed or deleted:"; echo "$changed"; exit 1; fi
+            echo "Only new migration files relative to $base."
+          fi
