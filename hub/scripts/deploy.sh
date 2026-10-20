@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Deploy the hub with the scoped Cloudflare token (Workers Scripts, D1, Workers Routes), never the broad login.
-#   scripts/deploy.sh                      check the repo, run the tests, apply D1 migrations, deploy the Worker
+#   scripts/deploy.sh                      check the repo (clean, main, commit on origin/main), run the tests, apply D1 migrations, deploy the Worker with its commit
 #   scripts/deploy.sh <wrangler args...>   run any wrangler command with the deploy token (e.g. secret put ADMIN_TOKEN);
 #                                          the checks above are skipped, since nothing is being deployed
 # Token: $CLOUDFLARE_API_TOKEN, else ~/.config/swarm-ai/cf-deploy-token (Swarm's own scoped token; never another project's).
@@ -29,8 +29,18 @@ if [ "$branch" != "main" ]; then
   exit 1
 fi
 
+# ...and only a commit that is already on origin/main, so the code that runs is code the public can read. Fetch first: a stale
+# remote-tracking branch must not make an unpublished commit look published.
+git -C "$root" fetch --quiet origin main || { echo "Refusing to deploy: could not fetch origin/main to check the commit." >&2; exit 1; }
+commit=$(git -C "$root" rev-parse HEAD)
+if ! git -C "$root" merge-base --is-ancestor "$commit" origin/main; then
+  echo "Refusing to deploy $commit: it is not on origin/main. Push it (through a pull request) first." >&2
+  exit 1
+fi
+
 [ -d node_modules ] || npm ci
 npm test
 # 0001 is idempotent, so the first run on the live DB (which has no d1_migrations record) is harmless.
 npx wrangler d1 migrations apply swarm-ai --remote
-npx wrangler deploy
+# GET /version reports these, and the site footer links the commit on GitHub.
+npx wrangler deploy --var "GIT_COMMIT:$commit" --var "BUILT_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"

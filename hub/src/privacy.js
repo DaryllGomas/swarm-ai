@@ -20,7 +20,7 @@ export const CHOICE_TEXT = {
     handle: 'Your handle is shown on your receipts, and switching back to anonymous hides it again, past receipts included.',
   },
   history: {
-    private: 'Your own claims and submissions stay visible only to you on this page.',
+    private: 'Your own claims and submissions stay visible only to you on Your Swarm.',
     weekly_purge: 'Each week, after the totals are counted, your per-item detail is deleted and only anonymous totals remain.',
   },
   research: {

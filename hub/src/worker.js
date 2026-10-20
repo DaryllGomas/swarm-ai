@@ -13,6 +13,7 @@ import { adminHeld, adminPending, adminReview, adminSubmission, adminPublished }
 import { handleOps } from './ops.js';
 import { creditedAs, forgetNetworks, publicHandle } from './privacy.js';
 import { analytics, runWeeklyMaintenance } from './rollup.js';
+import { securityTxt, transparencyJson, transparencyPage, versionInfo } from './trust.js';
 import { normalizeClient, setupGuide } from './setup.js';
 
 // Requests the OAuth provider owns: discovery metadata, registration, the token endpoint, /authorize (through its default
@@ -71,12 +72,22 @@ async function app(req, env, ctx) {
     if (url.pathname === '/mcp') return await handleMcp(req, env, ctx);
     if (url.pathname === '/authorize') return await handleAuthorize(req, env);
     if (url.pathname === '/setup' || url.pathname === '/llms.txt') return setupText(req, url);
+    if (url.pathname === '/version') return plain(req, () => json(versionInfo(env), 200, { 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' }));
+    if (url.pathname === '/.well-known/security.txt') return plain(req, () => new Response(securityTxt(), { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=3600', 'Access-Control-Allow-Origin': '*', ...SECURITY_HEADERS } }));
+    if (url.pathname === '/transparency' || url.pathname === '/transparency.html') return await transparencyPage(req, env, url);
     if (url.pathname.startsWith('/api/')) return await api(req, env, ctx, url);
   } catch (err) {
     console.error(err);
     return json({ error: 'Something went wrong. Try again in a moment.' }, 500);
   }
   return env.ASSETS.fetch(req);
+}
+
+// GET and HEAD only, for the few small public routes the Worker answers itself.
+function plain(req, make) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return json({ error: 'Use GET.' }, 405, { Allow: 'GET, HEAD' });
+  const res = make();
+  return req.method === 'HEAD' ? new Response(null, { status: res.status, headers: res.headers }) : res;
 }
 
 // The plain-text set-up guide for AI agents. /llms.txt is the same text; ?client=claude-code (and friends) tailors it.
@@ -119,6 +130,7 @@ async function api(req, env, ctx, url) {
   }
   if (path === '/api/receipts') return receipts(env, url);
   if (path === '/api/analytics') return analytics(env, url);
+  if (path === '/api/transparency') return json(transparencyJson(), 200, { 'Cache-Control': 'public, max-age=300' });
   if (path === '/api/tasks') return tasks(env, ctx, url);
   const m = path.match(/^\/api\/tasks\/(\d{1,9})$/);
   if (m) return oneTask(env, Number(m[1]));

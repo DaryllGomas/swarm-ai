@@ -590,7 +590,7 @@
       { value: 'anonymous', label: 'Anonymous (default)', text: 'Your accepted work shows as "a contributor" on receipts, past ones included, and your handle is never shown.' },
       { value: 'handle', label: 'Show my handle', text: 'Your handle is shown on your receipts, and switching back to anonymous hides it again, past receipts included.' }] },
     { key: 'history', title: 'Your history', options: [
-      { value: 'private', label: 'Private (default)', text: 'Your own claims and submissions stay visible only to you on this page.' },
+      { value: 'private', label: 'Private (default)', text: 'Your own claims and submissions stay visible only to you on Your Swarm.' },
       { value: 'weekly_purge', label: 'Delete weekly', text: 'Each week, after the totals are counted, your per-item detail is deleted and only anonymous totals remain.' }] },
     { key: 'research', title: 'Research', options: [
       { value: 'aggregate', label: 'Totals only (default)', text: 'Your work counts only in anonymous totals.' },
