@@ -2,6 +2,7 @@ import { PROVISIONAL_NOTE, newOp, reviewSubmission } from './core.js';
 import { UNTRUSTED } from './sync.js';
 import { screenSources } from './links.js';
 import { clean, iso, json, readJsonResult } from './lib.js';
+import { creditedAs, publicHandle } from './privacy.js';
 
 const MAX_ADMIN_BODY_BYTES = 4 * 1024;
 
@@ -63,11 +64,13 @@ export async function adminSubmission(env, url) {
   const id = Number(url.searchParams.get('id'));
   if (!Number.isSafeInteger(id) || id < 1) return json({ error: 'id must be a positive whole number' }, 400);
   const submission = await env.DB.prepare(`SELECT s.id, s.body, s.sources, s.model, s.review_note, s.published_url,
-    t.title, t.source_key, c.handle FROM submissions s JOIN tasks t ON t.id = s.task
+    t.title, t.source_key, c.handle, c.credit, c.removed FROM submissions s JOIN tasks t ON t.id = s.task
     JOIN contributors c ON c.id = s.contributor WHERE s.id = ?1 AND s.status = 'accepted'
     AND t.project = 'town-hall' AND t.kind = 'research_fix' AND t.held_reason IS NULL`).bind(id).first();
   if (!submission) return json({ error: 'not found' }, 404);
-  return json({ notice: UNTRUSTED, submission: { ...submission, sources: JSON.parse(submission.sources) } });
+  // The publisher may name the contributor on a public page, so it gets the handle only if the contributor chose handle credit.
+  const { credit, removed, ...rest } = submission;
+  return json({ notice: UNTRUSTED, submission: { ...rest, handle: publicHandle(submission), credited_as: creditedAs(submission), sources: JSON.parse(submission.sources) } });
 }
 
 export async function adminPublished(req, env) {

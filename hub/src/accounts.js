@@ -1,12 +1,13 @@
 import { capHashes, ipHashFor, json, readJson, sha256, underRateLimit } from './lib.js';
 import { assertion, b64, clientData, random, registration, unb64 } from './webauthn.js';
+import { DEFAULT_CHOICES, newResearchId, parseChoices } from './privacy.js';
 export const rpOrigin = (env) => env.RP_ORIGIN || 'https://swarm.bigpicsolutions.com';
 const rpId = (env) => env.RP_ID || 'swarm.bigpicsolutions.com';
 const SESSION_TTL = 30 * 86400000;
 export function cookie(req, name) {
   return (req.headers.get('Cookie') || '').split(';').map((s) => s.trim()).find((s) => s.startsWith(name + '='))?.slice(name.length + 1) || '';
 }
-const cookieValue = (name, value, age) => `${name}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${age}`;
+export const cookieValue = (name, value, age) => `${name}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${age}`;
 const sidHash = (env, sid) => sha256(`${env.HASH_SALT}|session|${sid}`);
 const browserHash = (env, sid) => sha256(`${env.HASH_SALT}|ceremony|${sid}`);
 export const privateJson = (body, status = 200, headers = {}) => json(body, status, { 'Cache-Control': 'no-store', ...headers });
@@ -67,6 +68,14 @@ export async function handleAccount(req, env, path) {
     } : { challenge, rpId: rpId(env), userVerification: 'required', timeout: 300000 };
     return privateJson(options, 200, { 'Set-Cookie': cookieValue('swarm_ceremony', browser, 300) });
   }
+  // The three privacy choices travel with the passkey at sign-up. Anything left out takes the private default.
+  let choices = { ...DEFAULT_CHOICES };
+  if (kind === 'register' && body.privacy !== undefined) {
+    if (!body.privacy || typeof body.privacy !== 'object' || Array.isArray(body.privacy)) return privateJson({ error: 'privacy must be an object with credit, history and research.' }, 400);
+    const parsed = parseChoices(body.privacy);
+    if (parsed.error) return privateJson({ error: parsed.error }, 400);
+    choices = { ...choices, ...parsed.choices };
+  }
   try {
     if (body.type !== 'public-key' || body.rawId !== body.id || !body.response || typeof body.response !== 'object') throw new Error('Invalid credential');
     unb64(body.id, 1023);
@@ -84,9 +93,10 @@ export async function handleAccount(req, env, path) {
       const net = await capHashes(env, req);
       // Like pairing: a rolling 24h window counts both network-day hashes, atomically with insertion.
       const res = await env.DB.batch([
-        env.DB.prepare(`INSERT INTO accounts(id, created, network) SELECT ?1, ?2, ?3
+        env.DB.prepare(`INSERT INTO accounts(id, created, network, credit, history, research, research_id) SELECT ?1, ?2, ?3, ?8, ?9, ?10, ?11
           WHERE (SELECT COUNT(*) FROM accounts WHERE network IN (?3, ?4, ?6, ?7) AND created > ?5) < 3`)
-          .bind(c.account, now, net.today, net.yesterday, now - 86400000, net.legacyToday, net.legacyYesterday),
+          .bind(c.account, now, net.today, net.yesterday, now - 86400000, net.legacyToday, net.legacyYesterday,
+            choices.credit, choices.history, choices.research, choices.research === 'share_pseudonymous' ? newResearchId() : null),
         env.DB.prepare(`INSERT INTO credentials(id, account, public_key, sign_count, transports)
           SELECT ?1, id, ?3, ?4, ?5 FROM accounts WHERE id = ?2`).bind(body.id, c.account, JSON.stringify(jwk), count, JSON.stringify(transports)),
         env.DB.prepare('INSERT INTO sessions(hash, account, expires) SELECT ?1, id, ?3 FROM accounts WHERE id = ?2').bind(hash, c.account, now + SESSION_TTL),

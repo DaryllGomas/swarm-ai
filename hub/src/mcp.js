@@ -12,6 +12,7 @@ import { byteLength, capHashes, clean, iso, ipHashFor, json, readJsonResult, und
 import { LinkError, screenSources } from './links.js';
 import { CLIENT_IDS, normalizeClient, setupGuide } from './setup.js';
 import { prescreenSubmission } from './prescreen.js';
+import { CHOICE_TEXT, CREDIT, removeHandle, syncCredit } from './privacy.js';
 import { validateArgs } from './validate.js';
 
 const MAX_MCP_BODY_BYTES = 64 * 1024; // the 20 KB submission body plus JSON escaping and the rest of the call
@@ -31,7 +32,7 @@ const INSTRUCTIONS = [
 ].join(' ');
 
 const HOW_TO_HELP = {
-  what: 'Swarm AI is a hub: people point their AI at public projects, the public decides how effort is split, and project reviewers accept or reject the work. Accepted work earns a receipt with your handle.',
+  what: 'Swarm AI is a hub: people point their AI at public projects, the public decides how effort is split, and project reviewers accept or reject the work. Accepted work earns a public receipt. It says "a contributor" unless you choose to be credited by your handle (set_credit).',
   steps: [
     '1. Browse (no key): list_projects, list_tasks, get_task.',
     '2. pair: get a handle and a contributor key (shown once). Prefer putting it in your client config as an `Authorization: Bearer <key>` header, because arguments end up in chat logs. Pass it as the `contributor_key` argument only if your client cannot set headers.',
@@ -163,6 +164,18 @@ const TOOLS = [
     annotations: WRITES('Link account'),
   },
   {
+    name: 'set_credit',
+    description: 'Choose how your accepted work is credited on public receipts: "anonymous" (the default; receipts say "a contributor") or "handle" (receipts show your handle). It applies to past receipts too, because it is decided when a receipt is read. If your user linked a Swarm voter account, the credit follows that account and is changed at https://swarm.bigpicsolutions.com/me instead. Needs your key or sign-in.',
+    inputSchema: { type: 'object', properties: { credit: { type: 'string', enum: CREDIT }, ...KEY_PROP }, required: ['credit'], additionalProperties: false },
+    annotations: { title: 'Set credit', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: 'remove_handle',
+    description: 'Replace your handle with a random tombstone name, for good, and set your credit to anonymous. Your key keeps working. Past events lose the old handle. The old handle may be taken by someone else afterwards. Only do this when your user asks. Needs your key or sign-in.',
+    inputSchema: { type: 'object', properties: { ...KEY_PROP }, additionalProperties: false },
+    annotations: { title: 'Remove handle', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  },
+  {
     name: 'submit_work',
     description: 'Hand in finished work for a task you hold an active claim on. Body up to 20 KB following the task\'s output format; 1 to 30 source links (https) you actually opened. Plain http, IP addresses, link shorteners and punycode hosts are accepted but flagged for the reviewer. It waits for a person to review it; Swarm never publishes it. model and tokens_est are optional self-reported estimates. For a task on a GitHub project, the first source must be the link to your pull request on that repository (https://github.com/OWNER/REPO/pull/NUMBER), opened from your own GitHub account; the maintainer\'s merge is the review. Needs your key.',
     inputSchema: {
@@ -203,6 +216,8 @@ const HANDLERS = {
   my_work: myWork,
   my_week: myWeek,
   link_account: linkAccount,
+  set_credit: setCredit,
+  remove_handle: removeOwnHandle,
   submit_work: submitWork,
   submission_status: submissionStatus,
 };
@@ -297,7 +312,7 @@ const rpcError = (id, code, message, status = 200, headers = {}) => json({ jsonr
 
 async function authenticate({ env, req, args, oauth }) {
   if (oauth) {
-    const who = await env.DB.prepare('SELECT id, handle FROM contributors WHERE id = ?1').bind(oauth.contributor).first();
+    const who = await env.DB.prepare('SELECT id, handle, credit FROM contributors WHERE id = ?1 AND removed = 0').bind(oauth.contributor).first();
     if (!who) throw new ToolError('This connection no longer matches a contributor. Reconnect Swarm.');
     // An operator's revoke replaces the key hash and records an event; a connection has no key to replace, so it checks the event.
     if (await env.DB.prepare("SELECT 1 AS n FROM events WHERE contributor = ?1 AND type = 'contributor_revoked' LIMIT 1").bind(who.id).first()) throw new ToolError('This contributor was revoked by an operator.');
@@ -310,7 +325,7 @@ async function authenticate({ env, req, args, oauth }) {
     const none = !m && (typeof args.contributor_key !== 'string' || !args.contributor_key.trim());
     throw new (none ? AuthRequired : ToolError)('This tool needs a contributor key (or a connection that signed in with OAuth). Call `pair` once to get a handle and key, then send it as an `Authorization: Bearer <key>` header in your client config (preferred: arguments end up in chat logs), or pass it as the `contributor_key` argument if your client cannot set headers.');
   }
-  const who = await env.DB.prepare('SELECT id, handle FROM contributors WHERE key_hash = ?1').bind(await keyHash(env, key)).first();
+  const who = await env.DB.prepare('SELECT id, handle, credit FROM contributors WHERE key_hash = ?1 AND removed = 0').bind(await keyHash(env, key)).first();
   if (!who) throw new ToolError('That contributor key was not recognized. Call `pair` to get a new one.');
   return who;
 }
@@ -326,6 +341,7 @@ async function pair({ env, args, ipHash, req }) {
       'Prefer the Authorization header: add the key to your client config as an `Authorization: Bearer <key>` header for the Swarm server. Arguments end up in chat logs; headers do not.',
       'Only if your client cannot set headers (for example a custom connector), pass it as the `contributor_key` argument on next_task, claim_task, release_task, my_work, my_week, link_account, submit_work and submission_status. That works but is the weaker option.',
       'Treat it like a password. Anyone with it can submit work under your handle. Do not paste it into chats, files or submissions.',
+      'You are credited anonymously by default: public receipts say "a contributor". Use set_credit to show your handle, or remove_handle to drop it for good.',
       'Optional: if the user has a Swarm voter account and wants their ballot to steer you, they can create a link code on https://swarm.bigpicsolutions.com/me and you call link_account with it.',
     ],
     next: 'Call next_task to get a job.',
@@ -605,6 +621,7 @@ async function myWork({ env, who }) {
   ]);
   return {
     handle: who.handle,
+    credit: { value: who.credit, text: CHOICE_TEXT.credit[who.credit], how_to_change: 'set_credit (or remove_handle), or on /me if you have a voter account.' },
     active_claims: claims.map((c) => ({ task_id: c.task, title: c.title, units: c.units, routed: !!c.routed, routing_origin: c.routing_origin, expires_at: iso(c.expires_at) })),
     submissions: subs.results.map((s) => ({ id: s.id, task_id: s.task, title: s.title, units: s.units, status: s.status, submitted: iso(s.created), reviewed: iso(s.reviewed_at) })),
     accepted_units: accepted.n,
@@ -639,6 +656,7 @@ async function linkAccount({ env, args, who, ipHash, req, oauth }) {
   if (!r.ok && r.reason === 'owned') throw new ToolError('This contributor already belongs to a different Swarm account, so it cannot be linked to this one. A contributor is never moved between accounts. Pair a new contributor for the other account, or use the account that owns this one.');
   if (!r.ok && r.reason === 'rate') throw new ToolError('Too many wrong link codes from this contributor or network. Wait an hour, then ask the user for a fresh code.');
   if (!r.ok) throw new ToolError('That link code is not valid. It may be wrong, expired (they last 10 minutes) or already used. Ask the user to create a fresh one on https://swarm.bigpicsolutions.com/me.');
+  await syncCredit(env, (await env.DB.prepare('SELECT account FROM account_links WHERE contributor = ?1').bind(who.id).first())?.account); // the credit choice of the account applies from now on
   const steer = await steeringFor(env, who.id);
   return {
     linked: true,
@@ -648,6 +666,20 @@ async function linkAccount({ env, args, who, ipHash, req, oauth }) {
       : 'This contributor is now linked to the voter account, but that account has no usable ballot yet, so next_task still follows the public allocation until they save one at https://swarm.bigpicsolutions.com/vote.',
     replaces: 'Any earlier link of this account was replaced. One contributor per account. The first account a contributor is linked to owns it for good.',
   };
+}
+
+async function setCredit({ env, args, who }) {
+  const row = await env.DB.prepare('SELECT owner_account FROM contributors WHERE id = ?1').bind(who.id).first();
+  const linked = row?.owner_account || await env.DB.prepare('SELECT 1 AS n FROM account_links WHERE contributor = ?1').bind(who.id).first();
+  if (linked) throw new ToolError('Your credit follows your Swarm voter account. Your user can change it on https://swarm.bigpicsolutions.com/me.');
+  await env.DB.prepare('UPDATE contributors SET credit = ?2 WHERE id = ?1').bind(who.id, args.credit).run();
+  return { credit: args.credit, text: CHOICE_TEXT.credit[args.credit] };
+}
+
+async function removeOwnHandle({ env, who }) {
+  const handle = await removeHandle(env, who.id);
+  if (!handle) throw new ToolError('Could not remove the handle.');
+  return { handle, credit: 'anonymous', note: 'Your old handle is gone and your credit is anonymous. Your key still works. Past events no longer carry the old handle.' };
 }
 
 // ---------------------------------------------------------------- submit tools

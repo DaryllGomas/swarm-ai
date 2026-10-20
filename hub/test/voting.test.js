@@ -58,7 +58,7 @@ it('publishes a real 70/30 snapshot in basis points and keeps percent interfaces
   expect(await shares()).toEqual([{project:'swarm-ai',share:3000,provisional:0},{project:'town-hall',share:7000,provisional:0}]);
   expect((await currentAllocation(env)).shares).toEqual({'swarm-ai':30,'town-hall':70});
   expect((await weekStats(env)).projects.find(p=>p.id==='town-hall').allocation.share).toBe(70);
-  const current=await(await send('/api/vote/current')).json();expect(current).toMatchObject({source:'ballots',provisional:false,voter_count:1,unit:'basis_points',projected:false});
+  const current=await(await send('/api/vote/current')).json();expect(current).toMatchObject({source:'ballots',provisional:false,voter_count:'fewer than 5',unit:'basis_points',projected:false});
 });
 it('largest remainders sum to 10000 and break ties by project id',async()=>{
   await env.DB.prepare("INSERT INTO projects(id,name,kind,summary,reviewer) VALUES ('third','Third','research','test','reviewer')").run();
@@ -105,10 +105,9 @@ it('snapshot transaction rolls back completely if any allocation write fails',as
   expect((await shares()).every(r=>r.provisional===1)).toBe(true);expect((await publishSnapshot(env)).published).toBe(true);
 });
 it('audit returns aggregates only, counts daily voters once, fills 30 days and lists snapshot history',async()=>{
-  const before = (await (await send('/api/vote/audit')).json()).ballots_per_day.at(-1).ballots;
   const v=await voter();await version(v.id,{'swarm-ai':100},Date.now()-1);await version(v.id,{'town-hall':100},Date.now());
   await publishSnapshot(env);const a=await(await send('/api/vote/audit')).json();
-  expect(a.eligible_voter_count).toBe(1);expect(a.ballots_per_day).toHaveLength(30);expect(a.ballots_per_day.at(-1).ballots).toBe(before+1);expect(a.snapshot_history).toHaveLength(1);
+  expect(a.eligible_voter_count).toBe('fewer than 5');expect(a.ballots_per_day).toHaveLength(30);expect(a.ballots_per_day.at(-1).ballots).toBe('<5');expect(a.snapshot_history).toHaveLength(1);
   const text=JSON.stringify(a);expect(text).not.toContain(v.id);expect(text).not.toContain('allocations');expect(text).not.toContain('network');
   expect((await send('/api/vote/config')).status).toBe(200);expect((await send('/api/vote/missing')).status).toBe(404);expect((await post('/api/vote/current')).status).toBe(405);
 });

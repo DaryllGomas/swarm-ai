@@ -147,7 +147,7 @@ describe('operator writes', () => {
     const after = await one('SELECT key_hash FROM contributors WHERE id = ?1', c.id);
     expect(after.key_hash).not.toBe(c.key_hash); expect(after.key_hash).toMatch(/^[0-9a-f]{64}$/);
     expect((await p.u.call('my_work')).isError).toBe(true);
-    expect((await (await send('/api/receipts')).json()).receipts[0].handle).toBe(p.u.handle);
+    expect((await (await send('/api/receipts')).json()).receipts[0].credited_as).toBe('a contributor');
     expect((await one("SELECT actor FROM events WHERE contributor = ?1 AND type = 'contributor_revoked'", c.id)).actor).toBe('owner@example.com');
     expect(await (await a.get('audit')).text()).not.toContain(after.key_hash);
     expect((await a.post('revoke', { contributor_id: c.id })).status).toBe(200);

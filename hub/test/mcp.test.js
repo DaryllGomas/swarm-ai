@@ -180,9 +180,11 @@ describe('work loop: next_task, claim, submit_work, review', () => {
 
     const receipts = await (await send('/api/receipts')).json();
     expect(receipts.receipts).toHaveLength(1);
-    expect(receipts.receipts[0].handle).toBe('worker-one');
+    expect(receipts.receipts[0].handle).toBeNull(); // anonymous credit is the default
+    expect(receipts.receipts[0].credited_as).toBe('a contributor');
     expect(receipts.receipts[0].task.id).toBe(taskId);
-    expect(receipts.receipts[0].self_reported.model).toBe('test-model');
+    expect(receipts.receipts[0].self_reported).toBeUndefined(); // no model or token figures on public receipts
+    expect(JSON.stringify(receipts)).not.toContain('test-model');
 
     expect((await user.call('submission_status', { id: subId })).data.status).toBe('accepted');
     expect((await user.call('my_work')).data.accepted_units).toBe(3);

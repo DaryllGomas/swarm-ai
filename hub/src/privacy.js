@@ -4,7 +4,9 @@
 //   - the network-hash housekeeping the hourly job does (forward secrecy);
 //   - the right to leave: delete an account, remove a handle.
 import { NETWORK_KEY_KEEP_DAYS, resetNetworkKeyCache, sha256, utcDay } from './lib.js';
-import { randomId } from './identity.js';
+
+const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+const randomId = (n) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => ALPHABET[b % ALPHABET.length]).join('');
 
 export const CREDIT = ['anonymous', 'handle'];
 export const HISTORY = ['private', 'weekly_purge'];
@@ -14,8 +16,8 @@ export const DEFAULT_CHOICES = { credit: 'anonymous', history: 'private', resear
 // One plain sentence per choice value, shown in the UI beside the choice and returned by the API.
 export const CHOICE_TEXT = {
   credit: {
-    anonymous: 'Your accepted work shows as "a contributor". Your handle is not shown on receipts, including past ones.',
-    handle: 'Your handle is shown on your receipts. Switching back to anonymous hides it again, on past receipts too.',
+    anonymous: 'Your accepted work shows as "a contributor" on receipts, past ones included, and your handle is never shown.',
+    handle: 'Your handle is shown on your receipts, and switching back to anonymous hides it again, past receipts included.',
   },
   history: {
     private: 'Your own claims and submissions stay visible only to you on this page.',

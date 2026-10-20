@@ -2,6 +2,7 @@ import { currentAllocation } from './core.js';
 import { readJson, weekOf, weekStartMs } from './lib.js';
 import { privateJson, session, writeGuard } from './accounts.js';
 import { random } from './webauthn.js';
+import { kCount } from './privacy.js';
 
 // The latest ballot strictly before the cutoff. Each complete valid ballot has equal weight.
 // If a project was deactivated, the ballot must be saved again before it counts: never silently reweight a voter.
@@ -84,11 +85,11 @@ export async function handleVoting(req, env, path) {
   if (path === '/api/vote/current') {
     const a = await currentAllocation(env);
     const snapshot = await env.DB.prepare('SELECT week, voter_count, published_at, source FROM vote_snapshots WHERE week = ?1').bind(a.week).first();
-    return privateJson({ week: a.week, projected: false, source: snapshot?.source || 'fallback', voter_count: snapshot?.voter_count || 0,
+    return privateJson({ week: a.week, projected: false, source: snapshot?.source || 'fallback', voter_count: kCount(snapshot?.voter_count || 0),
       published_at: snapshot?.published_at || null, provisional: !snapshot || snapshot.source === 'fallback',
       shares: Object.fromEntries(Object.entries(a.shares).map(([k, v]) => [k, Math.round(v * 100)])), unit: 'basis_points' });
   }
-  if (path === '/api/vote/next') return privateJson(await projection(env));
+  if (path === '/api/vote/next') { const p = await projection(env); return privateJson({ ...p, voter_count: kCount(p.voter_count) }); }
   if (path === '/api/vote/audit') {
     const now = Date.now(), start = weekStartMs(now), firstDay = Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), new Date(now).getUTCDate()) - 29 * 86400000;
     const [eligible, daily, history] = await env.DB.batch([
@@ -98,9 +99,10 @@ export async function handleVoting(req, env, path) {
       env.DB.prepare('SELECT week, voter_count, published_at, source FROM vote_snapshots ORDER BY week DESC LIMIT 104'),
     ]);
     const days = new Map(daily.results.map((r) => [r.day, r.ballots]));
-    return privateJson({ eligible_voter_count: eligible.results[0].n, ballots_per_day: Array.from({ length: 30 }, (_, i) => {
-      const day = new Date(firstDay + i * 86400000).toISOString().slice(0,10); return { day, ballots: days.get(day) || 0 };
-    }), snapshot_history: history.results, note: 'Daily counts are distinct accounts saving a ballot; edits on the same day count once. No voter identities are public.' });
+    // A count of people for a group smaller than 5 is not published (k-anonymity): it shows "<5" (per day) or "fewer than 5".
+    return privateJson({ eligible_voter_count: kCount(eligible.results[0].n), ballots_per_day: Array.from({ length: 30 }, (_, i) => {
+      const day = new Date(firstDay + i * 86400000).toISOString().slice(0,10); return { day, ballots: kCount(days.get(day) || 0, '<5') };
+    }), snapshot_history: history.results.map((h) => ({ ...h, voter_count: kCount(h.voter_count) })), note: 'Daily counts are distinct accounts saving a ballot; edits on the same day count once. A count below 5 is shown as "<5" or "fewer than 5", so a small group cannot be picked out. No voter identities are public.' });
   }
   return privateJson({ error: 'not found' }, 404);
 }

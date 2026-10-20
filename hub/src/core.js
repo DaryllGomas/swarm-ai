@@ -1,5 +1,6 @@
 // Data rules shared by the MCP server, the public API and the admin API.
 import { weekOf, weekStartMs } from './lib.js';
+import { PURGED_HANDLE, REAL_CONTRIBUTOR, kCount } from './privacy.js';
 
 export const CLAIM_TTL_MS = 3 * 60 * 60 * 1000; // 3 hours
 export const MAX_ACTIVE_CLAIMS = 2; // per contributor
@@ -147,7 +148,7 @@ export async function weekStats(env, now = Date.now()) {
   const week = weekOf(now);
   const start = weekStartMs(now);
   const end = start + 7 * 86400000;
-  const [alloc, projects, routed, selfDirected, ballotDirected, lost, accepted, acceptedAll, open, pending, active, totals] = await Promise.all([
+  const [alloc, projects, routed, selfDirected, ballotDirected, lost, accepted, acceptedAll, open, pending, active, people, totals] = await Promise.all([
     currentAllocation(env, now),
     env.DB.prepare('SELECT id, name, kind, summary, url, reviewer, sponsored, active, paused, max_pending FROM projects WHERE active = 1 ORDER BY name').all(),
     unitsByProject(env, week, 1, STANDING),
@@ -161,14 +162,17 @@ export async function weekStats(env, now = Date.now()) {
     env.DB.prepare("SELECT project, COUNT(*) AS n FROM tasks WHERE status = 'ready' GROUP BY project").all(),
     env.DB.prepare("SELECT t.project AS project, COUNT(*) AS n FROM submissions s JOIN tasks t ON t.id = s.task WHERE s.status = 'pending' GROUP BY t.project").all(),
     env.DB.prepare("SELECT t.project AS project, COUNT(*) AS n FROM claims c JOIN tasks t ON t.id = c.task WHERE c.outcome IS NULL AND c.expires_at > ?1 GROUP BY t.project").bind(now).all(),
+    // Distinct contributors with a standing claim this week, per project: a count of people (see kCount).
+    env.DB.prepare(`SELECT t.project AS project, COUNT(DISTINCT c.contributor) AS n FROM claims c JOIN tasks t ON t.id = c.task JOIN contributors u ON u.id = c.contributor
+                    WHERE c.week = ?1 AND ${STANDING} AND u.removed = 0 AND u.handle != '${PURGED_HANDLE}' GROUP BY t.project`).bind(week).all(),
     env.DB.batch([
-      env.DB.prepare('SELECT COUNT(*) AS n FROM contributors'),
+      env.DB.prepare(`SELECT COUNT(*) AS n FROM contributors WHERE ${REAL_CONTRIBUTOR}`),
       env.DB.prepare('SELECT COUNT(*) AS n FROM submissions'),
       env.DB.prepare("SELECT COUNT(*) AS n FROM submissions WHERE status = 'accepted'"),
     ]),
   ]);
   const by = (r) => Object.fromEntries(r.results.map((x) => [x.project, x.units ?? x.n]));
-  const acc = by(accepted), accAll = by(acceptedAll), openBy = by(open), pendBy = by(pending), actBy = by(active);
+  const acc = by(accepted), accAll = by(acceptedAll), openBy = by(open), pendBy = by(pending), actBy = by(active), peopleBy = by(people);
   const sum = (m) => Object.values(m).reduce((a, b) => a + b, 0);
   const totalRouted = sum(routed);
 
@@ -199,6 +203,8 @@ export async function weekStats(env, now = Date.now()) {
       open_tasks: openTasks,
       pending_reviews: pend,
       active_claims: actBy[p.id] || 0,
+      contributors_this_week: kCount(peopleBy[p.id] || 0), // people: shown as "fewer than 5" for a small group
+
       reviewer_capacity: { max_pending: p.max_pending, paused: pend >= p.max_pending },
       gap_reason: gap,
     };
@@ -212,7 +218,7 @@ export async function weekStats(env, now = Date.now()) {
       note: 'Public-routed: handed out by the public allocation (the only origin compared with the vote). Ballot-directed: handed out by a signed-in voter\'s own ballot to their linked AI. Self-picked: chosen by the contributor with claim_task. Units, not compute; the three are never added together.',
     },
     projects: list,
-    totals: { contributors: totals[0].results[0].n, submissions: totals[1].results[0].n, accepted: totals[2].results[0].n },
+    totals: { contributors: kCount(totals[0].results[0].n), submissions: totals[1].results[0].n, accepted: totals[2].results[0].n },
   };
 }
 

@@ -328,7 +328,7 @@ describe('pseudonymous handle: authorization code, PKCE and the token', () => {
 
 describe('scopes are enforced on the server, per tool', () => {
   it('every tool that needs a key maps to a scope, and the public tools to none', () => {
-    expect(Object.keys(SCOPE_FOR_TOOL).sort()).toEqual(['claim_task', 'link_account', 'my_week', 'my_work', 'next_task', 'release_task', 'submission_status', 'submit_work'].sort());
+    expect(Object.keys(SCOPE_FOR_TOOL).sort()).toEqual(['claim_task', 'link_account', 'my_week', 'my_work', 'next_task', 'release_task', 'remove_handle', 'set_credit', 'submission_status', 'submit_work'].sort());
     expect(Object.values(SCOPE_FOR_TOOL).every((s) => ['read', 'work', 'submit'].includes(s))).toBe(true);
   });
 

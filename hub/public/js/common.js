@@ -554,7 +554,8 @@
     main.appendChild(el('strong', null, r.title)); main.appendChild(el('i', 'rc-bar'));
     li.appendChild(main);
     const who = el('div', 'rc-who');
-    who.appendChild(el('span', null, '@' + r.handle));
+    // r.name is "a contributor" unless the contributor chose handle credit; the server decides, so a past receipt follows a later change.
+    who.appendChild(el('span', null, r.name));
     if (r.author) who.appendChild(el('small', null, 'GitHub: @' + r.author));
     who.appendChild(el('small', null, 'Review: ' + r.by));
     li.appendChild(who);
@@ -577,10 +578,62 @@
       const first = (r.evidence.sources || []).find((u) => /^https:\/\//.test(u));
       const gh = r.github;
       host.appendChild(receiptRow(
-        { icon: gh ? 'github' : 'file', title: r.task.title, handle: r.handle, author: gh && gh.pr_author, by: r.reviewed_by, when: rel(r.reviewed_at) },
+        { icon: gh ? 'github' : 'file', title: r.task.title, name: r.handle ? '@' + r.handle : (r.credited_as || 'a contributor'), author: gh && gh.pr_author, by: r.reviewed_by, when: r.reviewed_at ? fmtDate(r.reviewed_at) : '' },
         [linkOrDisabled('task', r.evidence.task_url), linkOrDisabled(gh ? 'pull request' : 'evidence', gh ? gh.pr_url : first), ...(r.publication ? [linkOrDisabled('Published', r.publication.url)] : [])]));
     });
     return true;
+  }
+
+  // ---- privacy choices (voter sign-up on /vote, "Your Swarm" on /me). The sentences match CHOICE_TEXT in hub/src/privacy.js; a test keeps them in step.
+  const PRIVACY_CHOICES = [
+    { key: 'credit', title: 'How you are credited', options: [
+      { value: 'anonymous', label: 'Anonymous (default)', text: 'Your accepted work shows as "a contributor" on receipts, past ones included, and your handle is never shown.' },
+      { value: 'handle', label: 'Show my handle', text: 'Your handle is shown on your receipts, and switching back to anonymous hides it again, past receipts included.' }] },
+    { key: 'history', title: 'Your history', options: [
+      { value: 'private', label: 'Private (default)', text: 'Your own claims and submissions stay visible only to you on this page.' },
+      { value: 'weekly_purge', label: 'Delete weekly', text: 'Each week, after the totals are counted, your per-item detail is deleted and only anonymous totals remain.' }] },
+    { key: 'research', title: 'Research', options: [
+      { value: 'aggregate', label: 'Totals only (default)', text: 'Your work counts only in anonymous totals.' },
+      { value: 'share_pseudonymous', label: 'Share under a random ID', text: 'Your contribution history goes into an open research dataset under a random research ID, never your handle or account.' }] },
+  ];
+  // Three radio groups with one sentence each, and a link to the privacy page. get() returns the chosen values; set(values) selects them.
+  function privacyChoices(prefix, current, onChange) {
+    const root = el('div', 'privacy-choices');
+    const radios = {};
+    PRIVACY_CHOICES.forEach((c) => {
+      const fs = el('fieldset', 'choice'); fs.appendChild(el('legend', null, c.title));
+      radios[c.key] = [];
+      c.options.forEach((o) => {
+        const label = el('label', 'choice-opt');
+        const input = el('input'); input.type = 'radio'; input.name = prefix + '-' + c.key; input.value = o.value;
+        input.checked = (current && current[c.key] ? current[c.key] : c.options[0].value) === o.value;
+        if (onChange) input.addEventListener('change', () => onChange(c.key, o.value));
+        radios[c.key].push(input);
+        const text = el('span', 'choice-text'); text.appendChild(el('strong', null, o.label)); text.appendChild(el('small', null, o.text));
+        label.appendChild(input); label.appendChild(text); fs.appendChild(label);
+      });
+      root.appendChild(fs);
+    });
+    const more = el('p', 'quiet'); const a = el('a', null, 'What Swarm stores, what it cannot protect against, and how to protect yourself'); a.href = '/privacy'; more.appendChild(a); root.appendChild(more);
+    return {
+      root,
+      get() { return Object.fromEntries(PRIVACY_CHOICES.map((c) => [c.key, (radios[c.key].find((r) => r.checked) || radios[c.key][0]).value])); },
+      set(values) { PRIVACY_CHOICES.forEach((c) => radios[c.key].forEach((r) => { r.checked = values && values[c.key] === r.value; })); },
+    };
+  }
+
+  // The footer shows which commit is running, linked to it on GitHub, so a visitor can compare it with the open source code.
+  async function footerCommit() {
+    const note = document.querySelector('.foot-note');
+    if (!note) return;
+    const wrap = el('span', 'foot-commit'); wrap.appendChild(document.createTextNode(' Running code: '));
+    try {
+      const v = await getJson('/version');
+      if (typeof v.commit === 'string' && /^[0-9a-f]{40}$/.test(v.commit)) {
+        const a = el('a', null, v.commit.slice(0, 7)); a.href = 'https://github.com/DaryllGomas/swarm-ai/commit/' + v.commit; a.rel = 'noopener noreferrer'; wrap.appendChild(a);
+      } else wrap.appendChild(document.createTextNode('not recorded for this build'));
+    } catch (err) { return; }
+    note.appendChild(wrap);
   }
 
   function errorNote(host, msg) {
@@ -618,7 +671,7 @@
     if (reduce || barsSeen || !('IntersectionObserver' in window)) i.style.width = w + '%';
     else i.style.width = '0%';
   }
-  document.addEventListener('DOMContentLoaded', () => { wireStaticCopy(); initSearch(); initMotion(); });
+  document.addEventListener('DOMContentLoaded', () => { wireStaticCopy(); initSearch(); initMotion(); footerCommit(); });
 
-  window.Swarm = { SAY_LINE, shareText, routedText, showBanner, MCP_URL, el, svg, icon, clear, fmtDate, fmtShort, rel, n0, pct, getJson, renderStamp, buildConnect, flow, renderReceipts, errorNote, projects, META, reduce, copyText, revealBars, setBar };
+  window.Swarm = { SAY_LINE, shareText, routedText, showBanner, MCP_URL, el, svg, icon, clear, fmtDate, fmtShort, rel, n0, pct, getJson, renderStamp, buildConnect, flow, renderReceipts, privacyChoices, PRIVACY_CHOICES, errorNote, projects, META, reduce, copyText, revealBars, setBar };
 })();

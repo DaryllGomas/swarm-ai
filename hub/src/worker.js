@@ -8,10 +8,10 @@ import { expireClaims, weekStats } from './core.js';
 import { adminActivateProject, adminRegisterGithub, handleGithubWebhook } from './github.js';
 import { handleMcp } from './mcp.js';
 import { UNTRUSTED, syncIfStale, syncTasks } from './sync.js';
-import { SECURITY_HEADERS, clean, ipHashFor, isAdmin, iso, json, underRateLimit } from './lib.js';
+import { SECURITY_HEADERS, clean, ipHashFor, isAdmin, iso, isoDay, json, underRateLimit } from './lib.js';
 import { adminHeld, adminPending, adminReview, adminSubmission, adminPublished } from './admin.js';
 import { handleOps } from './ops.js';
-import { forgetNetworks } from './privacy.js';
+import { creditedAs, forgetNetworks, publicHandle } from './privacy.js';
 import { normalizeClient, setupGuide } from './setup.js';
 
 // Requests the OAuth provider owns: discovery metadata, registration, the token endpoint, /authorize (through its default
@@ -127,27 +127,30 @@ async function api(req, env, ctx, url) {
 async function receipts(env, url) {
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '10', 10) || 10, 1), 50);
   const { results } = await env.DB.prepare(
-    `SELECT s.id, s.task, t.title, t.units, t.kind, t.project, p.name AS project_name, p.repo, c.handle, s.reviewed_by, s.reviewed_at,
-            s.sources, s.model, s.tokens_est, s.pr_number, s.pr_author, s.published_url, s.published_at
+    `SELECT s.id, s.task, t.title, t.units, t.kind, t.project, p.name AS project_name, p.repo, c.handle, c.credit, c.removed, s.reviewed_by, s.reviewed_at,
+            s.sources, s.pr_number, s.pr_author, s.published_url, s.published_at
      FROM submissions s JOIN tasks t ON t.id = s.task JOIN projects p ON p.id = t.project JOIN contributors c ON c.id = s.contributor
      WHERE s.status = 'accepted' ORDER BY s.reviewed_at DESC, s.id DESC LIMIT ?1`
   ).bind(limit).all();
   return json({
     updated: new Date().toISOString(),
-    note: 'Accepted means a project reviewer accepted it. Model and token figures are self-reported by the contributor\'s agent.',
+    note: 'Accepted means a project reviewer accepted it. A contributor is named only if they chose to be credited by their handle. Dates are the UTC day; no times, models or token figures are published. A pull request\'s author is public on GitHub itself.',
     notice: UNTRUSTED,
     receipts: results.map((r) => ({
       id: r.id,
       task: { id: r.task, title: r.title, kind: r.kind, units: r.units },
       project: { id: r.project, name: r.project_name },
-      handle: r.handle,
+      // Computed at read time: "a contributor" unless this contributor chose to be credited by their handle (so switching to
+      // anonymous also hides the handle on past receipts), and "removed contributor" once their account was deleted.
+      credited_as: creditedAs(r),
+      handle: publicHandle(r),
       reviewed_by: r.reviewed_by,
-      reviewed_at: iso(r.reviewed_at),
-      publication: r.published_url ? { status: 'published', url: r.published_url, published_at: iso(r.published_at) } : null,
-      self_reported: { model: r.model, tokens_est: r.tokens_est },
+      reviewed_at: isoDay(r.reviewed_at),
+      publication: r.published_url ? { status: 'published', url: r.published_url, published_at: isoDay(r.published_at) } : null,
       evidence: { task_url: `/api/tasks/${r.task}`, sources: JSON.parse(r.sources) },
-      // A merged pull request: credits the GitHub account that wrote it, beside the Swarm handle. The two need not match.
-      ...(r.pr_number ? { github: { repo: r.repo, pr_number: r.pr_number, pr_author: r.pr_author, pr_url: `https://github.com/${r.repo}/pull/${r.pr_number}` } } : {}),
+      // A merged pull request: the link is always shown. GitHub itself shows who wrote it, and we cannot change that; Swarm repeats the
+      // login only for a contributor who chose handle credit.
+      ...(r.pr_number ? { github: { repo: r.repo, pr_number: r.pr_number, pr_author: publicHandle(r) ? r.pr_author : null, pr_url: `https://github.com/${r.repo}/pull/${r.pr_number}` } } : {}),
     })),
   }, 200, { 'Cache-Control': 'public, max-age=30' });
 }

@@ -11,6 +11,7 @@ import { privateJson, rpOrigin, session, writeGuard } from './accounts.js';
 import { IdentityError, MAX_PAIRS_PER_NETWORK_PER_DAY, checkHandle, createContributor } from './identity.js';
 import { SCOPES, SCOPE_TEXT } from './oauth-scopes.js';
 import { SECURITY_HEADERS, capHashes, ipHashFor, readJson } from './lib.js';
+import { syncCredit } from './privacy.js';
 import { linkDirect, ownedContributor } from './steering.js';
 
 export { oauthEnabled } from './oauth-scopes.js';
@@ -179,7 +180,7 @@ async function decide(req, env, oauth) {
       if (err instanceof IdentityError) return privateJson({ error: err.message }, 409);
       throw err;
     }
-    if (account) await linkDirect(env, account.id, contributor.id, 'oauth');
+    if (account) { await linkDirect(env, account.id, contributor.id, 'oauth'); await syncCredit(env, account.id); }
   }
   const { redirectTo } = await oauth.completeAuthorization({
     request: approved.request, // from storage, not from the form

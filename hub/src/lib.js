@@ -145,6 +145,8 @@ export function weekStartMs(ms = Date.now()) {
 }
 export const weekOf = (ms = Date.now()) => new Date(weekStartMs(ms)).toISOString().slice(0, 10);
 export const iso = (ms) => (ms == null ? null : new Date(ms).toISOString());
+// The UTC day only (YYYY-MM-DD): public pages show when something happened to the day, never the minute.
+export const isoDay = (ms) => (ms == null ? null : new Date(ms).toISOString().slice(0, 10));
 
 export function byteLength(s) {
   return new TextEncoder().encode(s).length;

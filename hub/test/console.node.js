@@ -95,3 +95,18 @@ test('public receipts display a Published link only when publication is recorded
   delete receipt.publication; window.Swarm.renderReceipts(host, { receipts: [receipt] });
   assert.ok(!host.textContent.includes('Published'));
 });
+
+test('public receipts name a contributor only when the server sends a handle, and show a date, never a time', () => {
+  const window = { matchMedia: () => ({ matches: true }) };
+  const document = { createElement: (tag) => new Element(tag), createElementNS: (_ns, tag) => new Element(tag), addEventListener: () => {} };
+  vm.runInNewContext(readFileSync('public/js/common.js', 'utf8'), { window, document, Date, console, setInterval: () => 0 });
+  const host = new Element('ul');
+  const base = { project: { id: 'town-hall' }, task: { title: 'A task' }, reviewed_by: 'Example reviewer', reviewed_at: '2026-10-20', evidence: { sources: [], task_url: '/api/tasks/1' } };
+  window.Swarm.renderReceipts(host, { receipts: [{ ...base, handle: null, credited_as: 'a contributor' }] });
+  assert.ok(host.textContent.includes('a contributor')); assert.ok(!host.textContent.includes('@'));
+  assert.ok(host.textContent.includes('Oct 20, 2026'));
+  window.Swarm.renderReceipts(host, { receipts: [{ ...base, handle: 'proud-one', credited_as: 'proud-one' }] });
+  assert.ok(host.textContent.includes('@proud-one'));
+  window.Swarm.renderReceipts(host, { receipts: [{ ...base, handle: null, credited_as: 'removed contributor' }] });
+  assert.ok(host.textContent.includes('removed contributor'));
+});

@@ -2,7 +2,7 @@
   'use strict';
   const S = window.Swarm, $ = (id) => document.getElementById(id);
   const colors = ['#f2605f', '#a56cf5', '#4aa8ff', '#5fd08a', '#f5c542'];
-  let projects = [], rows = [], token = '', widget, saving = false;
+  let projects = [], rows = [], token = '', widget, saving = false, signupChoices = null;
   const encode = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const decode = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
   const message = (text) => { $('vote-message').textContent = text; };
@@ -100,7 +100,7 @@
         response.authenticatorData = encode(credential.response.authenticatorData); response.signature = encode(credential.response.signature);
         response.userHandle = credential.response.userHandle ? encode(credential.response.userHandle) : null;
       }
-      await api('/api/account/' + kind + '/verify', 'POST', { id: credential.id, rawId: encode(credential.rawId), type: credential.type, response });
+      await api('/api/account/' + kind + '/verify', 'POST', { id: credential.id, rawId: encode(credential.rawId), type: credential.type, response, ...(kind === 'register' && signupChoices ? { privacy: signupChoices.get() } : {}) });
       await loadAccount(); message('Signed in. Set your 100 points below.');
     } catch (err) { message(err.name === 'NotAllowedError' ? 'Passkey request cancelled or timed out. You can try again.' : err.message); }
     finally {
@@ -140,6 +140,8 @@
     try {
       const config = await api('/api/vote/config'); projects = config.projects;
       const me = await loadAccount(); await loadPublic(); message('');
+      signupChoices = S.privacyChoices('signup', {});
+      $('signup-choices').appendChild(signupChoices.root);
       if (!me.signed_in) humanCheck(config.site_key);
     } catch (err) { message('Voting could not load: ' + err.message); }
   })();

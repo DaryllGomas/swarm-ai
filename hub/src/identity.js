@@ -4,8 +4,8 @@ import { eventStmt } from './core.js';
 import { capHashes, sha256 } from './lib.js';
 
 export const MAX_PAIRS_PER_NETWORK_PER_DAY = 5;
-const RESERVED_EXACT = new Set(['swarm', 'daryll', 'null', 'undefined', 'anonymous', 'reviewer', 'bot', 'me', 'you', 'everyone', 'nobody', 'unknown', 'deleted', 'api', 'mcp']);
-const RESERVED_PART = /(admin|moderator|official|staff|support|bigpic|system|root|swarmai|swarm-ai|townhall|town-hall|anthropic|openai|claude-team)/;
+const RESERVED_EXACT = new Set(['removed', 'swarm', 'daryll', 'null', 'undefined', 'anonymous', 'reviewer', 'bot', 'me', 'you', 'everyone', 'nobody', 'unknown', 'deleted', 'api', 'mcp']);
+const RESERVED_PART = /(removed-|anon-|admin|moderator|official|staff|support|bigpic|system|root|swarmai|swarm-ai|townhall|town-hall|anthropic|openai|claude-team)/;
 
 export class IdentityError extends Error {}
 
