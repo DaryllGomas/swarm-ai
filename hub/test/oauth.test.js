@@ -409,7 +409,7 @@ describe('sign in with your passkey', () => {
     expect(r.data.task.project).toBe('swarm-ai');
     expect(r.data.claim.routing_origin).toBe('ballot_directed');
     const ev = await env.DB.prepare("SELECT detail FROM events WHERE type = 'account_linked' ORDER BY id DESC LIMIT 1").first();
-    expect(JSON.parse(ev.detail)).toEqual({ account: v.id.slice(0, 8), via: 'oauth' });
+    expect(JSON.parse(ev.detail)).toEqual({ via: 'oauth' });
   });
 
   it('reuses the account\'s contributor when it already has one: one identity per account', async () => {

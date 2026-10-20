@@ -102,7 +102,8 @@ async function audit(env, url) {
   const since = Date.now() - 86400000;
   const [events, pairings, churn, rejected, flagged] = await Promise.all([
     env.DB.prepare('SELECT id, ts, type, task, contributor, submission, actor, detail FROM events WHERE id < ?1 ORDER BY id DESC LIMIT 51').bind(before).all(),
-    env.DB.prepare(`SELECT pair_ip AS network_day, COUNT(*) AS pairings FROM contributors
+    // Only the COUNT per network is returned. The network hash itself never leaves the database, not even to the operator console.
+    env.DB.prepare(`SELECT COUNT(*) AS pairings FROM contributors
       WHERE created >= ?1 AND pair_ip IS NOT NULL AND pair_ip != '' GROUP BY pair_ip HAVING COUNT(*) >= 4 ORDER BY pairings DESC`).bind(since).all(),
     // Count lifecycle events, not the claim's final outcome: a claim and release both count.
     env.DB.prepare(`SELECT c.id AS contributor_id, c.handle,
@@ -118,8 +119,18 @@ async function audit(env, url) {
     env.DB.prepare(`SELECT s.id, s.contributor AS contributor_id, c.handle, s.task, s.flags, s.status
       FROM submissions s JOIN contributors c ON c.id = s.contributor WHERE json_array_length(s.flags) > 0 ORDER BY s.id DESC LIMIT 100`).all(),
   ]);
-  const page = events.results.slice(0, 50);
+  const page = events.results.slice(0, 50).map((e) => ({ ...e, detail: e.detail == null ? null : withoutAccount(e.detail) }));
   return json({ notice: UNTRUSTED, events: page, next_before: events.results.length > 50 ? page.at(-1).id : null,
     signals: { window_start: since, pairings_near_cap: pairings.results, claim_churn_24h: churn.results,
       rejected_ratios_all_time: rejected.results, link_flagged: flagged.results.map((r) => ({ ...r, flags: JSON.parse(r.flags) })) } });
+}
+
+// Events written before migration 0010 carried a short account id next to a contributor id (account_linked, account_unlinked).
+// Together they would be a voter-to-contributor link, which the console never shows, so any such key is dropped on the way out.
+function withoutAccount(detail) {
+  try {
+    const d = JSON.parse(detail);
+    if (d && typeof d === 'object' && !Array.isArray(d)) { delete d.account; return JSON.stringify(d); }
+  } catch { /* not JSON: shown as it is */ }
+  return detail;
 }

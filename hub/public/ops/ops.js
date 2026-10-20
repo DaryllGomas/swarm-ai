@@ -124,7 +124,7 @@
     const signals = $('signal-data'); clear(signals);
     const s = data.signals;
     const rows = [
-      ['Pairings near cap · last 24h · cap 5 per network', ['Network-day hash', 'Pairings'], s.pairings_near_cap.map((r) => [r.network_day, r.pairings])],
+      ['Pairings near cap · last 24h · cap 5 per network', ['Pairings from one network today (no network is shown)'], s.pairings_near_cap.map((r) => [r.pairings])],
       ['Claim churn · last 24h', ['Contributor', 'Claims', 'Releases', 'Expiries'], s.claim_churn_24h.map((r) => [r.handle, r.claims, r.releases, r.expires])],
       ['Rejected ratio · all reviewed work', ['Contributor', 'Reviewed', 'Rejected', 'Ratio'], s.rejected_ratios_all_time.map((r) => [r.handle, r.reviewed, r.rejected, `${Math.round(r.rejected_ratio * 100)}%`])],
       ['Flagged submissions (links, personal details) · latest 100', ['Submission', 'Contributor', 'Status', 'Flags'], s.link_flagged.map((r) => [r.id, r.handle, r.status, r.flags.join(', ')])],
