@@ -23,15 +23,20 @@ export function percentile(values, p) {
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))];
 }
 
+// How many people stood behind a week's ballot-directed work: distinct voter accounts (or, for an AI no longer linked, distinct contributors).
+export const BALLOT_DIRECTED_PEOPLE = `SELECT COUNT(DISTINCT COALESCE(l.account, 'c:' || c.contributor)) AS n FROM claims c
+  LEFT JOIN account_links l ON l.contributor = c.contributor WHERE c.week = ?1 AND c.routing_origin = 'ballot_directed' AND ${STANDING}`;
+
 // The aggregate numbers of one closed week, per project. Pure reads; nothing here names a person.
 export async function weekAggregates(env, week) {
   const start = Date.parse(`${week}T00:00:00Z`), end = start + WEEK;
-  const [units, people, created, claimed, submitted, accepted, acceptedUnits, rejected, reviews, models] = await Promise.all([
+  const [units, people, bdPeople, created, claimed, submitted, accepted, acceptedUnits, rejected, reviews, models] = await Promise.all([
     env.DB.prepare(`SELECT t.project AS project, d.origin AS origin, SUM(t.units) AS units FROM (
         SELECT DISTINCT c.task AS task, c.contributor AS contributor, c.routing_origin AS origin FROM claims c WHERE c.week = ?1 AND ${STANDING}) d
       JOIN tasks t ON t.id = d.task GROUP BY t.project, d.origin`).bind(week).all(),
     env.DB.prepare(`SELECT t.project AS project, COUNT(DISTINCT c.contributor) AS n FROM claims c JOIN tasks t ON t.id = c.task JOIN contributors u ON u.id = c.contributor
       WHERE c.week = ?1 AND ${STANDING} AND u.removed = 0 AND u.handle != ?2 GROUP BY t.project`).bind(week, PURGED_HANDLE).all(),
+    env.DB.prepare(BALLOT_DIRECTED_PEOPLE).bind(week).first(),
     env.DB.prepare('SELECT project, COUNT(*) AS n FROM tasks WHERE created >= ?1 AND created < ?2 GROUP BY project').bind(start, end).all(),
     env.DB.prepare(`SELECT t.project AS project, COUNT(DISTINCT c.task) AS n FROM claims c JOIN tasks t ON t.id = c.task WHERE c.week = ?1 AND ${STANDING} GROUP BY t.project`).bind(week).all(),
     env.DB.prepare('SELECT t.project AS project, COUNT(*) AS n FROM submissions s JOIN tasks t ON t.id = s.task WHERE s.created >= ?1 AND s.created < ?2 GROUP BY t.project').bind(start, end).all(),
@@ -47,7 +52,7 @@ export async function weekAggregates(env, week) {
   const row = (id) => {
     if (!projects.has(id)) projects.set(id, {
       project: id, routed_units: 0, ballot_directed_units: 0, self_picked_units: 0, accepted_routed_units: 0, accepted_ballot_directed_units: 0, accepted_self_picked_units: 0,
-      tasks_created: 0, tasks_claimed: 0, tasks_submitted: 0, tasks_accepted: 0, tasks_rejected: 0, contributors: 0, reviews: 0, review_p50_ms: null, review_p90_ms: null, models: {},
+      tasks_created: 0, tasks_claimed: 0, tasks_submitted: 0, tasks_accepted: 0, tasks_rejected: 0, contributors: 0, reviews: 0, review_p50_ms: null, review_p90_ms: null, models: {}, ballot_directed_people: bdPeople?.n ?? 0,
     });
     return projects.get(id);
   };
@@ -70,11 +75,11 @@ export async function rollupWeek(env, week, now = Date.now()) {
   for (const p of stats) {
     stmts.push(env.DB.prepare(
       `INSERT OR IGNORE INTO weekly_project_stats (week, project, routed_units, ballot_directed_units, self_picked_units,
-         accepted_routed_units, accepted_ballot_directed_units, accepted_self_picked_units,
+         accepted_routed_units, accepted_ballot_directed_units, accepted_self_picked_units, ballot_directed_people,
          tasks_created, tasks_claimed, tasks_submitted, tasks_accepted, tasks_rejected, contributors, reviews, review_p50_ms, review_p90_ms)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)`
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?18, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)`
     ).bind(week, p.project, p.routed_units, p.ballot_directed_units, p.self_picked_units, p.accepted_routed_units, p.accepted_ballot_directed_units, p.accepted_self_picked_units,
-      p.tasks_created, p.tasks_claimed, p.tasks_submitted, p.tasks_accepted, p.tasks_rejected, p.contributors, p.reviews, p.review_p50_ms, p.review_p90_ms));
+      p.tasks_created, p.tasks_claimed, p.tasks_submitted, p.tasks_accepted, p.tasks_rejected, p.contributors, p.reviews, p.review_p50_ms, p.review_p90_ms, p.ballot_directed_people));
     for (const [family, n] of Object.entries(p.models)) {
       stmts.push(env.DB.prepare('INSERT OR IGNORE INTO weekly_model_stats (week, project, family, submissions) VALUES (?1, ?2, ?3, ?4)').bind(week, p.project, family, n));
     }
@@ -171,10 +176,12 @@ export async function analytics(env, url) {
   for (const m of models.results) { const k = `${m.week}|${m.project}`; (fam.get(k) ?? fam.set(k, {}).get(k))[m.family] = kCount(m.submissions); }
   const byWeek = new Map();
   for (const r of stats.results) {
+    const bdShown = r.ballot_directed_people != null && r.ballot_directed_people >= K_MIN;
     const entry = {
       project: r.project,
-      units: { routed: r.routed_units, ballot_directed: r.ballot_directed_units, self_picked: r.self_picked_units },
-      accepted_units: { routed: r.accepted_routed_units, ballot_directed: r.accepted_ballot_directed_units, self_picked: r.accepted_self_picked_units },
+      // Ballot-directed work follows a voter's own ballot, so per project it is shown only when at least 5 people stood behind that week's.
+      units: { routed: r.routed_units, ballot_directed: bdShown ? r.ballot_directed_units : null, self_picked: r.self_picked_units },
+      accepted_units: { routed: r.accepted_routed_units, ballot_directed: bdShown ? r.accepted_ballot_directed_units : null, self_picked: r.accepted_self_picked_units },
       tasks: { created: r.tasks_created, claimed: r.tasks_claimed, submitted: r.tasks_submitted, accepted: r.tasks_accepted, rejected: r.tasks_rejected },
       contributors: kCount(r.contributors),
       review: { count: r.reviews, p50_ms: r.reviews >= K_MIN ? r.review_p50_ms : null, p90_ms: r.reviews >= K_MIN ? r.review_p90_ms : null },
@@ -184,7 +191,7 @@ export async function analytics(env, url) {
   }
   return json({
     updated: new Date().toISOString(),
-    note: 'Weekly totals per project, kept forever. Units and task counts are about work and are exact. Counts of people, and of work by model family, below 5 show as "fewer than 5". The three routing origins are never added together. Review times are shown from 5 reviews. Model families come from what an agent reports about itself; only the family is kept.',
+    note: 'Weekly totals per project, kept forever. Units and task counts are about work and are exact. Counts of people, and of work by model family, below 5 show as "fewer than 5". Ballot-directed units follow a voter own ballot and are published (null otherwise) only for weeks when at least 5 people stood behind them. The three routing origins are never added together. Review times are shown from 5 reviews. Model families come from what an agent reports about itself; only the family is kept.',
     families: MODEL_FAMILIES,
     weeks: [...byWeek].map(([week, projects]) => ({ week, projects })),
   }, 200, { 'Cache-Control': 'public, max-age=300' });

@@ -2,7 +2,11 @@ import { currentAllocation } from './core.js';
 import { readJson, weekOf, weekStartMs } from './lib.js';
 import { privateJson, session, writeGuard } from './accounts.js';
 import { random } from './webauthn.js';
-import { kCount } from './privacy.js';
+import { K_MIN, coarseCount } from './privacy.js';
+import { utcDay } from './lib.js';
+
+export const FALLBACK_REASON = 'fewer than 5 eligible ballots';
+export const NO_PROJECTION_REASON = 'fewer than 5 ballots';
 
 // The latest ballot strictly before the cutoff. Each complete valid ballot has equal weight.
 // If a project was deactivated, the ballot must be saved again before it counts: never silently reweight a voter.
@@ -30,8 +34,8 @@ export async function publishSnapshot(env, now = Date.now()) {
   const start = weekStartMs(now), week = weekOf(now), op = random();
   const res = await env.DB.batch([
     env.DB.prepare(`${ELIGIBLE} INSERT INTO vote_snapshots(week, voter_count, published_at, source, op)
-      SELECT ?3, COUNT(*), ?4, CASE WHEN COUNT(*) > 0 THEN 'ballots' ELSE 'fallback' END, ?5 FROM valid WHERE true
-      ON CONFLICT(week) DO NOTHING`).bind(start, start, week, now, op),
+      SELECT ?3, CASE WHEN COUNT(*) >= ?6 THEN COUNT(*) ELSE 0 END, ?4, CASE WHEN COUNT(*) >= ?6 THEN 'ballots' ELSE 'fallback' END, ?5 FROM valid WHERE true
+      ON CONFLICT(week) DO NOTHING`).bind(start, start, week, now, op, K_MIN),
     // Replace the provisional seed for this week only when this request won the snapshot insert.
     env.DB.prepare('DELETE FROM allocation WHERE week = ?1 AND EXISTS (SELECT 1 FROM vote_snapshots WHERE week = ?1 AND op = ?2 AND source = \'ballots\')').bind(week, op),
     env.DB.prepare(`INSERT INTO allocation(week, project, share, provisional)
@@ -46,16 +50,27 @@ export async function publishSnapshot(env, now = Date.now()) {
   ]);
   return { published: !!res[0].meta.changes, week };
 }
+// The projection for next Monday. Two privacy rules (docs/DATA-POLICY.md):
+//   - shown only from at least K_MIN (5) eligible ballots; below that nothing is revealed, because with one voter the shares ARE the ballot;
+//   - coarsened in time: computed from the ballots saved before the start of the current UTC day, and stored for the day, so one ballot change
+//     (or a deleted account) cannot be seen by reading it before and after.
 export async function projection(env, now = Date.now()) {
-  const start = weekStartMs(now) + 7 * 86400000;
+  const day = utcDay(now), key = `projection:${day}`;
+  const have = await env.DB.prepare('SELECT v FROM meta WHERE k = ?1').bind(key).first();
+  if (have) return JSON.parse(have.v);
+  const asOf = Date.parse(`${day}T00:00:00Z`), start = weekStartMs(now) + 7 * 86400000, week = weekOf(start);
   const [count, shares] = await env.DB.batch([
-    env.DB.prepare(`${ELIGIBLE} SELECT COUNT(*) AS n FROM valid`).bind(start, now + 1),
-    env.DB.prepare(`${ELIGIBLE}${SHARES}`).bind(start, now + 1),
+    env.DB.prepare(`${ELIGIBLE} SELECT COUNT(*) AS n FROM valid`).bind(start, asOf),
+    env.DB.prepare(`${ELIGIBLE}${SHARES}`).bind(start, asOf),
   ]);
   const n = count.results[0].n;
-  const fallback = !n ? await currentAllocation(env, now) : null;
-  return { week: weekOf(start), projected: true, source: n ? 'ballots' : 'fallback', provisional: !n, voter_count: n,
-    shares: n ? Object.fromEntries(shares.results.map((r) => [r.project, r.share])) : Object.fromEntries(Object.entries(fallback.shares).map(([k, v]) => [k, Math.round(v * 100)])), unit: 'basis_points' };
+  const out = n < K_MIN
+    ? { week, projected: false, reason: NO_PROJECTION_REASON, voter_count: coarseCount(n) }
+    : { week, projected: true, source: 'ballots', provisional: false, voter_count: coarseCount(n), as_of: `${day}T00:00:00.000Z`,
+        shares: Object.fromEntries(shares.results.map((r) => [r.project, r.share])), unit: 'basis_points' };
+  await env.DB.prepare('INSERT OR IGNORE INTO meta(k, v) VALUES (?1, ?2)').bind(key, JSON.stringify(out)).run();
+  const row = await env.DB.prepare('SELECT v FROM meta WHERE k = ?1').bind(key).first();
+  return JSON.parse(row.v);
 }
 export async function handleVoting(req, env, path) {
   if (path === '/api/ballot') {
@@ -85,11 +100,12 @@ export async function handleVoting(req, env, path) {
   if (path === '/api/vote/current') {
     const a = await currentAllocation(env);
     const snapshot = await env.DB.prepare('SELECT week, voter_count, published_at, source FROM vote_snapshots WHERE week = ?1').bind(a.week).first();
-    return privateJson({ week: a.week, projected: false, source: snapshot?.source || 'fallback', voter_count: kCount(snapshot?.voter_count || 0),
+    return privateJson({ week: a.week, projected: false, source: snapshot?.source || 'fallback', voter_count: snapshot?.source === 'ballots' ? coarseCount(snapshot.voter_count) : 'fewer than 5',
+      reason: snapshot?.source === 'ballots' ? undefined : FALLBACK_REASON,
       published_at: snapshot?.published_at || null, provisional: !snapshot || snapshot.source === 'fallback',
       shares: Object.fromEntries(Object.entries(a.shares).map(([k, v]) => [k, Math.round(v * 100)])), unit: 'basis_points' });
   }
-  if (path === '/api/vote/next') { const p = await projection(env); return privateJson({ ...p, voter_count: kCount(p.voter_count) }); }
+  if (path === '/api/vote/next') return privateJson(await projection(env));
   if (path === '/api/vote/audit') {
     const now = Date.now(), start = weekStartMs(now), firstDay = Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), new Date(now).getUTCDate()) - 29 * 86400000;
     const [eligible, daily, history] = await env.DB.batch([
@@ -100,9 +116,9 @@ export async function handleVoting(req, env, path) {
     ]);
     const days = new Map(daily.results.map((r) => [r.day, r.ballots]));
     // A count of people for a group smaller than 5 is not published (k-anonymity): it shows "<5" (per day) or "fewer than 5".
-    return privateJson({ eligible_voter_count: kCount(eligible.results[0].n), ballots_per_day: Array.from({ length: 30 }, (_, i) => {
-      const day = new Date(firstDay + i * 86400000).toISOString().slice(0,10); return { day, ballots: kCount(days.get(day) || 0, '<5') };
-    }), snapshot_history: history.results.map((h) => ({ ...h, voter_count: kCount(h.voter_count) })), note: 'Daily counts are distinct accounts saving a ballot; edits on the same day count once. A count below 5 is shown as "<5" or "fewer than 5", so a small group cannot be picked out. No voter identities are public.' });
+    return privateJson({ eligible_voter_count: coarseCount(eligible.results[0].n), ballots_per_day: Array.from({ length: 30 }, (_, i) => {
+      const day = new Date(firstDay + i * 86400000).toISOString().slice(0,10); return { day, ballots: coarseCount(days.get(day) || 0, '<5') };
+    }), snapshot_history: history.results.map((h) => ({ ...h, voter_count: h.source === 'ballots' ? coarseCount(h.voter_count) : 'fewer than 5', reason: h.source === 'ballots' ? undefined : FALLBACK_REASON })), note: 'Daily counts are distinct accounts saving a ballot; edits on the same day count once. Counts are published only as "fewer than 5" (or "<5" per day) or as a coarse bucket (5-9, 10-24, 25-49, 50-99, then steps of 50), so two published counts can never be subtracted to reveal a small group. A week with fewer than 5 eligible ballots publishes the carried-forward fallback, not a result. No voter identities are public.' });
   }
   return privateJson({ error: 'not found' }, 404);
 }

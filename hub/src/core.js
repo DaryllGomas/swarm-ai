@@ -1,6 +1,6 @@
 // Data rules shared by the MCP server, the public API and the admin API.
 import { weekOf, weekStartMs } from './lib.js';
-import { PURGED_HANDLE, REAL_CONTRIBUTOR, kCount } from './privacy.js';
+import { K_MIN, PURGED_HANDLE, REAL_CONTRIBUTOR, kCount } from './privacy.js';
 
 export const CLAIM_TTL_MS = 3 * 60 * 60 * 1000; // 3 hours
 export const MAX_ACTIVE_CLAIMS = 2; // per contributor
@@ -148,8 +148,10 @@ export async function weekStats(env, now = Date.now()) {
   const week = weekOf(now);
   const start = weekStartMs(now);
   const end = start + 7 * 86400000;
-  const [alloc, projects, routed, selfDirected, ballotDirected, lost, accepted, acceptedAll, open, pending, active, people, totals] = await Promise.all([
+  const [alloc, bdPeople, projects, routed, selfDirected, ballotDirected, lost, accepted, acceptedAll, open, pending, active, people, totals] = await Promise.all([
     currentAllocation(env, now),
+    env.DB.prepare(`SELECT COUNT(DISTINCT COALESCE(l.account, 'c:' || c.contributor)) AS n FROM claims c LEFT JOIN account_links l ON l.contributor = c.contributor
+      WHERE c.week = ?1 AND c.routing_origin = 'ballot_directed' AND ${STANDING}`).bind(week).first(),
     env.DB.prepare('SELECT id, name, kind, summary, url, reviewer, sponsored, active, paused, max_pending FROM projects WHERE active = 1 ORDER BY name').all(),
     unitsByProject(env, week, 1, STANDING),
     originUnitsByProject(env, week, 'self_picked', STANDING),
@@ -175,6 +177,8 @@ export async function weekStats(env, now = Date.now()) {
   const acc = by(accepted), accAll = by(acceptedAll), openBy = by(open), pendBy = by(pending), actBy = by(active), peopleBy = by(people);
   const sum = (m) => Object.values(m).reduce((a, b) => a + b, 0);
   const totalRouted = sum(routed);
+  // Ballot-directed work follows a voter's own ballot: per project it is public only when at least 5 people stood behind it (else null).
+  const bdShown = bdPeople.n === 0 || bdPeople.n >= K_MIN;
 
   const list = projects.results.map((p) => {
     const share = alloc.shares[p.id] ?? 0;
@@ -196,7 +200,7 @@ export async function weekStats(env, now = Date.now()) {
       routed_units: r,
       routed_share: Math.round(routedShare * 10) / 10,
       self_directed_units: selfDirected[p.id] || 0,
-      ballot_directed_units: ballotDirected[p.id] || 0,
+      ballot_directed_units: bdShown ? ballotDirected[p.id] || 0 : null,
       routed_released_or_expired_units: lost[p.id] || 0,
       accepted_units: acc[p.id] || 0,
       accepted_units_all_time: accAll[p.id] || 0,
@@ -214,7 +218,7 @@ export async function weekStats(env, now = Date.now()) {
     allocation_week: alloc.week, allocation_note: list.some((p) => p.allocation.provisional) ? PROVISIONAL_NOTE : null,
     routed_note: 'Routed = acknowledged assignments weighted by work units; not compute consumed. Only public-routed units are compared with the public allocation.',
     routing_origins: {
-      units: { public_routed: sum(routed), ballot_directed: sum(ballotDirected), self_picked: sum(selfDirected) },
+      units: { public_routed: sum(routed), ballot_directed: bdShown ? sum(ballotDirected) : null, self_picked: sum(selfDirected) },
       note: 'Public-routed: handed out by the public allocation (the only origin compared with the vote). Ballot-directed: handed out by a signed-in voter\'s own ballot to their linked AI. Self-picked: chosen by the contributor with claim_task. Units, not compute; the three are never added together.',
     },
     projects: list,

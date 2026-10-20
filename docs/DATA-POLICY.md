@@ -12,7 +12,7 @@ someone, the page says so in plain words (see "What Swarm cannot protect against
 
 1. **Classify every new piece of data into a tier** (below) before you store it, and add it to the table in this file and on `/privacy`. If it is about a person, ask whether Swarm needs it at all.
 2. **Never store a name, an email address or a raw IP address.** Not in a column, an event, a log line, a test fixture or a response. Network addresses exist only as `HMAC(day key, network)` and only for two days.
-3. **Public aggregates that count people go through `kCount`** (`hub/src/privacy.js`). A group below 5 shows as `fewer than 5` (`<5` for the per-day ballots). Counts of work (units, tasks) are exact. A new endpoint that counts contributors, voters or any group of people needs a test next to `privacy-choices.test.js` that shows it.
+3. **Public aggregates that count people go through `kCount`** (`hub/src/privacy.js`); counts of voters and ballots go through the stricter `coarseCount` (see "The weekly vote and k-anonymity"). A group below 5 shows as `fewer than 5` (`<5` for the per-day ballots). Counts of work (units, tasks) are exact. A new endpoint that counts contributors, voters or any group of people needs a test next to `privacy-choices.test.js` that shows it.
 4. **Public pages name a contributor only through `creditedAs` / `publicHandle`**, computed when the page is read, so a later change of credit applies to past records.
 5. **Events carry no personal detail.** `events.detail` is for counts, kinds and ids of work. Never put a handle, an account id (even shortened), a network hash or the matched text of a personal detail in it. `actor` holds a role (`system`, `voter`, the reviewer's name) or, for claim and submission events, the contributor's handle, which account deletion, handle removal and `weekly_purge` scrub.
 6. **`/ops` and `/api/admin` never return** an individual voter's ballot, a voter-to-contributor link or a network hash. `operator-minimisation.test.js` scans every response; add new endpoints to it.
@@ -48,8 +48,8 @@ Times are Unix milliseconds unless noted. "Public" means a page or API anyone ca
 | Link code hash | `link_codes` | Running the system | No | 10 minutes | Linking |
 | Link attempts: `who` (`c:<id>` or `n:<network hash>`), `ts` | `link_attempts` | Running the system | No | One hour of budget; swept after a day | Brute-force limit |
 | Network keys | `network_keys` | Running the system | No | Two days | The only way to compute a network hash |
-| Weekly vote snapshot | `vote_snapshots`, `allocation` | Public record | Yes (`voter_count` through `kCount`) | Forever, never edited | Show how the split was decided |
-| Weekly project stats | `weekly_project_stats` | Public record | Yes via `/api/analytics` (people counts through `kCount`) | Forever | The record of what the swarm did |
+| Weekly vote snapshot | `vote_snapshots`, `allocation` | Public record | Yes, but only when built from at least 5 eligible ballots; otherwise a labelled fallback (`voter_count` through `coarseCount`) | Forever, never edited (migration 0011 converted earlier snapshots built from fewer than 5 ballots to fallbacks) | Show how the split was decided |
+| Weekly project stats | `weekly_project_stats` | Public record | Yes via `/api/analytics` (people counts through `kCount`; ballot-directed units only when `ballot_directed_people` is at least 5) | Forever | The record of what the swarm did |
 | Weekly model-family counts | `weekly_model_stats` | Public record | Yes via `/api/analytics` (through `kCount`) | Forever | Coarse model mix, self-reported |
 | Rollup markers | `rollup_weeks` | Public record | No | Forever | Run each week once |
 | GitHub webhook delivery ids | `github_deliveries` | Running the system | No | 3 days | Ignore replays |
@@ -83,8 +83,19 @@ Stored on `accounts`; chosen at voter sign-up (`privacy` object on `POST /api/ac
 
 - `GET /api/receipts`: `credited_as` (`a contributor` / the handle / `removed contributor`), `handle` (null unless handle credit), `reviewed_at` as `YYYY-MM-DD` (UTC), no `self_reported`, no `model`, no `tokens_est`. For a pull request, `github.pr_author` is null unless handle credit; the pull-request link is always there. **GitHub itself shows the author**, which Swarm cannot change.
 - Model and token figures are kept for the contributor's own `/me` and `my_week`, and for the reviewer (`/api/admin/pending`, the console).
-- `GET /api/analytics` serves the rollups. `GET /api/stats` has `contributors_this_week` per project and `totals.contributors` through `kCount`. `GET /api/vote/*` apply `kCount` to `voter_count` and `eligible_voter_count`, and `<5` to ballots per day.
+- `GET /api/analytics` serves the rollups. `GET /api/stats` has `contributors_this_week` per project and `totals.contributors` through `kCount`. `GET /api/vote/*` apply `coarseCount` to `voter_count`, `eligible_voter_count` and ballots per day (see below).
 - The k rule (`K_MIN = 5`) applies to counts of people. Zero is shown as 0. Units and task counts are exact.
+
+## The weekly vote and k-anonymity
+
+With one voter, a published split IS that voter's ballot. So the vote follows the same rule as every count of people, with 5 as the floor (`K_MIN`):
+
+- **Snapshot.** `publishSnapshot` uses the ballots only when at least 5 eligible ballots exist. Otherwise the week is recorded with `source = 'fallback'`, `voter_count = 0` (the real count of 1 to 4 is not kept) and the carried-forward previous split, marked provisional. The public reason is `fewer than 5 eligible ballots` and the voter count shows as `fewer than 5`. The threshold is on the whole ballot set; every project's share is computed from that same set, so there is no smaller per-project group of voters. (A project's share can still equal "one voter gave it everything" only when all others gave it nothing, which is the nature of any aggregate of 5 or more.) Migration 0011 applied the same rule to snapshots already published from fewer than 5 ballots.
+- **Projection** (`GET /api/vote/next`). Shown only when at least 5 eligible ballots exist; otherwise `{projected: false, reason: 'fewer than 5 ballots'}` and no shares. It is computed from the ballots saved before the start of the current UTC day (not live) and stored once per day in `meta` (`projection:<day>`), so reading it before and after one ballot change, a suspension or an account deletion shows the same numbers until the next UTC day. A change shows up at the next midnight at the earliest, together with all other changes that day.
+- **Counts of voters and ballots** (`coarseCount`): below 5, and zero too, show as `fewer than 5` (`<5` per day), because `0` next to `fewer than 5` would show that someone voted. From 5 they are published only as buckets (`5-9`, `10-24`, `25-49`, `50-99`, then steps of 50 as `100+`, `150+`, ...). The lower edges of the buckets are at least 5 apart, so subtracting any two published counts (day against week, week against week, accounts against ballots) cannot give a number from 1 to 4. This covers `eligible_voter_count`, `ballots_per_day`, `snapshot_history[].voter_count` and `voter_count` on `current` and `next`.
+- **Ballot-directed work.** Units a voter's own AI did because of their ballot show that ballot per project. `/api/stats` (`ballot_directed_units`, `routing_origins.units.ballot_directed`) and `/api/analytics` (`units.ballot_directed`, `accepted_units.ballot_directed`) show them as `null` unless at least 5 people (distinct voter accounts, or contributors that are no longer linked) stood behind that week's ballot-directed work (`weekly_project_stats.ballot_directed_people`; weeks rolled up before migration 0011 have none, so they stay `null`).
+- **Residual risk, stated plainly.** An aggregate of 5 or more still lets someone who controls or knows 4 of the 5 voters infer the fifth. Swarm cannot prevent that; account creation is capped per network and needs a human check to make mass sign-up costly.
+- **The voter's own view.** `GET /api/ballot`, `GET /api/me` and the `/vote` and `/me` pages show the signed-in voter their own ballot. Nothing else does.
 
 ## Retention
 

@@ -46,8 +46,12 @@
   }
   function allocation(host, data) {
     S.clear(host);
+    if (data.projected === false && data.reason && !data.shares) {
+      host.appendChild(S.el('p', 'quiet', 'Week of ' + data.week + ' · Not shown: ' + data.reason + '. With so few ballots a projection would reveal them.'));
+      return;
+    }
     host.appendChild(S.el('p', 'quiet', 'Week of ' + data.week + ' · ' + data.voter_count + ' eligible ballots' + (data.projected ? ' · Projected' : '')));
-    if (data.provisional) host.appendChild(S.el('p', 'prov-note', 'Provisional fallback: no eligible ballot result. Carrying the previous allocation.'));
+    if (data.provisional) host.appendChild(S.el('p', 'prov-note', 'Provisional fallback: ' + (data.reason || 'no eligible ballot result') + '. Carrying the previous allocation.'));
     Object.entries(data.shares).forEach(([id, points]) => {
       const row = S.el('p', 'allocation-line'); row.appendChild(S.el('span', null, projects.find((p) => p.id === id)?.name || id));
       row.appendChild(S.el('strong', null, (points / 100).toFixed(2) + '%')); host.appendChild(row);

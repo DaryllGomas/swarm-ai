@@ -253,8 +253,8 @@ describe('k-anonymity: a public count of people below 5 is not shown', () => {
     const a = await (await send('/api/vote/audit')).json();
     const at = (n) => a.ballots_per_day.find((d) => d.day === new Date(day(n)).toISOString().slice(0, 10)).ballots;
     expect(at(21)).toBe('<5');
-    expect(at(20)).toBe(5);
-    expect(at(25)).toBe(0); // an empty day has nobody in it
+    expect(at(20)).toBe('5-9'); // coarse buckets, so two counts can never be subtracted into 1-4
+    expect(at(25)).toBe('<5'); // an empty day looks like a day with 1-4: one voter's activity is invisible
     expect(JSON.stringify(a)).not.toMatch(/"ballots":[1-4]\b/);
   });
 
@@ -263,20 +263,20 @@ describe('k-anonymity: a public count of people below 5 is not shown', () => {
     for (let i = 0; i < 4; i++) await voter();
     expect((await (await send('/api/vote/audit')).json()).eligible_voter_count).toBe('fewer than 5');
     await voter();
-    expect((await (await send('/api/vote/audit')).json()).eligible_voter_count).toBe(5);
+    expect((await (await send('/api/vote/audit')).json()).eligible_voter_count).toBe('5-9');
   });
 
   it('snapshot voter counts, the current and the projected allocation follow the same rule', async () => {
     await reset();
     for (let i = 0; i < 3; i++) await snapVoter();
     await publishSnapshot(env);
-    expect((await env.DB.prepare('SELECT voter_count FROM vote_snapshots').first()).voter_count).toBe(3); // the immutable record is exact...
+    // Fewer than 5 eligible ballots: a fallback, and not even the count is kept.
+    expect(await env.DB.prepare('SELECT voter_count, source FROM vote_snapshots').first()).toEqual({ voter_count: 0, source: 'fallback' });
     const audit = await (await send('/api/vote/audit')).json();
     expect(audit.snapshot_history[0].voter_count).toBe('fewer than 5'); // ...the public view is not
     expect((await (await send('/api/vote/current')).json()).voter_count).toBe('fewer than 5');
-    for (let i = 0; i < 2; i++) await voter({ allocations: { 'town-hall': 100 } });
-    // The projection counts ballots saved by now: 3 snapshot voters plus 2 new ones.
-    expect((await (await send('/api/vote/next')).json()).voter_count).toBe(5);
+    // The projection is hidden below 5 ballots, and works from the start of the UTC day (ballots saved today do not count).
+    expect(await (await send('/api/vote/next')).json()).toMatchObject({ projected: false, reason: 'fewer than 5 ballots' });
   });
 
   it('per-project contributor counts and the total are "fewer than 5" until 5 contributors, and work units stay exact', async () => {

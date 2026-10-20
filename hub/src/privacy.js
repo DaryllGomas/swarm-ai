@@ -71,6 +71,15 @@ export function kCount(n, label = 'fewer than 5') {
   return n === 0 || n >= K_MIN ? n : label;
 }
 
+// A public count of VOTERS or BALLOTS. Stricter than kCount: zero is hidden too (0 versus "fewer than 5" would show that someone voted), and 5 or
+// more is published only as a coarse bucket, so subtracting two published counts (day against week, week against week, accounts against ballots)
+// can never give a number from 1 to 4. The lower edges of the buckets are at least 5 apart.
+export function coarseCount(n, label = 'fewer than 5') {
+  if (n < K_MIN) return label;
+  for (const [lo, hi] of [[5, 9], [10, 24], [25, 49], [50, 99]]) if (n <= hi) return `${lo}-${hi}`;
+  return `${Math.floor(n / 50) * 50}+`;
+}
+
 // ---------------------------------------------------------------- model families
 
 const FAMILIES = [

@@ -171,11 +171,11 @@ describe('the public comparison stays honest', () => {
       expect(after[id].routed_units, id).toBe(before[id].routed_units);
       expect(after[id].routed_share, id).toBe(before[id].routed_share);
     }
-    expect(after['town-hall'].ballot_directed_units).toBe(18);
-    expect(after['swarm-ai'].ballot_directed_units).toBe(0);
+    expect(after['town-hall'].ballot_directed_units).toBeNull(); // one voter's AI: hidden (see privacy-k5.test.js)
+    expect(after['swarm-ai'].ballot_directed_units).toBeNull();
     expect(after['town-hall'].self_directed_units).toBe(0);
     const s = await (await send('/api/stats')).json();
-    expect(s.routing_origins.units.ballot_directed).toBe(18);
+    expect(s.routing_origins.units.ballot_directed).toBeNull();
     expect(s.routing_origins.units.public_routed).toBe(before['town-hall'].routed_units + before['swarm-ai'].routed_units);
     expect(s.routing_origins.units.self_picked).toBe(0);
   });
@@ -207,7 +207,7 @@ describe('the public comparison stays honest', () => {
     await u.call('claim_task', { id: t });
     const th = (await (await send('/api/stats')).json()).projects.find((p) => p.id === 'town-hall');
     expect(th.routed_units).toBe(0);
-    expect(th.ballot_directed_units).toBe(1);
+    expect(th.ballot_directed_units).toBeNull();
     expect(th.self_directed_units).toBe(3);
   });
 

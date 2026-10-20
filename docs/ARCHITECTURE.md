@@ -68,6 +68,7 @@ Source files:
 | `hub/migrations/0007_voting.sql` | `accounts`, `credentials`, `account_challenges`, `sessions`, append-only `ballot_versions`, `vote_snapshots`; rebuilds `allocation` with `share` in basis points |
 | `hub/migrations/0009_ownership_and_pr_hint.sql` | `contributors.owner_account` (set once, immutable by trigger; backfilled from existing links), `submissions.pr_mentions_issue` |
 | `hub/migrations/0010_privacy.sql` | `network_keys`; `accounts` rebuilt with a nullable `network` and the choices (`credit`, `history`, `research`, `research_id`); `contributors.credit` and `removed`; `ballot_versions` rebuilt (no foreign key; may only be re-labelled `gone:`); event, ownership and ballot triggers that allow scrubbing and nothing else; the rollup tables |
+| `hub/migrations/0011_k_anonymity_ballots.sql` | Snapshots built from fewer than 5 ballots become fallbacks (carried-forward split, no count kept); `weekly_project_stats.ballot_directed_people` |
 | `hub/migrations/0008_steering.sql` | `claims.routing_origin` (backfilled from `routed`) with triggers that keep the two consistent, `accounts.fallback`, `account_links`, `link_codes`, `link_attempts` |
 | `scripts/publish-townhall.sh`, `publish_townhall.py` | Local accepted-research bridge to a Town Hall solution branch and commit; never pushes |
 | `hub/scripts/deploy.sh`, `review.sh` | The deploy (clean tree, `main`, a commit that is on `origin/main`, tests, migrations, then the Worker with `GIT_COMMIT` and `BUILT_AT`) and the reviewer CLI (see [RUNBOOK.md](RUNBOOK.md)) |
@@ -447,7 +448,7 @@ account); contributors with no account are `anonymous` and change it with `set_c
 `credit = 'handle'`, `removed contributor` if `removed = 1`. So switching to anonymous hides the handle on past receipts. They show the UTC day, not the time, and no
 model or token figures (those stay on `/me`, `my_week` and the reviewer's queue). A pull request's author login is shown only for handle credit; the PR link always is.
 
-**The k-anonymity rule** (`kCount`). A public count of people for a group smaller than 5 shows as `fewer than 5` (`<5` for the per-day ballots on the vote audit). It applies to
+**The k-anonymity rule** (`kCount`). A public count of people for a group smaller than 5 shows as `fewer than 5` (`<5` for the per-day ballots on the vote audit). Voters and ballots use the stricter `coarseCount`; a snapshot or projection from fewer than 5 ballots is not published (DATA-POLICY.md, "The weekly vote and k-anonymity"). It applies to
 contributors per project and in total (`/api/stats`), eligible voters, snapshot and projected voter counts, ballots per day, contributors and model-family counts in `/api/analytics`.
 Zero is shown as 0 (nobody is in the group). Units and task counts are about work and stay exact. Review time percentiles show from 5 reviews. The stored snapshot
 rows stay exact: they are immutable records, and only the public view applies the rule.
