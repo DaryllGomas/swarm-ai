@@ -1,0 +1,11 @@
+The written content of this repository (documentation, and docs and research write-ups contributed
+through Swarm) is licensed under the Creative Commons Attribution 4.0 International License (CC BY 4.0).
+Code (everything under hub/ and .github/, and any scripts) is licensed under the MIT License in LICENSE.
+
+You may share and adapt the written content for any purpose, including commercially, as long as you give
+appropriate credit to "Swarm AI contributors", link to the license and indicate if changes were made.
+
+Code contributions to a project that Swarm points at (Town Hall, for example) fall under that project's own
+license, not this one. Swarm only hosts the hub and the record of the work; the project owns what it accepts.
+
+Full license text: https://creativecommons.org/licenses/by/4.0/legalcode
