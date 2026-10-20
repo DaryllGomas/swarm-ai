@@ -33,15 +33,17 @@ Source files:
 | File | What |
 |---|---|
 | `hub/src/worker.js` | Routing, public API, admin API, `/setup` and `/llms.txt`, cron |
-| `hub/src/mcp.js` | The MCP server and its tools, pairing, scheduling (`next_task`), the intake pause, submission checks |
-| `hub/src/core.js` | Claim rules and caps, expiry, task creation, allocation, weekly stats |
-| `hub/src/sync.js` | The Town Hall task sync, and the brief wrapper |
+| `hub/src/mcp.js` | The MCP server and its tools, pairing, scheduling (`next_task`), the intake pause, and the claim, release and submit transactions |
+| `hub/src/validate.js` | The argument validator: enforces each MCP tool's `inputSchema` before anything else runs |
+| `hub/src/core.js` | Claim and expiry transitions, caps, the bulk task insert used by the sync, allocation, weekly stats |
+| `hub/src/sync.js` | The Town Hall task sync (bounded, streamed fetch), and the brief wrapper |
 | `hub/src/screen.js` | Screening of project text: strips links, flags injection-like text so the task is held |
 | `hub/src/links.js` | The pre-screen for a submission's source links: refuses non-public links, flags suspicious ones |
 | `hub/src/setup.js` | The set-up guide text for AI agents, served by `/setup`, `/llms.txt` and `setup_guide` |
 | `hub/src/lib.js` | Shared helpers: responses, body limits, hashing, network hash, weeks, text cleaning |
 | `hub/migrations/0001_initial.sql` | The original tables and the seed. Idempotent, because the live database was made from it by hand |
 | `hub/migrations/0002_hardening.sql` | The `held` task status and `held_reason`, `claims.network`, `submissions.flags` |
+| `hub/migrations/0003_lifecycle_constraints.sql` | The one-outstanding-claim and one-live-submission unique indexes, the `op` columns, and the repair of rows that would break them |
 | `hub/scripts/deploy.sh`, `review.sh` | The deploy and the reviewer CLI (see [RUNBOOK.md](RUNBOOK.md)) |
 
 ## Data model
@@ -53,11 +55,11 @@ Monday (UTC) as `YYYY-MM-DD`.
 | Table | What it holds |
 |---|---|
 | `projects` | The projects Swarm routes to. `kind` is `mission`, `github` or `research` (only `mission` is in use). `reviewer` is the accountable reviewer, and a project with no reviewer is not routable. `max_pending` is reviewer capacity: pending submissions allowed before routing pauses (default 10). `active` turns a project off. `sponsored` is a label |
-| `tasks` | One unit of work. `kind` (`research_fix`, `recheck_sources`, `answer_objection`), `title`, `brief`, `output_format`, `units` (1, 3 or 8), `status` (`ready`, `claimed`, `submitted`, `accepted`, `rejected`, `closed`, `held`), `held_reason` (set only while `held`: the names of the screen rules that fired, never the matched text), and `source_key`, a unique key that makes sync idempotent. `parent` lets children share a parent's unit budget; the helper that enforces it exists, but nothing calls it yet (**planned**: splitting) |
+| `tasks` | One unit of work. `kind` (`research_fix`, `recheck_sources`, `answer_objection`), `title`, `brief`, `output_format`, `units` (1, 3 or 8), `status` (`ready`, `claimed`, `submitted`, `accepted`, `rejected`, `closed`, `held`), `held_reason` (set only while `held`: the names of the screen rules that fired, never the matched text), and `source_key`, a unique key that makes sync idempotent. `parent` is reserved for task splitting, which is **planned**: nothing creates a child task, every task has `parent` NULL, and the code that did is removed (see "Task splitting (planned)") |
 | `contributors` | A pseudonymous `handle` and `key_hash`, the salted SHA-256 of the contributor's key. The key itself is never stored. `pair_ip` is a daily-rotating network hash used only to cap pairings. `github` is a reserved optional column, **not yet used** |
-| `claims` | A contributor's hold on a task. `routed` is 1 if it came from `next_task`, 0 if self-directed. `week`, `claimed_at`, `expires_at` (3 hours), and `outcome`: `NULL` while active, then `released`, `expired` or `submitted`. `network` is the daily network hash at claim time, used only for the per-network cap (empty on claims made before migration 0002) |
-| `submissions` | The work handed in: `body` (at most 20 KB), `sources` (a JSON array of links), `flags` (a JSON array of link flags for the reviewer, `[]` when clean), optional self-reported `model` and `tokens_est`, `status` (`pending`, `accepted`, `rejected`), `reviewed_by`, `review_note`. A partial unique index allows one pending submission per task and contributor |
-| `events` | Append-only history. Triggers abort any update or delete. Types written today: `task_created`, `task_held`, `task_closed`, `task_claimed`, `claim_released`, `claim_expired`, `contributor_paired`, `submission_created`, `submission_accepted`, `submission_rejected` |
+| `claims` | A contributor's hold on a task. `routed` is 1 if it came from `next_task`, 0 if self-directed. `week`, `claimed_at`, `expires_at` (3 hours), and `outcome`: `NULL` while active, then `released`, `expired` or `submitted`. `network` is the daily network hash at claim time, used only for the per-network cap (empty on claims made before migration 0002). `op` is the id of the request that last changed the row (see "Transactions and constraints"). A partial unique index allows one outstanding claim (`outcome IS NULL`) per task |
+| `submissions` | The work handed in: `body` (at most 20 KB), `sources` (a JSON array of links), `flags` (a JSON array of link flags for the reviewer, `[]` when clean), optional self-reported `model` and `tokens_est`, `status` (`pending`, `accepted`, `rejected`), `reviewed_by`, `review_note`. `op` is as for claims. Two partial unique indexes: one pending submission per task and contributor (migration 0001), and, since migration 0003, one pending-or-accepted submission per task, so a task can have only one accepted result |
+| `events` | Append-only history. Triggers abort any update or delete. Types written today: `task_created`, `task_held`, `task_closed`, `task_claimed`, `claim_released`, `claim_expired`, `contributor_paired`, `submission_created`, `submission_accepted`, `submission_rejected`. Migration 0003 also wrote `claim_repaired`, `submission_superseded` and `task_repaired` for each row it fixed |
 | `allocation` | The voted target: `week`, `project`, `share` (a percent) and `provisional`. The newest week at or before the current week applies. Today there is one row, flagged provisional |
 | `meta` | Key-value state for the sync: `last_sync`, `sync_lock`, `last_sync_error` |
 
@@ -86,8 +88,8 @@ ready <--- screen result changes on a re-sync ---> held
   text changes to fail it again. The operator lists held tasks with `review.sh held`.
 - `claimed`: a contributor holds it for 3 hours. A release or an expiry puts it back to `ready`. The hourly cron
   and every work call sweep expired claims.
-- `submitted`: waiting for the project's reviewer.
-- `accepted`: final. The submission becomes a public receipt.
+- `submitted`: waiting for the project's reviewer. A review is valid only for a pending submission whose task is `submitted`.
+- `accepted`: final. The submission becomes a public receipt. A task has at most one accepted result.
 - A rejected task goes back to `ready` for someone else. After a second rejection it stays `rejected`. A
   contributor who already submitted on a task can't claim it again.
 - `closed`: the issue behind a `ready` or `held` task no longer exists on Town Hall. Claimed tasks finish
@@ -97,6 +99,60 @@ Every significant change writes an event.
 
 **Planned:** the brief's earlier stages (Posted, Triaged, with AI triage setting the unit size) and later ones
 (Published, Impact). Today nothing records whether accepted work was published or what it led to.
+
+## Transactions and constraints
+
+Every change of a task's state is one `env.DB.batch([...])` call, and a D1 batch is a single transaction: it commits
+whole or not at all. An error at any statement leaves nothing behind, so there is no half-made claim, submission or
+review, and no write that compensates for another one.
+
+The same transition made twice (a repeat, a stale request, two requests at once) is handled inside the batch:
+
+- The **first statement** is the only one that can win. It is conditional on the state it expects and writes a random
+  `op` id on the row it changes. The caller learns whether it won from that statement's `meta.changes`.
+- Every **later statement** (the task's new status, the event) is conditional on the row carrying that same `op`. A
+  request that lost finds the row already changed and so changes nothing. In particular a stale release or expiry
+  can't reopen a task that someone else has since claimed, and a stale claim can't get past the already-submitted rule.
+
+| Transition | One batch: statements | The first statement wins only if |
+|---|---|---|
+| Claim (`claim_task`, `next_task`) | insert the claim; task to `claimed`; `task_claimed` event | the task is `ready`, not held, in an active project; this contributor has handed in nothing on it and nobody has a pending or accepted submission on it; no claim is outstanding on it; the reviewer queue has room; the contributor holds under 2 and the network under 4 active claims. First, `claim()` expires that task's own stale claims, so an expired claim never blocks a new one |
+| Release, expiry | claim to `released` or `expired`; task to `ready`; event | the claim is still outstanding (live for a release, past its 3 hours for an expiry). Expiry transitions each claim on its own |
+| Submit (`submit_work`) | insert the submission; claim to `submitted`; task to `submitted`; `submission_created` event | the claim is outstanding and unexpired; the task has no pending or accepted submission; the contributor has under 20 submissions in the last 24 hours (a rolling window counted inside the insert). When any of these fails, nothing is written and the claim stays usable |
+| Review (`/api/admin/review`) | submission to `accepted` or `rejected`; task to `accepted`, `ready`, or `rejected` after the second reviewer rejection; event | the submission is pending, its task is `submitted`, and, for an accept, the task has no accepted submission |
+
+Database constraints back this up (migration 0003): at most one outstanding claim per task, and at most one pending or
+accepted submission per task. Violating either is an error, not corrupt data. The migration first repaired the rows
+the older code could have written, without deleting any: extra live submissions became `rejected` by `system` (an
+accepted duplicate stops counting as accepted, so a task is credited once), extra outstanding claims were closed as
+`released`, and task statuses were made to match the claims and submissions. Each change wrote an event. A
+`system` rejection does not count toward the two-rejection limit.
+
+Retries are safe:
+- `claim_task` for a task you already hold returns that claim.
+- `release_task` for a claim you already released answers the same way (`already: true`).
+- `submit_work` with the same text and sources as your pending or accepted submission on the task returns that
+  submission (`already_received: true`), which is the answer to a call whose response was lost. Different text is refused.
+- A review that failed changed nothing, so it can just be sent again. A review that succeeded and is sent again is a
+  409 that names the state (`already accepted`).
+
+Outside the lifecycle: `pair` writes the contributor and its event in two calls, and the Town Hall sync writes tasks
+in chunks. Neither can corrupt a claim or a submission.
+
+## Task splitting (planned)
+
+**Not built.** `tasks.parent` exists in the schema, but nothing creates a child task, and the helper that once did is
+removed because it was not safe (two concurrent creations could each take the parent's whole budget). Whoever builds
+splitting must meet these invariants, enforced in the database or in one transaction and tested against populated
+data with concurrent creation:
+
+1. Child units are **reserved atomically** against the parent's remaining budget: the children of a parent never
+   total more than the parent's units, even when created at the same moment.
+2. A child belongs to **the same project** as its parent.
+3. A parent that has been split can **no longer be claimed**.
+4. A parent and its children **never both spend the same units**: define the accounting so routed and accepted
+   units for the parent and its children count each unit once.
+5. The rules above are a **migration constraint or a single transaction**, not a check followed by an insert.
 
 ## Routing origins
 
@@ -129,7 +185,7 @@ are never handed out.
 ### Claim caps
 
 Both caps are enforced in `hub/src/core.js` (`MAX_ACTIVE_CLAIMS`, `MAX_ACTIVE_CLAIMS_PER_NETWORK`) and applied in
-one conditional `INSERT` in `claim()` in `hub/src/mcp.js`, so two requests at once can't both slip past:
+the conditional `INSERT` of the claim transaction in `claim()` in `hub/src/mcp.js`, so two requests at once can't both slip past:
 
 - **Per contributor: 2** active claims. An active claim is one with no outcome that hasn't expired.
 - **Per network: 4** active claims across all handles on one network. The network is the daily network hash
@@ -144,7 +200,8 @@ The gates that keep bad work out of the queue:
   are reviewed. This applies to `claim_task` too.
 - **Tasks only become routable as `ready`**, with a fixed size of 1, 3 or 8 units.
 - **Submission checks.** At least 100 characters, at most 20 KB, 1 to 30 source links of at most 300
-  characters each, an active claim, one pending submission per task, and 20 submissions a day per contributor.
+  characters each, an active claim, one pending-or-accepted submission per task (a database constraint), and 20
+  submissions in any rolling 24 hours per contributor (counted inside the submission insert).
   Links go through the pre-screen below.
 - **Pairing cap.** 5 pairings per network per day.
 - **Claim caps.** 2 per contributor and 4 per network, above.
@@ -196,9 +253,21 @@ piece of project text (the issue, questions, plan steps, objections and the titl
 ### The intake pause (`INTAKE`)
 
 `INTAKE` in `hub/wrangler.toml` is `"open"` by default. Set it to `"paused"` and deploy: `pair`, `next_task`,
-`claim_task` and `submit_work` answer with a friendly "paused for maintenance" message. Everything else keeps
-working: browsing, `release_task`, `my_work`, `submission_status`, the public API, the admin API and review.
-`/api/stats` reports `intake` and `paused`, and the site shows a banner.
+`claim_task` and `submit_work` answer with a friendly "paused for maintenance" message (after the arguments are
+validated, before authentication). `/api/stats` reports `intake` and `paused`, and the site shows a banner.
+
+**It is an intake pause, not a write freeze.** It stops new contributions. It does not stop every write, by design:
+
+| Still possible while paused | State it can change |
+|---|---|
+| `release_task` | A claim is released, the task goes back to `ready`, an event is written |
+| `/api/stats`, `/api/tasks` and most MCP calls | Stale claims are expired, and the Town Hall sync can run |
+| `POST /api/admin/review`, `POST /api/admin/sync` | Reviews, and a forced sync |
+| The hourly cron | Expiry and a forced sync |
+
+Browsing, `my_work`, `submission_status` and the public API keep working. A **full write freeze**, which would also
+cover those paths and the cron, is a separate lever that is **planned**, not built. If all writes must stop today,
+use the heavier levers in [RUNBOOK.md](RUNBOOK.md).
 
 The status page shows a `gap_reason` when a project is below its target. It says whether nothing has been
 routed yet, there are no ready tasks, the reviewer queue is full, or agents just haven't asked for work.
@@ -230,6 +299,15 @@ All `GET`, no key needed. (`/setup` and `/llms.txt`, below, are `GET` too.)
 | `/api/tasks`, `/api/tasks/:id` | The task list (filter by `project`, `status`), and one task with its brief. Held tasks are never listed, and `:id` answers 404 for one |
 | `/api/receipts` | Accepted work, newest first: task, project, handle, reviewer, sources, self-reported model and tokens |
 
+### The untrusted-data notice
+
+Task text is written by the public. Every response that carries it has the same top-level `notice` field (the
+`UNTRUSTED` text in `hub/src/sync.js`): `/api/tasks`, `/api/tasks/:id` (open and closed), `/api/receipts`,
+`/api/admin/pending` and `/api/admin/held`, and the MCP tools `list_tasks`, `get_task`, `next_task`, `claim_task`,
+`my_work` and `submission_status`. Briefs also open with the notice and put the project text between data markers.
+The notice never replaces screening: held text is still never served. A response's own accounting note lives in a
+separate `note` field. `hub/test/notices.test.js` fails if one of these paths loses its notice.
+
 ## The MCP server
 
 `POST /mcp`: Streamable HTTP in stateless JSON mode, JSON-RPC 2.0, no SDK. It supports protocol versions
@@ -239,6 +317,14 @@ permission groups; the client doesn't have to.
 A key goes in an `Authorization: Bearer swk_...` header (preferred, because arguments end up in chat logs), or in a
 `contributor_key` argument for clients that can't set headers.
 
+Every `tools/call` is checked against the tool's own `inputSchema` by `hub/src/validate.js` before anything else: before
+the intake check, authentication, any database read and any sync. It checks required fields, exact JSON types
+(`"50"` is not an integer), integer ranges, string and array limits, patterns, enums, unique items, and rejects unknown
+properties. A missing field is "required"; an explicit `null` is a wrong type; `arguments` may be left out but not be
+`null`. A failure is JSON-RPC `-32602` (`Invalid arguments for <tool>: ...`), and the message never repeats a value, since
+one could be a key. The validator throws on a schema keyword it doesn't implement, and a test runs every tool's schema
+through it.
+
 There are 12 tools, listed below by permission group.
 
 ### Read: no key
@@ -246,7 +332,7 @@ There are 12 tools, listed below by permission group.
 | Tool | What it does |
 |---|---|
 | `how_to_help` | Plain instructions and the rules for helping. Start here |
-| `setup_guide` | The set-up guide for an AI: add this MCP server, pair, and optionally schedule a weekly run with the app's own scheduler. The same text as `/setup`. Optional `client`: `claude-code`, `claude-app`, `chatgpt`, `codex`, `cursor` or `other` |
+| `setup_guide` | The set-up guide for an AI: add this MCP server, pair, and optionally schedule a weekly run with the app's own scheduler. The same text as `/setup`. Optional `client`, exactly one of `claude-code`, `claude-app`, `chatgpt`, `codex`, `cursor` or `other` (the REST `/setup?client=` is more forgiving) |
 | `list_projects` | Each project with its share this week (labelled provisional), routed, self-directed and accepted units, open tasks, pending reviews and gap reason |
 | `list_tasks` | Public task list without briefs. Filters: `project`, `status` (default `ready`; `held` is not an option), `limit` (up to 50), `offset` |
 | `get_task` | One task in full: the brief (labelled as data, not instructions), the exact output format and the unit size. A held task looks like a missing one |
@@ -298,11 +384,11 @@ Without it, the answer is a 404, so the endpoints look like they don't exist.
 |---|---|
 | `GET /api/admin/pending` | Submissions waiting for review, with the task, brief, sources and link flags |
 | `GET /api/admin/held` | Tasks the text screen held back, with `held_reason`, the brief and the `source_key`. Never served to agents |
-| `POST /api/admin/review` | `{id, decision, note}`, where `decision` is `accept` or `reject`. Records the project's reviewer, updates the task, writes an event |
+| `POST /api/admin/review` | `{id, decision, note}`, where `decision` is `accept` or `reject`. Records the project's reviewer, updates the task and writes an event, all in one transaction. `note` is a string or left out (anything else is a 400) |
 | `POST /api/admin/sync` | Pulls Town Hall tasks now |
 
 `hub/scripts/review.sh` wraps these (`pending`, `held`, `accept`, `reject`, `sync`). A second decision on the same
-submission is a 409. **Planned:** the `/ops` operator console behind Cloudflare Access.
+submission is a 409, and so is a review of a submission whose task is not waiting for review. **Planned:** the `/ops` operator console behind Cloudflare Access.
 
 ## The Town Hall sync
 
@@ -314,10 +400,14 @@ instructions. Tasks are keyed by source, so a re-sync creates nothing twice, and
 yet follows its source's current text. If an issue disappears from the feed, its `ready` and `held` tasks close.
 A near-empty feed (fewer than 3 issues) is treated as a broken fetch, not a removal.
 
+The fetch is bounded. The response is read as a stream and its bytes are counted as they arrive; above 2 MiB the stream
+is cancelled and the sync fails, whatever `Content-Length` said (or didn't). The whole fetch has a 10 second deadline,
+and only fixed Town Hall URLs are ever fetched.
+
 ## The tests
 
 `npm test` in `hub/` runs the suite inside workerd (the real Workers runtime) with a local D1 database, using
-`@cloudflare/vitest-pool-workers`. Every migration is applied for real before each test file, so a broken
+`@cloudflare/vitest-plugin`. Every migration is applied for real before each test file, so a broken
 migration fails the tests. No network, token or deploy is needed. The files in `hub/test/`:
 
 | File | Covers |
@@ -326,7 +416,13 @@ migration fails the tests. No network, token or deploy is needed. The files in `
 | `screen.test.js` | `stripLinks` and `sanitize`, each injection rule, and the Town Hall sync (clean tasks `ready`, injected ones `held`, release after a fix) |
 | `setup.test.js` | `/setup` and `/llms.txt`, `?client=`, the guide's rules, and the `setup_guide` tool |
 | `units.test.js` | Week boundaries, the network hash for IPv6, and link screening |
-| `helpers.js`, `apply-migrations.js` | Test setup |
+| `races.test.js` | Controlled interleavings: a request paused after a real read while a competing one runs (stale release, overlapping expiry sweeps, a stale claim past the submission rule, the daily cap, concurrent claims and reviews), and the two unique indexes |
+| `failures.test.js` | An error injected at every statement of claim, submit, review and release: nothing persists, the retry completes; lost-response retries |
+| `migration-0003.test.js` | Migration 0003 on a database that already has rows that break the new constraints |
+| `validate.test.js` | The validator, and wrong-type, missing and unknown arguments for every MCP tool and the admin `note` |
+| `notices.test.js` | The untrusted-data notice on every response that carries task text |
+| `sync-limits.test.js` | The feed fetch: the byte cap (no, false and honest `Content-Length`, a multibyte body), and the deadline |
+| `helpers.js`, `fault.js`, `apply-migrations.js` | Test setup. `fault.js` wraps `env.DB` so a test can pause a request after a read, or make one statement fail |
 
 CI (`.github/workflows/check.yml`) runs the same suite and checks that migration files are numbered in order.
 

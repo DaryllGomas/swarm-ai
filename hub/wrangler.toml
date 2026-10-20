@@ -18,7 +18,8 @@ migrations_dir = "migrations"
 
 [vars]
 # Lockdown lever. "open" (default) or "paused". Paused stops new pairings, claims and submissions
-# (pair, next_task, claim_task, submit_work); reads, the API and admin review keep working.
+# (pair, next_task, claim_task, submit_work); reads, the API and admin review keep working. It is an intake pause,
+# not a write freeze: release_task, claim expiry, sync, admin review and the hourly cron still write.
 # Change the value, then deploy (scripts/deploy.sh).
 INTAKE = "open"
 

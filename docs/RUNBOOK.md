@@ -110,6 +110,20 @@ Work down this list only as far as the problem needs.
    `submission_status` and reviewing keep working, so the record stays visible while you work out what's
    happening. `/api/stats` shows `paused`, and the site shows a banner. Set it back to `"open"` and deploy to
    resume.
+
+   **This is an intake pause, not a write freeze.** It stops new pairings, claims and submissions. These still
+   write while it is on:
+
+   | Still writes while paused | What changes |
+   |---|---|
+   | `release_task` | A claim is released, its task goes back to `ready`, an event is written |
+   | `/api/stats`, `/api/tasks` and most MCP calls | Stale claims are expired, and a stale Town Hall sync can run |
+   | `/api/admin/review`, `/api/admin/sync` | Reviews, and a forced sync |
+   | The hourly cron | Expiry and a forced sync |
+
+   That is on purpose: contributors can still give work back and you can still review. If you need every write to
+   stop, this lever isn't enough. A full write freeze would be a separate lever that also covers those paths and the
+   cron. It is **planned**, not built. Until then use lever 4 or 6 below, and don't call the pause a freeze.
 2. **Pause a project.** Mark one project inactive so it gets no new claims and isn't routed:
    ```sh
    cd hub

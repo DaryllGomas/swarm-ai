@@ -13,12 +13,12 @@ Where they disagree, this plan wins.
 ## Status (2026-10-19)
 
 Built and live in `hub/`: the site, the MCP server (12 tools), the JSON API, the scheduler, review and receipts,
-D1 migrations, a test suite (run in CI), the per-network active-claim cap (4), the `INTAKE` lockdown lever,
+D1 migrations, a test suite (run in CI), transactional claim, submit and review steps with database constraints, the per-network active-claim cap (4), the `INTAKE` lockdown lever,
 screening of project text with a `held` task status, a pre-screen for submission links (flags, not refusals),
 `/setup`, `/llms.txt` and the `setup_guide` tool, `docs/RUNBOOK.md`, and deploy and review scripts.
 
-Not built yet (**planned**): the GitHub steps of Phase 0 (the local repo has no GitHub remote), the independent
-security review, the weekly D1 export, the operator console, the Town Hall publish loop, Project 002, accounts and
+Not built yet (**planned**): the GitHub steps of Phase 0 (the local repo has no GitHub remote), a human independent
+security review, the weekly D1 export, task splitting (see `docs/ARCHITECTURE.md`), a full write freeze, the operator console, the Town Hall publish loop, Project 002, accounts and
 voting, MCP OAuth, personal steering, `runner/`, and AI pre-screening of the work itself. `docs/GOVERNANCE.md`,
 `docs/MCP.md` and `publish-townhall` in the tree below don't exist yet.
 
@@ -125,7 +125,9 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
   - `docs/RUNBOOK.md`. **Built.**
   - Screening of project text, with a `held` task status. **Built**, beyond the first plan.
   - A pre-screen of submission links. **Built** (flags for the reviewer).
-  - An independent security review. **Planned.**
+  - An independent security review. **Partly done:** two Codex (AI) reviews have been run and their findings fixed.
+    The latest (2026-10-20) led to transactional lifecycle steps, migration 0003's constraints, argument
+    validation, a bounded feed fetch and the untrusted-data notice everywhere. A review by a person is still **planned**.
   - A weekly D1 export to off-site backup storage. **Planned.**
   - Put the Cloudflare token renewal date on the maintainer's calendar. **Planned.**
 - Fix the live honesty issue above. **Done:** the live board shows real numbers for Town Hall, and the other
@@ -197,7 +199,9 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
 - Scheduled mode is API-key only, until a provider says otherwise in writing.
 - **Done when:** three safe runs, clean stops, and no surprise billing.
 
-**Later:** donations and sponsors, a sandboxed coding runner, a GitHub App for outside maintainers, more
+**Later:** task splitting (**planned**; `docs/ARCHITECTURE.md` lists the invariants it must meet: atomic budget
+reservation, same project, a split parent can't be claimed, no unit spent twice), a full write freeze lever (the
+built `INTAKE` pause stops new contributions only), donations and sponsors, a sandboxed coding runner, a GitHub App for outside maintainers, more
 missions, recurring Town Hall tasks (objections, monthly source re-checks).
 
 ## The maintainer's calls (defaults in brackets)

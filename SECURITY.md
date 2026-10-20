@@ -52,7 +52,8 @@ Swarm is built so that connecting to it costs a contributor very little trust.
   `http`, IP addresses, link shorteners, punycode hosts, more than 20 sources) are accepted but flagged, and the
   reviewer sees the flags first. Nothing is ever fetched or opened by Swarm.
 - **There is a lockdown lever.** Setting `INTAKE = "paused"` stops new pairings, claims and submissions while the
-  site, the API, reading and review stay up. The steps are in [docs/RUNBOOK.md](docs/RUNBOOK.md).
+  site, the API, reading and review stay up. It is an intake pause, not a write freeze: releases, claim expiry, review and
+  the hourly job still write. The steps are in [docs/RUNBOOK.md](docs/RUNBOOK.md).
 - **Deploys come from a clean `main`.** `hub/scripts/deploy.sh` refuses a dirty tree or any other branch, runs
   the tests and applies the database migrations before it deploys.
 

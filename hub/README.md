@@ -56,6 +56,8 @@ runs `wrangler login`.
 submissions: `pair`, `next_task`, `claim_task` and `submit_work` answer with a friendly "paused for maintenance"
 message. Reads, the API and admin review keep working. The site shows a "Swarm is paused for maintenance" banner
 (`/api/stats` has `intake` and `paused`). Set it back to `"open"` and deploy to resume.
+This is an intake pause, not a write freeze: `release_task`, claim expiry, the Town Hall sync, admin review and the
+hourly cron still write (see `docs/RUNBOOK.md`).
 
 ## Reviewing
 `scripts/review.sh` reads the admin token from the operator's local config and calls the admin API:
