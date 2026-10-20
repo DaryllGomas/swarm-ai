@@ -15,7 +15,7 @@ For the plan and the architecture, see [`../docs/PLAN.md`](../docs/PLAN.md) and
 - `src/webauthn.js`, `src/accounts.js`, `src/voting.js`: passkey accounts (hand-written WebAuthn on WebCrypto), sessions, ballots, the weekly snapshot and `/api/vote/*`.
 - `src/steering.js`, `src/me.js`, `src/identity.js`: Phase 4. Linking a contributor to a voter account (link codes), the ballot that steers `next_task`, the weekly summary, `/api/me`, and contributor creation.
 - `src/oauth.js`, `src/oauth-scopes.js`: MCP sign-in (OAuth 2.1 + PKCE) on `@cloudflare/workers-oauth-provider`, the `/authorize` page, and the `read`/`work`/`submit` scopes.
-- `src/sync.js`: Town Hall task sync. `src/github.js`: the GitHub connector (issues to tasks, pull-request checks, merge = accepted, webhook, project registration). `src/screen.js`: screening of project text. `src/links.js`: submission link
+- `src/sync.js`: Town Hall task sync. `src/github.js`: the GitHub connector (issues to tasks, pull-request checks, merges wait for a reviewer, webhook, project registration). `src/screen.js`: screening of project text. `src/links.js`: submission link
   pre-screen. `src/setup.js`: the set-up guide text.
 - `public/`: plain HTML, CSS and JS with no build step and no framework. `_headers` holds the CSP (self plus Google
   Fonts). Dynamic text is rendered with `textContent`. Only `/vote` also allows Cloudflare Turnstile (`challenges.cloudflare.com`).
@@ -46,6 +46,7 @@ Files in `migrations/` are applied in order by `wrangler d1 migrations apply` (`
   network hash on `claims`, and link flags on `submissions`.
 - `0006_github.sql` adds the GitHub columns, the `github_deliveries` table, the Swarm AI project and a provisional 50/50 allocation.
 - `0007_voting.sql` adds accounts, passkeys, sessions, ballots and snapshots, and converts `allocation.share` from percent to basis points.
+- `0009_ownership_and_pr_hint.sql` adds `contributors.owner_account` (who owns a contributor, separate from the steering link) and `submissions.pr_mentions_issue` (a reviewer hint).
 - `0008_steering.sql` adds `claims.routing_origin` (backfilled from `routed`, kept consistent by triggers), `accounts.fallback`, `account_links`, `link_codes` and `link_attempts`.
 - Never edit a migration that has shipped. Every schema change is a new `000N_*.sql`. Test a new one against a copy
   that already has rows in it, because a table rebuild is where migrations go wrong.
@@ -96,8 +97,8 @@ The admin API answers 404 to anything without the right bearer token.
 ## GitHub connector
 Issues labelled `swarm` (sizes `swarm:1`, `swarm:3`, `swarm:8`, default 3) on a registered public repo become tasks, in the
 same hourly sync as Town Hall. Code tasks are handed in with `submit_work`, with the pull request URL as the first source;
-the hub checks it against the GitHub API by repository id. A merged pull request is accepted, one closed without a merge is
-rejected. It is read-only and works without secrets. Optional secrets: `GITHUB_TOKEN` (rate limit) and
+the hub checks it against the GitHub API by repository id. A merged pull request is recorded and waits for a reviewer to confirm it (a merge is not auto-accept; the queue shows an
+issue-mention hint), and one closed without a merge is rejected. It is read-only and works without secrets. Optional secrets: `GITHUB_TOKEN` (rate limit) and
 `GITHUB_WEBHOOK_SECRET` (enables `POST /api/github/webhook`). Tests stub `fetch`; no network is used. See
 [ARCHITECTURE.md](../docs/ARCHITECTURE.md#the-github-connector) and the runbook.
 

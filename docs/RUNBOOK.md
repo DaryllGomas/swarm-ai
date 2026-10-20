@@ -12,7 +12,7 @@ keeps the admin token and the Cloudflare token. Neither is ever in the repo.
 | The hub: site, MCP, API, scheduler | Cloudflare Worker `swarm-ai` and D1 database `swarm-ai`, at swarm.bigpicsolutions.com | `hub/` in this repo. Pull request, CI, maintainer review, then a deploy by the maintainer |
 | Review of submitted work, and of held tasks | The maintainer, at `/ops` (or `hub/scripts/review.sh`) | The decision and note are stored with the submission, and the receipt is public |
 | Hourly job | The Worker's cron (`7 * * * *`) | `hub/wrangler.toml`. It expires stale claims, pulls fresh tasks from Town Hall and GitHub (screening their text) and checks open pull requests |
-| GitHub connector | In the same Worker (`hub/src/github.js`), same hourly cron | Issues labelled `swarm` on registered public repos become tasks; merged pull requests are accepted. Read-only |
+| GitHub connector | In the same Worker (`hub/src/github.js`), same hourly cron | Issues labelled `swarm` on registered public repos become tasks; merged pull requests wait for your confirmation (a merge is not auto-accept). Read-only |
 
 No agent of ours runs anywhere. Contributors' AIs run in their own apps.
 
@@ -118,10 +118,13 @@ to work.
 - **Changing a size later does not change the task.** The task keeps its units; a `task_size_label_changed` event records
   the disagreement. Units are what work was routed against, so they change only on purpose.
 - **A task shows up held?** The issue text tripped the screen. See "Held tasks": fix the issue text; the next sync releases it.
-- **Reviewing a code task.** The contributor submits their pull request link. Review it on GitHub. Merge it and the next
-  sync (or the webhook) accepts the submission as "GitHub merge by {you}"; close it and the submission is rejected as
-  "PR closed without merge". Put `Fixes #N` in the pull request so the issue closes with the merge. You can still use
-  `review.sh` on a pull-request submission; if you do, the sync leaves it alone.
+- **Reviewing a code task.** The contributor submits their pull request link. Review it on GitHub. **Merging it does not accept the
+  submission.** The next sync (or the webhook) marks it "merged, needs reviewer confirmation" in `/ops` and in
+  `GET /api/admin/pending`; you then accept or reject it there (or with `review.sh`) like any other submission. Check that
+  the pull request really resolves the task's issue and that the submitter is the author or has the author's say: the
+  queue shows the PR author and an issue-mention hint (does the title or body name the issue), and the hint is not proof.
+  Close it without merging and the submission is rejected automatically as "PR closed without merge".
+  Put `Fixes #N` in the pull request so the issue closes with the merge.
 - **Optional `GITHUB_TOKEN`.** Without it, GitHub allows 60 requests an hour per IP, shared with every other Worker on the
   same address, so it can run dry. Create a fine-grained token with no permissions beyond read access to public
   repositories, then `wrangler secret put GITHUB_TOKEN`. It is only sent to api.github.com.
@@ -161,6 +164,7 @@ to work.
   Fallback work is `public_routed` by design, so a spike of public-routed units from a few handles can be fallback; check `events` (`task_claimed`, `detail.origin`) before concluding anything.
 - **Unlink someone.** Their `/me` page does it. Operator: `DELETE FROM account_links WHERE account LIKE '<short>%';` then the contributor follows the public split at once. Events `account_linked` and `account_unlinked` keep only the first 8 characters of the account id.
 - **Suspending an account** also stops its steering (its linked contributor follows the public split) and its link codes.
+- **Who owns a contributor.** `contributors.owner_account` (the account that created it by passkey sign-in, or first linked it). Unlinking does not change ownership, and `link_account` refuses a contributor owned by another account. Check: `SELECT handle, owner_account FROM contributors WHERE handle = '<handle>';`. Do not edit it casually: a trigger blocks changes, and passkey sign-in trusts it.
 - **Link codes.** They last 10 minutes, work once and are stored hashed. A wrong code is counted in `link_attempts` (5 an hour per contributor, 20 an hour per network); the cron deletes entries after a day. To let someone retry now:
   `DELETE FROM link_attempts WHERE who = 'c:<contributor id>';`
 - **MCP sign-in (OAuth).** State lives in the KV namespace `OAUTH_KV`. To switch it off quickly, set `OAUTH = "off"` in `hub/wrangler.toml` and deploy: `/authorize` answers 503, the OAuth endpoints and discovery documents stop, a call with an OAuth token is refused, and contributor keys and public tools carry on.

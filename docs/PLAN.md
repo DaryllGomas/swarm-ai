@@ -96,7 +96,7 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
 5. **Second project = Swarm's own repo.**
    - Issues labelled `swarm` (sized `swarm:1/3/8`) become tasks.
    - For code tasks, the contributor's AI opens a PR from *their own* GitHub account and submits the PR link.
-     Merged = accepted, closed = rejected. Swarm never needs write access.
+     Merged = flagged for the reviewer to accept (not auto-accepted), closed = rejected. Swarm never needs write access.
    - A GitHub App only becomes necessary when outside maintainers join.
 6. **Production honesty:**
    - Town Hall's row and node must be fully real before any announcement. Fixed: the Flow now shows real
@@ -166,8 +166,8 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
 
 **Phase 2: Project 002, the swarm builds the swarm** (1–2 sessions)
 - GitHub connector v1: operator-registered public repos, read-only, a signed webhook, PR-link submissions, and
-  merge = accept. **Built** (`hub/src/github.js`, migration 0006), not yet deployed. Merge = accept is the maintainer's
-  review, made on GitHub.
+  merge = accept. **Built** (`hub/src/github.js`, migration 0006). **Changed after Codex review 4:** a merge no longer
+  accepts; it flags the submission "merged, needs reviewer confirmation" and a person accepts it (migration 0009).
 - Seed 10–15 well-scoped issues from this plan.
 - Remove the example projects from the site. **Built** (the site shows Town Hall and Swarm AI, provisional 50/50).
 - **Done when:** a PR from someone outside the maintainer's team is merged and shows as a receipt.
@@ -195,6 +195,11 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
     `swk_` keys are not OAuth tokens and keep working unchanged. A tool that needs credentials, called with none, now answers HTTP 401 with the MCP authorization challenge instead of a plain tool error, so sign-in-capable clients start the flow.
   - A ballot that names a since-deactivated project is renormalised over the active ones for steering (the weekly snapshot stays strict).
   - Each OAuth connection as a pseudonymous handle is a new contributor; signing in with a passkey keeps one identity per account.
+  - **Codex review 4 (2026-10-20) fixes:** contributor ownership is now separate from the steering link (`contributors.owner_account`, migration 0009), the link-code attempt budget is reserved atomically, `GET /authorize` is rate limited, and a merged pull request no longer auto-accepts (see Phase 2).
+  - **BLOCKERS for turning OAuth on (`OAUTH = "off"` stays until both are closed).** Both live inside `@cloudflare/workers-oauth-provider` 1.2.3 and are not fixed in Swarm; keep the reproductions as regression tests when they are fixed:
+    - **Codex finding 2 (Medium): concurrent refresh can undo a successful revocation, and authorization codes are not consumed atomically.** Refresh reads the grant from KV, works on the snapshot, then writes the grant and a new access token, with no shared transaction; revocation deletes tokens and the grant independently. A refresh paused after its read resurrects a revoked grant (200 and a working token), and two exchanges of one authorization code can both succeed. Codex's fix direction: serialise issuance, consumption and revocation per grant with a strongly consistent authority (for example a Durable Object per grant), or enforce an authoritative revocation/version record at both issuance and every protected request, so a revoked grant is never recreated from an earlier snapshot and code consumption has one winner. Another ordinary KV read before the write does not close it. Needs a provider change or an application integration supplying those guarantees. Until then the D1-backed operator revocation event (checked on every MCP call) is the independent stop.
+    - **Codex finding 3 (Medium): the refresh-token retry grace allows repeated old-token reuse without detecting compromise.** The provider accepts the current or the immediately previous refresh token and, on each refresh, sets the previous id to the token just presented, even when it was already the previous one; there is no deadline or spent-token family invalidation. Reproduced: after R0 to R1, R0 redeems repeatedly, even two hours later, while R1 is invalidated. Codex's fix direction: rotation with an explicit spent-token lineage and a compromise response; any retry tolerance a short, fixed window that replaying the previous token cannot renew, preferably returning the same retry result rather than divergent replacements; reuse outside that policy revokes the active token family. Coordinate with finding 2. Do not claim a dependency upgrade fixes it until the probes fail safely against the replacement.
+    - Residual to know about: a contributor created without an account (handle mode, or `pair`) is unowned until some account links it, and whoever holds its key (or a full-scope grant) can choose that account. That is a decision for the key holder, and a limited-scope connection cannot make it.
   - **Open before launch:** a human review of the OAuth flow; the maintainer deploys with the new KV binding and `OAUTH = "on"`; a real browser test of the passkey step on `/authorize` and of each client (Claude app, ChatGPT, Codex, Cursor), whose connector UIs were not available to test.
 
 **Phase 5: The runner** (1–2 sessions)

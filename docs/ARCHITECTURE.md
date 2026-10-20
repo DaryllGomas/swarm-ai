@@ -44,7 +44,7 @@ Source files:
 | `hub/src/core.js` | Claim and expiry transitions, caps, the bulk task insert used by the sync, allocation, weekly stats |
 | `hub/src/sync.js` | The Town Hall task sync (bounded, streamed fetch), and the brief wrapper |
 | `hub/src/screen.js` | Screening of project text: strips links, flags injection-like text so the task is held |
-| `hub/src/github.js` | The GitHub connector: issue sync, pull-request checks, merge = accepted, the webhook, registering GitHub projects |
+| `hub/src/github.js` | The GitHub connector: issue sync, pull-request checks (a merge is recorded and waits for a reviewer), the webhook, registering GitHub projects |
 | `hub/src/links.js` | The pre-screen for a submission's source links: refuses non-public links, flags suspicious ones |
 | `hub/src/webauthn.js` | Hand-written WebAuthn verification on WebCrypto: a strict CBOR decoder, the authenticator-data checks, COSE key parsing (ES256 and RS256 only) and ES256 DER-to-raw signature conversion. No dependency |
 | `hub/src/accounts.js` | Passkey registration and login, sessions, the Turnstile check, the per-network account cap and the CSRF guard for account and ballot writes |
@@ -62,6 +62,7 @@ Source files:
 | `hub/migrations/0004_repair_legacy_states.sql` | Repairs the legacy states 0003 left: `submitted` tasks with nothing to review, and outstanding claims on closed, finished or held tasks |
 | `hub/migrations/0005_ops.sql` | Project pauses, submission pre-screen JSON and publication fields, audit query indexes |
 | `hub/migrations/0007_voting.sql` | `accounts`, `credentials`, `account_challenges`, `sessions`, append-only `ballot_versions`, `vote_snapshots`; rebuilds `allocation` with `share` in basis points |
+| `hub/migrations/0009_ownership_and_pr_hint.sql` | `contributors.owner_account` (set once, immutable by trigger; backfilled from existing links), `submissions.pr_mentions_issue` |
 | `hub/migrations/0008_steering.sql` | `claims.routing_origin` (backfilled from `routed`) with triggers that keep the two consistent, `accounts.fallback`, `account_links`, `link_codes`, `link_attempts` |
 | `scripts/publish-townhall.sh`, `publish_townhall.py` | Local accepted-research bridge to a Town Hall solution branch and commit; never pushes |
 | `hub/scripts/deploy.sh`, `review.sh` | The deploy and the reviewer CLI (see [RUNBOOK.md](RUNBOOK.md)) |
@@ -78,7 +79,7 @@ Monday (UTC) as `YYYY-MM-DD`.
 | `tasks` | One unit of work. `kind` (`research_fix`, `recheck_sources`, `answer_objection`), `title`, `brief`, `output_format`, `units` (1, 3 or 8), `status` (`ready`, `claimed`, `submitted`, `accepted`, `rejected`, `closed`, `held`), `held_reason` (set only while `held`: the names of the screen rules that fired, never the matched text), and `source_key`, a unique key that makes sync idempotent. `kind` `github_issue` marks a task made from a GitHub issue. `parent` is reserved for task splitting, which is **planned**: nothing creates a child task, every task has `parent` NULL, and the code that did is removed (see "Task splitting (planned)") |
 | `contributors` | A pseudonymous `handle` and `key_hash`, the salted SHA-256 of the contributor's key. The key itself is never stored. `pair_ip` is a daily-rotating network hash used only to cap pairings. `github` is a reserved optional column, **not yet used** |
 | `claims` | A contributor's hold on a task. `routing_origin` is `public_routed`, `ballot_directed` or `self_picked` (see "Routing origins"); `routed` is 1 exactly for `public_routed`. `week`, `claimed_at`, `expires_at` (3 hours), and `outcome`: `NULL` while active, then `released`, `expired` or `submitted`. `network` is the daily network hash at claim time, used only for the per-network cap (empty on claims made before migration 0002). `op` is the id of the request that last changed the row (see "Transactions and constraints"). A partial unique index allows one outstanding claim (`outcome IS NULL`) per task |
-| `submissions` | The work handed in: `body` (at most 20 KB), `sources` (a JSON array of links), `flags` (a JSON array of link flags for the reviewer, `[]` when clean), for pull-request submissions `pr_number`, `pr_author`, `pr_state` (`open`, `merged`, `closed`) and `pr_repo_id` (one live submission per pull request), optional self-reported `model` and `tokens_est`, `status` (`pending`, `accepted`, `rejected`), `reviewed_by`, `review_note`. `op` is as for claims. `prescreen` is nullable JSON from the advisory AI check. `published_url` and `published_at` record publication after acceptance, without changing `status`. Two partial unique indexes: one pending submission per task and contributor (migration 0001), and, since migration 0003, one pending-or-accepted submission per task, so a task can have only one accepted result |
+| `submissions` | The work handed in: `body` (at most 20 KB), `sources` (a JSON array of links), `flags` (a JSON array of link flags for the reviewer, `[]` when clean), for pull-request submissions `pr_number`, `pr_author`, `pr_state` (`open`, `merged`, `closed`), `pr_repo_id` (one live submission per pull request) and `pr_mentions_issue` (0, 1 or NULL: a reviewer hint, migration 0009), optional self-reported `model` and `tokens_est`, `status` (`pending`, `accepted`, `rejected`), `reviewed_by`, `review_note`. `op` is as for claims. `prescreen` is nullable JSON from the advisory AI check. `published_url` and `published_at` record publication after acceptance, without changing `status`. Two partial unique indexes: one pending submission per task and contributor (migration 0001), and, since migration 0003, one pending-or-accepted submission per task, so a task can have only one accepted result |
 | `events` | Append-only history. Triggers abort any update or delete. Types written today: `task_created`, `task_held`, `task_closed`, `task_claimed`, `claim_released`, `claim_expired`, `contributor_paired`, `submission_created`, `submission_accepted`, `submission_rejected`, `project_updated`, `contributor_revoked`, `submission_published`, and from the GitHub connector `project_registered`, `project_activated`, `project_repo_resolved`, `project_repo_renamed` and `task_size_label_changed`. Migration 0003 also wrote `claim_repaired`, `submission_superseded` and `task_repaired` for each row it fixed |
 | `allocation` | The voted target: `week`, `project`, `share` (integer basis points, 0-10000, since migration 0007; older percent rows were multiplied by 100) and `provisional`. The newest week at or before the current week applies. `currentAllocation` still returns percent (`share / 100`), so stats, MCP and the scheduler are unchanged |
 | `accounts` | A voter. Random internal `id`, `created`, `suspended`, and `network` (the daily network hash at registration, used only for the account cap). No email, no password. Separate from contributor handles |
@@ -372,12 +373,23 @@ count, accounts saving a ballot per day for 30 days, and snapshot history. Route
 A contributor key and a voter passkey are separate identities. A **link** (`account_links`) joins one contributor to one voter
 account, so that account's ballot steers that contributor. It is one-to-one on both sides. No email is involved.
 
+**Ownership is not the link (Codex review 4, finding 1).** The link is *steering*: a voter may move it. *Ownership* is
+`contributors.owner_account` (migration 0009): the account that created the contributor (OAuth passkey mode) or the first
+account it was linked to. It is set once and a trigger refuses any change. `link_account` may link an unowned contributor
+(it becomes owned) or relink a contributor to the account that already owns it; it **refuses** a contributor owned by a
+different account (a refused code is not spent, and counts as a failed attempt). A connection that was not granted all three
+scopes also cannot use `link_account` to make an account the owner of an unowned contributor, since ownership is what passkey
+sign-in trusts and that would hand out the scopes the user withheld. OAuth authorization in passkey mode acts only for a
+contributor owned by the signed-in account (preferring the one its link points at); otherwise it creates a new one. There is
+no way to transfer ownership: that needs proof from the current owner, which does not exist yet. An operator who must move one does so by hand in D1 (drop the trigger,
+update, recreate it) and writes down why.
+
 - **By code** (works for every client). A signed-in voter presses "Link my AI" (`POST /api/me/link-code`). Swarm makes a code like
   `SWARM-ABCD-2345` (8 characters from a 32-symbol alphabet with no look-alikes), stores only its salted hash, and shows it once. It is valid
   for 10 minutes and works once; a new code cancels the older one. The voter tells their AI, which calls the MCP tool `link_account {code}` with its contributor key or OAuth connection.
   Redemption is one batch: the old link of the account and of the contributor (if any) are replaced, each replaced link writes an `account_unlinked` event, the new link writes `account_linked`, and the code is deleted, so two simultaneous redemptions cannot both win.
   Events keep only the first 8 characters of the account id.
-- **Brute-force limit.** Each failed redemption (wrong, malformed, expired or used code) is recorded in `link_attempts`. After 5 failures in an hour from one contributor, or 20 from one network, even a correct code is refused until
+- **Brute-force limit.** Every redemption first *reserves* an attempt in `link_attempts` with one conditional `INSERT ... SELECT` that checks both budgets (5 an hour for the contributor; 20 an hour for the network, counting today's and yesterday's network hash because the hash rotates daily) in the same statement, so parallel guesses cannot all pass one stale count (12 parallel guesses: exactly 5 wrong, 7 refused). A successful redemption deletes its reservation, so only failures remain. After the limit, even a correct code is refused until
   the failures age out. Entries older than a day are removed by the cron.
 - **By sign-in.** Choosing "Sign in with your passkey" at the OAuth approve step links the connecting AI in the same step (below).
 - `POST /api/me/unlink` removes the link (event written). `POST /api/me/fallback {enabled}` sets the fallback. All three writes need a session cookie, the exact `Origin` and `X-Swarm: 1`.
@@ -394,9 +406,9 @@ account, so that account's ballot steers that contributor. It is one-to-one on b
 - **Discovery:** `/.well-known/oauth-protected-resource/mcp` (RFC 9728) and `/.well-known/oauth-authorization-server` (RFC 8414). A tool that needs credentials, called with none, answers HTTP 401 with
   `WWW-Authenticate: Bearer realm="OAuth", resource_metadata="...", scope="read"`, which is how MCP clients start sign-in. (A wrong contributor key is still an ordinary tool error.)
 - **Registration:** dynamic client registration at `/oauth/register`, rate limited per network. Redirect URIs must be `https`, or `http` on loopback; dangerous schemes, fragments and userinfo are refused. Client ID Metadata Documents and private-use schemes are off.
-- **PKCE:** S256 is required. The token endpoint is `/oauth/token`; refresh tokens rotate. Access tokens are bound to the audience `<RP_ORIGIN>/mcp`.
+- **PKCE:** S256 is required. The token endpoint is `/oauth/token`; refresh tokens rotate. `POST /oauth/*` and `GET /authorize` (which writes a consent transaction to KV) share the per-network burst limiter, checked before any KV write (429). Access tokens are bound to the audience `<RP_ORIGIN>/mcp`.
 - **Approve page `/authorize`:** shows the app's name, where the result goes (and a warning for a loopback address), and two choices. *Continue as a pseudonymous handle* makes a new contributor (optionally with a chosen handle) with no account and no usable key,
-  under the same daily pairing cap as `pair`. *Sign in with your passkey* uses the Phase 3 login and, if the account already has a linked contributor, reuses it (one identity per account); otherwise it creates one and links it. The voter then ticks scopes. The page is Worker-rendered with its own strict CSP (same-origin script only, `form-action 'none'`, no framing),
+  under the same daily pairing cap as `pair`. *Sign in with your passkey* uses the Phase 3 login and, if the account owns a contributor, reuses it (one identity per account); otherwise it creates one, owned by the account, and links it. The voter then ticks scopes. The page is Worker-rendered with its own strict CSP (same-origin script only, `form-action 'none'`, no framing),
   puts the app's strings in a JSON data block and renders them with `textContent`. The decision is a JSON POST that needs the exact `Origin`, `X-Swarm: 1`, and the browser-bound single-use consent handle the library keeps in a cookie; anything it can refuse (a taken handle, the cap, no session) it refuses before the handle is spent.
 - **Scopes**, enforced on the server for every call (`SCOPE_FOR_TOOL` in `hub/src/oauth-scopes.js`): `read` = `my_work`, `my_week`, `submission_status`; `work` = `next_task`, `claim_task`, `release_task`, `link_account`; `submit` = `submit_work`. Browse tools and `pair` need none. A call outside the grant is HTTP 403 with
   `error="insufficient_scope"` and the scopes to ask for. A contributor key carries all three.
@@ -555,13 +567,24 @@ and must not already back another live submission. `pr_number`, the PR author's 
 stored with the submission. The author need not match the Swarm handle; receipts show both. Swarm never fetches
 any other submitted link.
 
-**Merge = accepted.** Each sync looks at pending pull-request submissions (up to 20 per project) and reads each pull
-request from the API. Merged: accepted with `reviewed_by = "GitHub merge by {login}"`. Closed without merge: rejected
-with the note "PR closed without merge" (the task returns to the pool, and the usual two-rejection limit applies). Both
-go through `reviewSubmission` in `core.js`, the same transaction the admin review endpoint uses, so a repeated check
-or a race with a manual review changes nothing and each decision writes the usual `submission_accepted` or
-`submission_rejected` event. This keeps the rule that a person reviews the work: the review is the maintainer's merge
-or close, made on GitHub, and the maintainer owns the repository. Swarm only records it.
+**A merge is not acceptance (changed after Codex review 4, finding 4).** Each sync looks at pending pull-request
+submissions (up to 20 per project) and reads each pull request from the API. A merged pull request only proves that
+somebody merged some pull request: Swarm does not know that it resolves the claimed issue, or that the submitter wrote
+it (a contributor could hand in somebody else's likely-to-merge pull request). So a merge is **recorded, not acted on**:
+`pr_state` becomes `merged`, a `pr_merged` event is written once, and the submission stays `pending`, shown as "merged,
+needs reviewer confirmation" (`pr_needs_confirmation`) in `GET /api/admin/pending` and the `/ops` review queue. A person
+then accepts or rejects it through the normal review path. Merged submissions are not polled again. Closed without
+merge is still rejected automatically, with the note "PR closed without merge" (the task returns to the pool, and the
+usual two-rejection limit applies). That is safe: it can only end the submitter's own pending submission, never credits
+anything, and goes through `reviewSubmission` in `core.js`, the transaction the admin review endpoint uses, so a repeated
+check or a race with a manual review changes nothing.
+
+**The issue-mention hint.** When the pull request is submitted, Swarm reads its title and body and stores
+`submissions.pr_mentions_issue` (1, 0, or NULL when unknown): 1 when they name the task's issue as `#N` or
+`owner/repo#N` for this repository. It is shown to the reviewer as a hint only. Title and body are freely editable by the
+author, so it is never proof, never changes what is accepted, and a pull request that does not mention the issue can
+still be submitted. A future automatic acceptance would need an authoritative issue relationship and claimant
+authorization (see docs/PLAN.md).
 
 **Rate limits and errors.** A 429, or a 403 with `x-ratelimit-remaining: 0` or `Retry-After`, pauses every GitHub call
 until the reset time (at least a minute, at most two hours; `meta.github_backoff_until`). Other errors are recorded in
@@ -600,10 +623,11 @@ migration fails the tests. No network, token or deploy is needed. The files in `
 | `steering.test.js` | Routing origins on claims, an 80/20 ballot converging through the real tool, the deficit ordering over hundreds of picks, fallback on and off, a big ballot-directed contributor leaving the public comparison untouched, unlinked contributors following the public split |
 | `link.test.js` | Link codes: form, hashing, single use, expiry, wrong codes, the per-contributor and per-network brute-force limits, relinking and its events, CSRF and Origin checks on the writes |
 | `me.test.js` | `/api/me`: signed out, ballot, week by origin, receipts, token estimates labelled, isolation between voters, the fallback setting; the `my_week` tool |
+| `review4.test.js` | Codex review 4: the ownership attack, pseudonymous contributors, relinking never widening scopes, the ownership race, atomic link-attempt reservation (12 parallel guesses: 5 wrong, 7 refused; the network cap; yesterday's hash), and the 429 on `GET /authorize` |
 | `oauth.test.js` | MCP sign-in: discovery, registration and redirect validation, the consent page (CSP, escaping), PKCE, token-to-contributor mapping, scopes per tool, CSRF and Origin on `/authorize`, passkey linking, and that contributor keys and public tools are unchanged |
 | `pages.test.js` | The Phase 4 pages and scripts follow the rendering and CSP rules |
 | `migration-0008.test.js` | Migration 0008 on a database that already has rows: the backfill, the consistency triggers, the link tables |
-| `github.test.js` | The connector with a stubbed GitHub: label sizing, skipped pull requests, screening and held issues, closing, idempotency, repository identity and renames, pull-request URL and id checks, merge and close, rate limits and errors, the webhook (valid, invalid, missing secret, replay), registration, the 50/50 allocation, and Town Hall still syncing |
+| `github.test.js` | The connector with a stubbed GitHub: label sizing, skipped pull requests, screening and held issues, closing, idempotency, repository identity and renames, pull-request URL and id checks, merge (recorded, waits for a reviewer, unrelated-PR regression, issue-mention hint) and close, rate limits and errors, the webhook (valid, invalid, missing secret, replay), registration, the 50/50 allocation, and Town Hall still syncing |
 | `migration-0006.test.js` | Migration 0006 on a database that already has rows |
 | `sync-limits.test.js` | The feed fetch: the byte cap (no, false and honest `Content-Length`, a multibyte body), and the deadline |
 | `helpers.js`, `fault.js`, `apply-migrations.js` | Test setup. `fault.js` wraps `env.DB` so a test can pause a request after a read, or make one statement fail |
