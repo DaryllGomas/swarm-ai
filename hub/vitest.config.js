@@ -16,6 +16,7 @@ export default defineConfig(async () => {
           d1Databases: ['MIG_DB'], // a scratch database for the migration upgrade tests (the tests build it from the migrations)
           bindings: {
             TEST_MIGRATIONS: migrations,
+            OAUTH: 'on', // the tests exercise OAuth even while production keeps it off
             ADMIN_TOKEN: 'test-admin-token-0123456789',
             HASH_SALT: 'test-hash-salt-0123456789',
           },
