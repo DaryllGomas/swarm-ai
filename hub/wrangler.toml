@@ -22,9 +22,11 @@ migrations_dir = "migrations"
 # not a write freeze: release_task, claim expiry, sync, admin review and the hourly cron still write.
 # Change the value, then deploy (scripts/deploy.sh).
 INTAKE = "open"
-ACCESS_TEAM_DOMAIN = ""
-ACCESS_AUD = ""
-OPS_EMAILS = ""
+# Cloudflare Access for /ops and /api/ops (app "Swarm AI operator console"). The Worker verifies Access's JWT itself.
+ACCESS_TEAM_DOMAIN = "bigpicsolutions.cloudflareaccess.com"
+ACCESS_AUD = "d3f079ae0a2015ff77b79f30869524ecfe7510e98193b2522954e3a8a98b0db5"
+# OPS_EMAILS (comma-separated operator emails) is a Worker SECRET, so personal emails stay out of this public repo:
+#   scripts/deploy.sh secret put OPS_EMAILS
 # Additional exact origins for local development only (comma-separated, no wildcards).
 OPS_ALLOWED_ORIGINS = ""
 
