@@ -26,21 +26,23 @@
     if (img.complete && img.naturalWidth === 0) fall();
   })();
 
-  // vote donut: the example split
-  (function donut() {
+  // vote donut: the provisional allocation split, from the live numbers. Voting is not open, so nobody has voted yet.
+  function donut(list) {
     const seg = $('donut-seg'), key = $('donut-key');
+    S.clear(seg); S.clear(key);
     let cum = 0;
-    S.META.forEach((m) => {
+    list.forEach((m) => {
       const c = S.svg('circle', { cx: 60, cy: 60, r: 44, fill: 'none', stroke: m.color, 'stroke-width': 24, pathLength: 100, 'stroke-dasharray': (m.voted - 0.5) + ' ' + (100 - m.voted + 0.5), 'stroke-dashoffset': -cum });
       seg.appendChild(c); cum += m.voted;
       const li = S.el('li'); const dot = S.el('i'); dot.style.background = m.color; li.appendChild(dot);
-      li.appendChild(S.el('b', null, String(m.voted))); li.appendChild(S.el('span', null, m.name));
+      li.appendChild(S.el('b', null, S.pct(m.voted))); li.appendChild(S.el('span', null, m.name));
       key.appendChild(li);
     });
-  })();
+    $('donut-svg').setAttribute('aria-label', 'Provisional split of the allocation, not a vote: ' + list.map((m) => m.name + ' ' + S.pct(m.voted)).join(', '));
+  }
 
   function bar(value, color) {
-    const b = S.el('span', 'bar'); const i = S.el('i'); i.style.background = color; S.setBar(i, Math.min(100, value * 2.1)); b.appendChild(i); return b;
+    const b = S.el('span', 'bar'); const i = S.el('i'); i.style.background = color; S.setBar(i, Math.min(100, value)); b.appendChild(i); return b;
   }
   // A "Voted"/"Routed" cell: the figure, its bar and, for the live row, a small caption saying what the figure is.
   function barCell(value, color, caption) {
@@ -49,37 +51,32 @@
     return c;
   }
   function row(p, n) {
-    const tr = S.el('tr', p.preview ? 'preview-row' : 'live');
+    const tr = S.el('tr', 'live');
     tr.appendChild(S.el('td', 'c-n', String(n)));
     const name = S.el('td', 'c-name'); const wrap = S.el('span', 'pname');
     const ic = S.icon(p.icon, 'pic'); ic.style.color = p.color; wrap.appendChild(ic);
     wrap.appendChild(S.el('strong', null, p.name));
-    wrap.appendChild(S.el('em', p.preview ? 'tag' : 'tag live', p.preview ? 'Example' : 'Live'));
+    wrap.appendChild(S.el('em', 'tag live', 'Live'));
     name.appendChild(wrap); tr.appendChild(name);
     tr.appendChild(S.el('td', 'c-focus', p.focus));
-    // Real row: allocation share (provisional) and the real routed share with its units. Example rows: made-up figures.
-    tr.appendChild(barCell(p.voted, p.color, p.preview ? '' : (p.provisional ? 'share, provisional' : 'share')));
-    tr.appendChild(barCell(p.routed, '#f48a4c', p.preview ? '' : S.n0(p.routedUnits) + (p.routedUnits === 1 ? ' unit' : ' units') + ' this week'));
+    // Allocation share (provisional until voting opens) and the real routed share with its units.
+    tr.appendChild(barCell(p.voted, p.color, p.provisional ? 'share, provisional' : 'share'));
+    tr.appendChild(barCell(p.routed, '#f48a4c', S.n0(p.routedUnits) + (p.routedUnits === 1 ? ' unit' : ' units') + ' this week'));
     const a = S.el('td', 'c-pill'); a.appendChild(S.el('span', 'cell green', S.n0(p.accepted))); tr.appendChild(a);
     const o = S.el('td', 'c-pill'); o.appendChild(S.el('span', 'cell blue', S.n0(p.open))); tr.appendChild(o);
     const go = S.el('td', 'c-act');
-    if (!p.preview) { const l = S.el('a', 'btn btn-coral btn-sm'); l.href = '/connect.html'; l.appendChild(document.createTextNode('Point your AI here ')); l.appendChild(S.icon('arrow')); go.appendChild(l); }
-    else { const l = S.el('a', 'btn btn-outline-dark btn-sm preview'); l.href = '#projects'; l.title = 'Example project: preview only'; l.appendChild(document.createTextNode('Preview ')); l.appendChild(S.icon('arrow')); go.appendChild(l); }
+    { const l = S.el('a', 'btn btn-coral btn-sm'); l.href = '/connect.html'; l.appendChild(document.createTextNode('Point your AI here ')); l.appendChild(S.icon('arrow')); go.appendChild(l); }
     tr.appendChild(go);
     return tr;
   }
-  // Real projects first, then a divider, then the examples. A row is either all real or all example.
   function board(list) {
     const tb = $('board-body'); S.clear(tb);
-    const real = list.filter((p) => !p.preview), examples = list.filter((p) => p.preview);
-    real.forEach((p, i) => tb.appendChild(row(p, i + 1)));
-    const div = S.el('tr', 'divider'); const dc = S.el('td', null, S.PREVIEW_LABEL); dc.colSpan = 8; div.appendChild(dc); tb.appendChild(div);
-    examples.forEach((p, i) => tb.appendChild(row(p, real.length + i + 1)));
-    const openLive = real.reduce((t, p) => t + p.open, 0);
-    $('board-count').textContent = real.length + ' live project · ' + S.n0(openLive) + ' open tasks · ' + examples.length + ' examples';
+    list.forEach((p, i) => tb.appendChild(row(p, i + 1)));
+    const open = list.reduce((t, p) => t + p.open, 0);
+    $('board-count').textContent = list.length + (list.length === 1 ? ' live project · ' : ' live projects · ') + S.n0(open) + ' open tasks';
   }
 
-  // If the API fails, show nothing rather than a guess (Town Hall's numbers are only ever the live ones).
+  // If the API fails, show nothing rather than a guess.
   async function load() {
     try {
       const [stats, rec] = await Promise.all([S.getJson('/api/stats'), S.getJson('/api/receipts?limit=5')]);
@@ -87,8 +84,9 @@
       S.renderStamp($('how-stamp'), stats);
       S.flow($('flow-host'), list, { lite: true, onSelect: (id) => { window.location.href = '/live.html#' + id; } });
       board(list);
+      donut(list);
       const real = S.renderReceipts($('receipts-host'), rec, { limit: 4 });
-      $('rec-pill').textContent = real ? 'Live' : 'Example data';
+      $('rec-pill').textContent = real ? 'Live' : 'None yet';
     } catch (e) {
       S.errorNote($('flow-host'));
       const tb = $('board-body'); S.clear(tb);
