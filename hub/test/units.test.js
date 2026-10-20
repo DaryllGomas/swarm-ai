@@ -54,3 +54,19 @@ describe('link screening', () => {
     }
   });
 });
+
+describe('task splitting is planned, not built (review finding 6)', () => {
+  it('there is no child-task helper to misuse: the only way a task is created is the screened root-task sync', async () => {
+    const core = await import('../src/core.js');
+    expect(core.addTask).toBeUndefined();
+    expect(Object.keys(core)).toContain('addTasksBulk');
+  });
+
+  it('synced tasks are all roots', async () => {
+    const { addTasksBulk } = await import('../src/core.js');
+    await addTasksBulk(env, [{ project: 'town-hall', kind: 'research_fix', title: 'Root', brief: 'b', output_format: 'f', units: 3, source_key: 'test:root:1' }]);
+    const t = await env.DB.prepare("SELECT parent FROM tasks WHERE source_key = 'test:root:1'").first();
+    expect(t.parent).toBeNull();
+    await env.DB.prepare("DELETE FROM tasks WHERE source_key = 'test:root:1'").run(); // leave the shared test database as found
+  });
+});

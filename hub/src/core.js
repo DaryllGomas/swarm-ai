@@ -13,28 +13,9 @@ export function eventStmt(env, e) {
   ).bind(Date.now(), e.type, e.task ?? null, e.contributor ?? null, e.submission ?? null, e.actor ?? null, e.detail ? JSON.stringify(e.detail) : null);
 }
 
-// Create a task. A child's units come out of its parent's budget: the children together may never exceed it.
-export async function addTask(env, t) {
-  if (!UNITS.includes(t.units)) throw new Error('units must be 1, 3 or 8');
-  if (t.parent) {
-    const parent = await env.DB.prepare('SELECT units FROM tasks WHERE id = ?1').bind(t.parent).first();
-    if (!parent) throw new Error('parent task not found');
-    const used = await env.DB.prepare("SELECT COALESCE(SUM(units), 0) AS n FROM tasks WHERE parent = ?1 AND status != 'closed'").bind(t.parent).first();
-    if (used.n + t.units > parent.units) throw new Error(`children would use ${used.n + t.units} units; the parent's budget is ${parent.units}`);
-  }
-  const res = await env.DB.prepare(
-    `INSERT OR IGNORE INTO tasks (project, parent, kind, title, brief, output_format, units, status, source_key, created)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'ready', ?8, ?9)`
-  ).bind(t.project, t.parent ?? null, t.kind, t.title, t.brief, t.output_format, t.units, t.source_key ?? null, Date.now()).run();
-  // (addTask is for operator-made tasks; text from outside goes through addTasksBulk, which screens it first.)
-  if (res.meta.changes) {
-    await eventStmt(env, { type: 'task_created', task: res.meta.last_row_id, actor: 'sync', detail: { source_key: t.source_key, units: t.units } }).run();
-    return res.meta.last_row_id;
-  }
-  return null;
-}
-
-// Many root tasks in one D1 call (sync). Idempotent on source_key; the creation event is written once per task.
+// Many root tasks in one D1 call (sync). There is no child-task creation: task splitting is planned, not built (docs/ARCHITECTURE.md,
+// "Task splitting (planned)"), and every task here is a root task with parent NULL.
+// Idempotent on source_key; the creation event is written once per task.
 // Each task arrives already screened: status is 'ready' or 'held' (injection-like text, never served), with held_reason.
 // A task that already exists and has not been claimed yet follows its source: changed text is updated, and it moves
 // between ready and held as the screen result changes. Claimed, submitted and finished tasks are never touched.
