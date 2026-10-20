@@ -12,6 +12,7 @@ import { SECURITY_HEADERS, clean, ipHashFor, isAdmin, iso, isoDay, json, underRa
 import { adminHeld, adminPending, adminReview, adminSubmission, adminPublished } from './admin.js';
 import { handleOps } from './ops.js';
 import { creditedAs, forgetNetworks, publicHandle } from './privacy.js';
+import { analytics, runWeeklyMaintenance } from './rollup.js';
 import { normalizeClient, setupGuide } from './setup.js';
 
 // Requests the OAuth provider owns: discovery metadata, registration, the token endpoint, /authorize (through its default
@@ -48,6 +49,7 @@ export default {
       // First, and on its own: forgetting must not wait on, or be skipped by, anything else the job does.
       try { await forgetNetworks(env); } catch (err) { console.error('forgetNetworks failed:', String(err?.message || err).slice(0, 300)); }
       await publishSnapshot(env);
+      try { await runWeeklyMaintenance(env); } catch (err) { console.error('weekly maintenance failed:', String(err?.message || err).slice(0, 300)); }
       const now = Date.now();
       await env.DB.batch([
         env.DB.prepare('DELETE FROM sessions WHERE expires <= ?1').bind(now),
@@ -116,6 +118,7 @@ async function api(req, env, ctx, url) {
     return json({ ...(await weekStats(env)), intake: paused ? 'paused' : 'open', paused, paused_note: paused ? 'Swarm is paused for maintenance. New pairings, claims and submissions are off; everything else still works.' : null }, 200, { 'Cache-Control': 'public, max-age=30' });
   }
   if (path === '/api/receipts') return receipts(env, url);
+  if (path === '/api/analytics') return analytics(env, url);
   if (path === '/api/tasks') return tasks(env, ctx, url);
   const m = path.match(/^\/api\/tasks\/(\d{1,9})$/);
   if (m) return oneTask(env, Number(m[1]));

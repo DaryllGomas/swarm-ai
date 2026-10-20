@@ -187,7 +187,7 @@ export async function deleteAccount(env, account, now = Date.now()) {
     env.DB.prepare('DELETE FROM credentials WHERE account = ?1').bind(account),
     env.DB.prepare('DELETE FROM account_challenges WHERE account = ?1').bind(account),
     env.DB.prepare('DELETE FROM accounts WHERE id = ?1').bind(account),
-    env.DB.prepare("INSERT INTO events (ts, type, actor) SELECT ?2, 'account_deleted', 'system' WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE id = ?1)").bind(account, now),
+    env.DB.prepare("INSERT INTO events (ts, type, actor) SELECT ?1, 'account_deleted', 'system' WHERE changes() > 0").bind(now), // only if the DELETE above removed an account
   );
   const res = await env.DB.batch(stmts);
   return { deleted: res.at(-2).meta.changes > 0, contributors: owned.length };
