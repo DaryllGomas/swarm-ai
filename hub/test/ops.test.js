@@ -49,6 +49,15 @@ describe('operator queries', () => {
     expect(data.notice).toBe(UNTRUSTED); expect(s).toMatchObject({ id: p.id, body: BODY.trim(), model: 'test-model', tokens_est: 42, prescreen: { error: 'unavailable' } });
     expect(s.flags).toEqual(['shortener:bit.ly']); expect(s.age_ms).toBeGreaterThanOrEqual(0); expect(s.brief).toContain('Test brief');
   });
+  it('finding 4: the review queue flags a merged pull request as needing reviewer confirmation, with the issue-mention hint', async () => {
+    const a = await accessFixture(), p = await pending(), q = await pending();
+    await env.DB.prepare("UPDATE submissions SET pr_number = 5, pr_author = 'octo', pr_state = 'merged', pr_mentions_issue = 0 WHERE id = ?1").bind(p.id).run();
+    await env.DB.prepare("UPDATE submissions SET pr_number = 6, pr_author = 'octo', pr_state = 'open', pr_mentions_issue = 1 WHERE id = ?1").bind(q.id).run();
+    const rows = (await (await a.get('pending')).json()).pending;
+    expect(rows.find((r) => r.id === p.id)).toMatchObject({ pr_needs_confirmation: true, pr_mentions_issue: false });
+    expect(rows.find((r) => r.id === q.id)).toMatchObject({ pr_needs_confirmation: false, pr_mentions_issue: true });
+    expect(rows.find((r) => r.id === q.id).pr_hint_note).toMatch(/hint only/);
+  });
   it('only authenticated operator/admin held lists expose held text; public paths stay closed', async () => {
     const a = await accessFixture(), id = await addTask({ status: 'held', held_reason: 'ignore_instructions', title: 'Withheld title' });
     const held = await (await a.get('held')).json();

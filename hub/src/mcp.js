@@ -687,13 +687,13 @@ async function submitWork({ env, args, who, ctx }) {
   try {
     res = await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO submissions (task, contributor, claim, body, sources, flags, model, tokens_est, created, op, pr_number, pr_author, pr_state, pr_repo_id)
-         SELECT c.task, c.contributor, c.id, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14 FROM claims c JOIN tasks t ON t.id = c.task
+        `INSERT INTO submissions (task, contributor, claim, body, sources, flags, model, tokens_est, created, op, pr_number, pr_author, pr_state, pr_repo_id, pr_mentions_issue)
+         SELECT c.task, c.contributor, c.id, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15 FROM claims c JOIN tasks t ON t.id = c.task
          WHERE c.id = ?3 AND c.task = ?1 AND c.contributor = ?2 AND c.outcome IS NULL AND c.expires_at > ?9
            AND t.status = 'claimed' AND t.held_reason IS NULL
            AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = c.task AND s.status IN ('pending','accepted'))
            AND (SELECT COUNT(*) FROM submissions d WHERE d.contributor = c.contributor AND d.created >= ?9 - 86400000) < ${MAX_SUBMISSIONS_PER_CONTRIBUTOR_PER_DAY}`
-      ).bind(taskId, who.id, claim.id, body, JSON.stringify(sources), JSON.stringify(flags), model, tokens, now, op, pr?.pr_number ?? null, pr?.pr_author ?? null, pr?.pr_state ?? null, pr?.pr_repo_id ?? null),
+      ).bind(taskId, who.id, claim.id, body, JSON.stringify(sources), JSON.stringify(flags), model, tokens, now, op, pr?.pr_number ?? null, pr?.pr_author ?? null, pr?.pr_state ?? null, pr?.pr_repo_id ?? null, pr?.pr_mentions_issue ?? null),
       env.DB.prepare(
         "UPDATE claims SET outcome = 'submitted', op = ?2 WHERE id = ?1 AND outcome IS NULL AND EXISTS (SELECT 1 FROM submissions WHERE claim = ?1 AND op = ?2)"
       ).bind(claim.id, op),

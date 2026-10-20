@@ -9,11 +9,11 @@ const MAX_ADMIN_BODY_BYTES = 4 * 1024;
 
 export async function adminPending(env) {
   const { results } = await env.DB.prepare(
-    `SELECT s.id, s.task, t.title, t.kind, t.units, t.brief, t.output_format, t.project, c.handle, s.body, s.sources, s.flags, s.model, s.tokens_est, s.pr_number, s.pr_author, s.pr_state, s.prescreen, s.created
+    `SELECT s.id, s.task, t.title, t.kind, t.units, t.brief, t.output_format, t.project, c.handle, s.body, s.sources, s.flags, s.model, s.tokens_est, s.pr_number, s.pr_author, s.pr_state, s.pr_mentions_issue, s.prescreen, s.created
      FROM submissions s JOIN tasks t ON t.id = s.task JOIN contributors c ON c.id = s.contributor
      WHERE s.status = 'pending' AND t.status != 'held' AND t.held_reason IS NULL ORDER BY s.created`
   ).all();
-  return json({ notice: UNTRUSTED, pending: results.map((r) => ({ ...r, sources: JSON.parse(r.sources), flags: JSON.parse(r.flags || '[]'), prescreen: r.prescreen ? JSON.parse(r.prescreen) : null, age_ms: Math.max(0, Date.now() - r.created), created: iso(r.created) })) });
+  return json({ notice: UNTRUSTED, pending: results.map(({ pr_mentions_issue: mentions, ...r }) => ({ ...r, ...(r.pr_number ? { pr_mentions_issue: mentions === null ? null : mentions === 1, pr_needs_confirmation: r.pr_state === 'merged', pr_hint_note: 'Whether the pull request text names the issue is a hint only; it is not proof.' } : {}), sources: JSON.parse(r.sources), flags: JSON.parse(r.flags || '[]'), prescreen: r.prescreen ? JSON.parse(r.prescreen) : null, age_ms: Math.max(0, Date.now() - r.created), created: iso(r.created) })) });
 }
 
 // Tasks the text screen held back. They are never served to agents; this is where the operator sees them.

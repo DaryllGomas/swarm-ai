@@ -1,4 +1,4 @@
-// The GitHub connector: issues become tasks, pull requests are verified and checked, merge = accepted, the signed webhook.
+// The GitHub connector: issues become tasks, pull requests are verified and checked, a merge waits for a reviewer, the signed webhook.
 // GitHub is a stub: `fetch` is replaced by a fake that answers the few API calls Swarm makes. No network is used.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { env } from 'cloudflare:workers';
@@ -389,7 +389,7 @@ describe('submitting a pull request', () => {
   });
 });
 
-describe('merge = accepted, closed = rejected', () => {
+describe('merge needs a reviewer, closed = rejected', () => {
   async function pending(n, contributor = null) {
     const t = await readyTask(n);
     const u = contributor ?? (await newUser());
@@ -401,21 +401,72 @@ describe('merge = accepted, closed = rejected', () => {
   }
   const sub = (id) => env.DB.prepare('SELECT * FROM submissions WHERE id = ?1').bind(id).first();
 
-  it('accepts a merged pull request as "GitHub merge by <login>", writes the event and gives a receipt crediting the PR author', async () => {
+  it('a merged pull request is RECORDED, not accepted: it stays pending, flagged for the reviewer, and a person accepts it', async () => {
     const { t, u, sub: id, pr } = await pending(1);
     gh.pulls[`${REPO}#${pr}`] = pull(pr, { state: 'closed', merged: true, merged_at: '2026-10-20T12:00:00Z', merged_by: { login: 'maintainer-1' } });
     const out = await syncGithub(env);
     expect(out.merged).toBe(1);
-    const s = await sub(id);
-    expect(s).toMatchObject({ status: 'accepted', reviewed_by: 'GitHub merge by maintainer-1', pr_state: 'merged' });
+    expect(await sub(id)).toMatchObject({ status: 'pending', pr_state: 'merged', reviewed_by: null });
+    expect((await tasks()).find((x) => x.id === t.id).status).toBe('submitted');
+    expect((await events('submission_accepted')).some((e) => e.submission === id)).toBe(false);
+    const ev = (await events('pr_merged')).find((e) => e.submission === id);
+    expect(ev.actor).toBe('github');
+    expect(JSON.parse(ev.detail)).toMatchObject({ pr_number: pr, merged_by: 'maintainer-1' });
+    // The admin pending view flags it.
+    const view = await (await send('/api/admin/pending', { headers: ADMIN() })).json();
+    expect(view.pending.find((x) => x.id === id)).toMatchObject({ pr_state: 'merged', pr_needs_confirmation: true });
+    // A human accepts it through the normal review path; the receipt credits the PR author and the reviewer.
+    expect((await review(id, 'accept', 'checked: it resolves the issue')).status).toBe(200);
+    expect(await sub(id)).toMatchObject({ status: 'accepted', pr_state: 'merged' });
     expect((await tasks()).find((x) => x.id === t.id).status).toBe('accepted');
-    const ev = (await events('submission_accepted')).find((e) => e.submission === id);
-    expect(ev.actor).toBe('GitHub merge by maintainer-1');
     const rec = await (await send('/api/receipts')).json();
     const r = rec.receipts.find((x) => x.id === id);
-    expect(r.handle).toBe(u.handle); // the Swarm handle
-    expect(r.github).toEqual({ repo: REPO, pr_number: pr, pr_author: 'octo-dev', pr_url: prUrl(pr) }); // and the GitHub author, both shown
-    expect(r.reviewed_by).toBe('GitHub merge by maintainer-1');
+    expect(r.handle).toBe(u.handle);
+    expect(r.github).toEqual({ repo: REPO, pr_number: pr, pr_author: 'octo-dev', pr_url: prUrl(pr) });
+    expect(r.reviewed_by).not.toMatch(/GitHub merge/);
+  });
+
+  it('finding 4: merging somebody else\'s unrelated pull request does not accept an arbitrary claimed issue', async () => {
+    const t = await readyTask(123);
+    gh.pulls[`${REPO}#999`] = pull(999, { title: 'Unrelated', body: 'Closes #456', user: { login: 'someone-else' } });
+    const u = await newUser();
+    await u.call('claim_task', { id: t.id });
+    expect((await u.call('submit_work', { task_id: t.id, body: SUMMARY, sources: [prUrl(999)] })).isError).toBe(false);
+    gh.pulls[`${REPO}#999`] = pull(999, { title: 'Unrelated', body: 'Closes #456', user: { login: 'someone-else' }, state: 'closed', merged: true, merged_by: { login: 'maint' } });
+    await syncGithub(env);
+    const s = await env.DB.prepare('SELECT * FROM submissions WHERE task = ?1').bind(t.id).first();
+    expect(s.status).toBe('pending');
+    expect(s.pr_mentions_issue).toBe(0); // the hint says it does not name #123
+    expect((await tasks()).find((x) => x.id === t.id).status).toBe('submitted');
+    const view = await (await send('/api/admin/pending', { headers: ADMIN() })).json();
+    expect(view.pending.find((x) => x.id === s.id)).toMatchObject({ pr_needs_confirmation: true, pr_mentions_issue: false });
+    expect((await (await send('/api/stats')).json()).projects.find((p) => p.id === 'swarm-ai').accepted_units).toBe(0);
+  });
+
+  it('records, at submit time, whether the pull request text names the issue: a hint, never proof', async () => {
+    const cases = [
+      ['#N in the title', (n) => ({ title: `Fix #${n}` }), 1],
+      ['#N in the body', (n) => ({ body: `This fixes\n#${n}.` }), 1],
+      ['owner/repo#N', (n) => ({ body: `Fixes ${REPO}#${n}` }), 1],
+      ['owner/repo#N, any case', (n) => ({ body: `fixes ${REPO.toLowerCase()}#${n}` }), 1],
+      ['another repository\'s #N', (n) => ({ body: `Fixes other/repo#${n}` }), 0],
+      ['a different number', (n) => ({ body: `Fixes #${n}0 and #${n + 1}` }), 0],
+      ['no mention', () => ({ title: 'Tidy', body: 'nothing here' }), 0],
+      ['an issue number inside a longer word', (n) => ({ body: `abc#${n}` }), 0],
+    ];
+    for (const [i, [label, over, want]] of cases.entries()) {
+      const issueNo = 10 + i * 2;
+      const t = await readyTask(issueNo);
+      const u = await newUser();
+      await u.call('claim_task', { id: t.id });
+      const n = 200 + i;
+      gh.pulls[`${REPO}#${n}`] = pull(n, over(issueNo));
+      const r = await u.call('submit_work', { task_id: t.id, body: SUMMARY, sources: [prUrl(n)] });
+      expect(r.isError, label).toBe(false);
+      const row = await sub(r.data.submission_id);
+      expect(row.pr_mentions_issue, label).toBe(want);
+      expect(row.status).toBe('pending'); // the hint changes nothing about review
+    }
   });
 
   it('rejects a pull request closed without merging, and puts the task back in the pool', async () => {
@@ -436,15 +487,17 @@ describe('merge = accepted, closed = rejected', () => {
     expect((await sub(id)).status).toBe('pending');
   });
 
-  it('is idempotent: checking again after a merge writes nothing more', async () => {
+  it('is idempotent: checking again after a merge writes nothing more, and does not ask GitHub again', async () => {
     const { sub: id, pr } = await pending(1);
     gh.pulls[`${REPO}#${pr}`] = pull(pr, { state: 'closed', merged: true, merged_by: { login: 'm' } });
     await syncGithub(env);
-    const before = (await events('submission_accepted')).length;
+    const before = (await events('pr_merged')).length;
+    const calls = gh.calls.filter((c) => c.url.includes(`/pulls/${pr}`)).length;
     const again = await syncGithub(env);
     expect(again.merged).toBe(0);
-    expect((await events('submission_accepted')).length).toBe(before);
-    expect((await sub(id)).status).toBe('accepted');
+    expect((await events('pr_merged')).length).toBe(before);
+    expect(gh.calls.filter((c) => c.url.includes(`/pulls/${pr}`)).length).toBe(calls);
+    expect((await sub(id)).status).toBe('pending');
   });
 
   it('an admin review that already decided the submission is not overwritten by the sync', async () => {
@@ -465,21 +518,33 @@ describe('merge = accepted, closed = rejected', () => {
     expect((await sub(id)).status).toBe('pending');
   });
 
-  it('a merge is accepted even when the merge closed the issue and so closed nothing else', async () => {
+  it('a merge that closed the issue still waits for a reviewer', async () => {
     const { t, sub: id, pr } = await pending(1);
     gh.pulls[`${REPO}#${pr}`] = pull(pr, { state: 'closed', merged: true, merged_by: { login: 'm' } });
     gh.issues[REPO] = []; // "Fixes #1" closed the issue
     await syncGithub(env);
-    expect((await sub(id)).status).toBe('accepted');
-    expect((await tasks()).find((x) => x.id === t.id).status).toBe('accepted');
+    expect((await sub(id)).status).toBe('pending');
+    expect((await tasks()).find((x) => x.id === t.id).status).toBe('submitted');
   });
 
-  it('accepted units show on the board for Swarm AI', async () => {
-    const { pr } = await pending(1);
+  it('accepted units appear on the board for Swarm AI only after a person accepts', async () => {
+    const { sub: id, pr } = await pending(1);
     gh.pulls[`${REPO}#${pr}`] = pull(pr, { state: 'closed', merged: true, merged_by: { login: 'm' } });
     await syncGithub(env);
-    const stats = await (await send('/api/stats')).json();
-    expect(stats.projects.find((p) => p.id === 'swarm-ai').accepted_units).toBe(3);
+    const units = async () => (await (await send('/api/stats')).json()).projects.find((p) => p.id === 'swarm-ai').accepted_units;
+    expect(await units()).toBe(0);
+    expect((await review(id, 'accept', 'ok')).status).toBe(200);
+    expect(await units()).toBe(3);
+  });
+
+  it('closed without merging only removes the submitter\'s own pending submission, never accepts anything', async () => {
+    const a = await pending(1), b = await pending(2);
+    const accepted = (await events('submission_accepted')).length;
+    gh.pulls[`${REPO}#${a.pr}`] = pull(a.pr, { state: 'closed' });
+    await syncGithub(env);
+    expect((await sub(a.sub)).status).toBe('rejected');
+    expect((await sub(b.sub)).status).toBe('pending'); // another submission is untouched
+    expect((await events('submission_accepted')).length).toBe(accepted);
   });
 });
 
@@ -611,7 +676,7 @@ describe('webhook', () => {
     expect(await metaOf('sync_lock')).toBe('0');
   });
 
-  it('a pull_request event checks that pull request and accepts a merge, reading the state from the API (not the payload)', async () => {
+  it('a pull_request event checks that pull request and records a merge (it does not accept it), reading the state from the API (not the payload)', async () => {
     const t = await readyTask(1);
     gh.pulls[`${REPO}#5`] = pull(5);
     const u = await newUser();
@@ -621,8 +686,8 @@ describe('webhook', () => {
     // The payload LIES (says it is still open and not merged); the decision comes from the API.
     const r = await hook({ action: 'closed', number: 5, pull_request: { number: 5, merged: false, state: 'open' }, repository: { id: ID } }, { event: 'pull_request' });
     expect(r.status).toBe(202);
-    const s = await env.DB.prepare('SELECT status, reviewed_by FROM submissions WHERE id = ?1').bind(sres.data.submission_id).first();
-    expect(s).toEqual({ status: 'accepted', reviewed_by: 'GitHub merge by maint' });
+    const s = await env.DB.prepare('SELECT status, pr_state, reviewed_by FROM submissions WHERE id = ?1').bind(sres.data.submission_id).first();
+    expect(s).toEqual({ status: 'pending', pr_state: 'merged', reviewed_by: null });
   });
 
   it('rejects a bad signature, a wrong secret, a malformed header and a missing signature, and does nothing', async () => {

@@ -174,13 +174,30 @@ async function syncIssues(env, project, out) {
 
 const isMerged = (pr) => pr.merged === true || (typeof pr.merged_at === 'string' && pr.merged_at !== '');
 
-// Pending pull-request submissions of this project: merged is accepted, closed without a merge is rejected. This is the
-// maintainer's review, made on GitHub; it goes through the same transactional step as the admin review endpoint, so a stale
-// or repeated check changes nothing. The state is read from the GitHub API, never from a webhook payload.
+// Does this pull request's title or body name the task's issue? `#N`, or `owner/repo#N` for this repository. A reference to
+// another repository's issue, or to a different number, does not count. This is a HINT for the reviewer: a title and body are
+// editable by their author, so it is never proof that the pull request resolves the issue, and nothing acts on it.
+export function mentionsIssue(pr, repo, issueNumber) {
+  if (!Number.isInteger(issueNumber)) return null;
+  const text = `${typeof pr?.title === 'string' ? pr.title : ''}\n${typeof pr?.body === 'string' ? pr.body : ''}`.slice(0, 70000);
+  for (const m of text.matchAll(/(?<![\w.-])(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(\d{1,9})(?!\d)/g)) {
+    if (Number(m[2]) !== issueNumber) continue;
+    if (!m[1] || m[1].toLowerCase() === String(repo).toLowerCase()) return true;
+  }
+  return false;
+}
+
+// Pending pull-request submissions of this project. Closed without a merge is rejected: that only removes the submitter's own
+// pending submission (the task returns to the pool), and the submitter chose to hand that pull request in. A MERGE is NOT
+// acceptance: the merge only shows that somebody merged some pull request, not that it resolves this task's issue or that the
+// submitter wrote it. A merged pull request is recorded (pr_state = 'merged' and a `pr_merged` event) and the submission stays
+// pending, flagged "merged, needs reviewer confirmation" in the review queue; a person accepts it through the normal review.
+// The state is read from the GitHub API, never from a webhook payload.
 async function checkPrs(env, project, out, { number = null } = {}) {
   const { results } = await env.DB.prepare(
     `SELECT s.id, s.task, s.pr_number, s.pr_state FROM submissions s JOIN tasks t ON t.id = s.task
      WHERE t.project = ?1 AND s.status = 'pending' AND s.pr_number IS NOT NULL AND s.pr_repo_id = ?2 AND (?3 IS NULL OR s.pr_number = ?3)
+       AND COALESCE(s.pr_state, '') != 'merged'
      ORDER BY s.created, s.id LIMIT ${MAX_PR_CHECKS}`
   ).bind(project.id, project.repo_id, number).all();
   for (const s of results) {
@@ -193,12 +210,22 @@ async function checkPrs(env, project, out, { number = null } = {}) {
         if (s.pr_state !== 'open') await env.DB.prepare('UPDATE submissions SET pr_state = ?2 WHERE id = ?1').bind(s.id, 'open').run();
         continue;
       }
-      const login = safeLogin(pr.merged_by?.login);
-      const r = await reviewSubmission(env, merged
-        ? { id: s.id, task: s.task, verdict: 'accepted', reviewedBy: login ? `GitHub merge by ${login}` : 'GitHub merge', note: `Merged on GitHub: ${project.repo} pull request #${s.pr_number}.` }
-        : { id: s.id, task: s.task, verdict: 'rejected', reviewedBy: 'GitHub: PR closed', note: 'PR closed without merge' });
+      if (merged) {
+        // Record only. The state change and its event are one batch, and only the first caller writes the event.
+        const login = safeLogin(pr.merged_by?.login);
+        const res = await env.DB.batch([
+          env.DB.prepare("UPDATE submissions SET pr_state = 'merged' WHERE id = ?1 AND status = 'pending' AND COALESCE(pr_state, '') != 'merged'").bind(s.id),
+          env.DB.prepare(
+            `INSERT INTO events (ts, type, task, contributor, submission, actor, detail)
+             SELECT ?2, 'pr_merged', task, contributor, id, 'github', ?3 FROM submissions WHERE id = ?1 AND pr_state = 'merged' AND changes() > 0`
+          ).bind(s.id, Date.now(), JSON.stringify({ repo: project.repo, pr_number: s.pr_number, merged_by: login, note: 'Merged on GitHub. Not accepted: a reviewer must confirm it resolves the task.' })),
+        ]);
+        if (res[0].meta.changes) out.merged++;
+        continue;
+      }
+      const r = await reviewSubmission(env, { id: s.id, task: s.task, verdict: 'rejected', reviewedBy: 'GitHub: PR closed', note: 'PR closed without merge' });
       await env.DB.prepare('UPDATE submissions SET pr_state = ?2 WHERE id = ?1').bind(s.id, state).run();
-      if (r.ok) { if (merged) out.merged++; else out.rejected++; }
+      if (r.ok) out.rejected++;
     } catch (err) {
       if (err instanceof RateLimited) throw err;
       out.errors.push(`PR #${s.pr_number}: ${String(err.message).slice(0, 150)}`);
@@ -255,7 +282,7 @@ async function syncOne(env, opts) {
 // pull request's base repository), never by name alone: a name can be renamed, or reused by a different repository.
 export async function checkPrSubmission(env, taskId, sources) {
   const task = await env.DB.prepare(
-    "SELECT p.id AS project, p.repo, p.repo_id FROM tasks t JOIN projects p ON p.id = t.project WHERE t.id = ?1 AND p.kind = 'github'"
+    "SELECT p.id AS project, p.repo, p.repo_id, t.source_key FROM tasks t JOIN projects p ON p.id = t.project WHERE t.id = ?1 AND p.kind = 'github'"
   ).bind(taskId).first();
   if (!task) return null;
   const m = PR_URL_RE.exec(String(sources[0] ?? ''));
@@ -276,7 +303,10 @@ export async function checkPrSubmission(env, taskId, sources) {
   if (!author) throw new PrError('GitHub did not name the pull request author. Try again later.');
   const used = await env.DB.prepare("SELECT 1 FROM submissions WHERE pr_repo_id = ?1 AND pr_number = ?2 AND status IN ('pending','accepted')").bind(task.repo_id, number).first();
   if (used) throw new PrError('That pull request has already been handed in for a task.');
-  return { pr_number: number, pr_author: author, pr_state: 'open', pr_repo_id: task.repo_id };
+  // A hint for the reviewer only: whether the title or body names this task's issue.
+  const issue = Number(String(task.source_key ?? '').split(':')[2]);
+  const hint = mentionsIssue(pr, task.repo, issue);
+  return { pr_number: number, pr_author: author, pr_state: 'open', pr_repo_id: task.repo_id, pr_mentions_issue: hint === null ? null : hint ? 1 : 0 };
 }
 
 // ---------------------------------------------------------------- admin: register and activate
