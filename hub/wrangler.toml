@@ -1,0 +1,31 @@
+name = "swarm-ai"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+# Live only at swarm.bigpicsolutions.com (one origin).
+workers_dev = false
+routes = [{ pattern = "swarm.bigpicsolutions.com", custom_domain = true }]
+
+[assets]
+directory = "public"
+binding = "ASSETS"
+run_worker_first = ["/api/*", "/mcp"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "swarm-ai"
+database_id = "c678de31-f2dd-4329-b484-660a06caa864"
+
+# Hourly: pull tasks from Town Hall and expire stale claims.
+[triggers]
+crons = ["7 * * * *"]
+
+# Burst limit per network on every write (free; counters are per Cloudflare location).
+# Town Hall uses namespace 1002; Swarm uses 1003.
+[[ratelimits]]
+name = "LIMITER"
+namespace_id = "1003"
+simple = { limit = 60, period = 60 }
+
+# Secrets (wrangler secret put ...), never committed. Locally they live in .dev.vars (gitignored):
+#   ADMIN_TOKEN  long random string; Bearer token for /api/admin/* (anything else gets a 404)
+#   HASH_SALT    long random string; salts contributor-key hashes and the daily network hash
