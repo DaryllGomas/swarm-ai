@@ -53,8 +53,8 @@
     const metrics = el('div', null, 'ops-grid');
     Object.entries(o.counts).forEach(([label, n]) => { const m = el('div', null, 'ops-metric'); m.append(el('strong', n), el('span', label)); metrics.append(m); });
     host.append(metrics, el('p', `${o.pending_reviews} pending reviews · Oldest: ${age(o.oldest_review_age_ms)} · ${o.active_claims.length} active claims · ${o.expiring_claims.length} expire within 1 hour`));
-    const ids = new Set([...Object.keys(o.allocation.shares), ...Object.keys(o.routed_by_origin.public_routed), ...Object.keys(o.routed_by_origin.self_picked)]);
-    host.append(table(['Project', `Allocation (published ${o.allocation.week})`, 'Public routed units', 'Self-picked units'], [...ids].map((id) => [id, `${o.allocation.shares[id] ?? 0}%${o.allocation.provisional[id] ? ' · provisional' : ''}`, o.routed_by_origin.public_routed[id] || 0, o.routed_by_origin.self_picked[id] || 0])));
+    const ids = new Set([...Object.keys(o.allocation.shares), ...Object.keys(o.routed_by_origin.public_routed), ...Object.keys(o.routed_by_origin.self_picked), ...Object.keys(o.routed_by_origin.ballot_directed || {})]);
+    host.append(table(['Project', `Allocation (published ${o.allocation.week})`, 'Public routed units', 'Ballot-directed units', 'Self-picked units'], [...ids].map((id) => [id, `${o.allocation.shares[id] ?? 0}%${o.allocation.provisional[id] ? ' · provisional' : ''}`, o.routed_by_origin.public_routed[id] || 0, (o.routed_by_origin.ballot_directed || {})[id] || 0, o.routed_by_origin.self_picked[id] || 0])));
     host.append(el('p', o.routing_note, 'quiet'), el('p', `Last sync: ${date(o.sync.last_sync)}`), el('p', `Last sync error: ${o.sync.last_sync_error || 'none'}`, 'ops-text'));
     if (o.active_claims.length) host.append(table(['Claim', 'Task', 'Contributor', 'Project', 'Expires'], o.active_claims.map((c) => [c.id, c.task, c.handle, c.project, `${date(c.expires_at)}${c.expiring ? ' · expiring' : ''}`])));
   }

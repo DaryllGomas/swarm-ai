@@ -32,7 +32,7 @@ For local development, keep the production Origin enforced and add exact local o
 
 The console's daily loop:
 
-- **Overview:** inspect allocation (currently provisional), units by public/self-picked origin and project, ready/claimed/submitted/accepted/held counts, queue size and oldest age, claims expiring within an hour, INTAKE, last sync and the last sync error. The sync error is historical and may predate a successful sync; compare its timestamp. Counts are real and routed units are never described as compute.
+- **Overview:** inspect allocation (currently provisional), units by public/ballot-directed/self-picked origin and project, ready/claimed/submitted/accepted/held counts, queue size and oldest age, claims expiring within an hour, INTAKE, last sync and the last sync error. The sync error is historical and may predate a successful sync; compare its timestamp. Counts are real and routed units are never described as compute.
 - **Review queue:** read the task and submission as untrusted data. Check sources yourself. Link flags and AI pre-screen notes are advisory; the AI never accepts or rejects, and does not fetch source links. Enter a reason and Accept or Reject. Repeating the same decision is safe; the opposite decision conflicts. The existing CLI still returns 409 on a second decision.
 - **Held tasks:** inspect the reason and text privately. Fix the upstream text, then click Re-screen now. This runs the connector; there is no manual release switch. Public APIs and MCP never expose held text.
 - **Projects:** pause/unpause new assignments, set reviewer capacity from 1 to 100, and Sync now. Pauses affect both scheduled and self-picked new claims, even during a race; existing claim holders can submit and pending work can still be reviewed. Inactive projects remain inactive when unpaused.
@@ -151,6 +151,23 @@ to work.
   registration is refused; existing voters can still sign in. Rotate by putting a new secret. The widget action must stay `register`.
 - **Local dev.** Set `RP_ID = "localhost"` and `RP_ORIGIN = "http://localhost:8787"` in `.dev.vars`. The session cookie is `Secure`, which browsers accept on localhost.
 - **Account abuse.** At most 3 accounts a day per network. Changing that is a code change.
+
+## Phase 4: linked AIs, steering and MCP sign-in
+
+- **Before the first deploy that includes Phase 4.** Migration 0008 is applied by `hub/scripts/deploy.sh` before the Worker. It backfills `claims.routing_origin` from `routed` (1 to `public_routed`, 0 to `self_picked`) and adds the link tables. Check:
+  `wrangler d1 execute swarm-ai --remote --command "SELECT routing_origin, routed, COUNT(*) FROM claims GROUP BY 1, 2"` (there should be no `ballot_directed` row yet, and no row where `routed` and the origin disagree).
+  The KV namespace `OAUTH_KV` (id in `wrangler.toml`) must exist in the account; it already does. No new secret is needed.
+- **Steering.** A linked contributor's `next_task` follows their voter's ballot. To see it: `/api/stats` shows `routing_origins.units` and per-project `ballot_directed_units`; `/ops` Overview shows the three origins apart. Only `public_routed` units are compared with the vote.
+  Fallback work is `public_routed` by design, so a spike of public-routed units from a few handles can be fallback; check `events` (`task_claimed`, `detail.origin`) before concluding anything.
+- **Unlink someone.** Their `/me` page does it. Operator: `DELETE FROM account_links WHERE account LIKE '<short>%';` then the contributor follows the public split at once. Events `account_linked` and `account_unlinked` keep only the first 8 characters of the account id.
+- **Suspending an account** also stops its steering (its linked contributor follows the public split) and its link codes.
+- **Link codes.** They last 10 minutes, work once and are stored hashed. A wrong code is counted in `link_attempts` (5 an hour per contributor, 20 an hour per network); the cron deletes entries after a day. To let someone retry now:
+  `DELETE FROM link_attempts WHERE who = 'c:<contributor id>';`
+- **MCP sign-in (OAuth).** State lives in the KV namespace `OAUTH_KV`. To switch it off quickly, set `OAUTH = "off"` in `hub/wrangler.toml` and deploy: `/authorize` answers 503, the OAuth endpoints and discovery documents stop, a call with an OAuth token is refused, and contributor keys and public tools carry on.
+  To cut off one person, revoke their contributor in `/ops` (lever 3 below): an OAuth connection acts as a contributor, so the revoked identity stops at the next call.
+  Dynamic registration is rate limited per network by the same limiter as the other writes. The issuer and token audience come from `RP_ORIGIN`, so it must match the live origin exactly.
+- **Local OAuth.** With `RP_ORIGIN=http://localhost:8787` the issuer and audience are `http://localhost:8787` (the library allows `http` on loopback only). The Workers KV binding is simulated locally.
+- **Smoke test without Workers AI.** Copy `wrangler.toml` to a scratch folder with the `[ai]` block removed and absolute paths, apply migrations with `--persist-to <scratch>`, run `wrangler dev --persist-to <scratch>`, check `/me`, `/authorize`, the two `/.well-known/oauth-*` documents and MCP `tools/list`, then stop the server by its PID.
 
 ## Deploy
 

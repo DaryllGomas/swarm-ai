@@ -1,6 +1,6 @@
 import { verifyAccess } from './access.js';
 import { adminHeld, adminPending, adminReview } from './admin.js';
-import { currentAllocation, expireClaims, STANDING, unitsByProject } from './core.js';
+import { currentAllocation, expireClaims, originUnitsByProject, STANDING } from './core.js';
 import { ipHashFor, json, readJsonResult, sha256, underRateLimit, weekOf } from './lib.js';
 import { syncTasks, UNTRUSTED } from './sync.js';
 
@@ -45,8 +45,8 @@ export async function handleOps(req, env, url) {
 async function overview(env) {
   await expireClaims(env);
   const now = Date.now(), week = weekOf(now);
-  const [allocation, routed, selfPicked, counts, pending, claims, meta] = await Promise.all([
-    currentAllocation(env), unitsByProject(env, week, 1, STANDING), unitsByProject(env, week, 0, STANDING),
+  const [allocation, routed, selfPicked, ballotDirected, counts, pending, claims, meta] = await Promise.all([
+    currentAllocation(env), originUnitsByProject(env, week, 'public_routed', STANDING), originUnitsByProject(env, week, 'self_picked', STANDING), originUnitsByProject(env, week, 'ballot_directed', STANDING),
     env.DB.prepare('SELECT status, COUNT(*) AS n FROM tasks GROUP BY status').all(),
     env.DB.prepare("SELECT COUNT(*) AS n, MIN(created) AS oldest FROM submissions WHERE status = 'pending'").first(),
     env.DB.prepare(`SELECT c.id, c.task, c.contributor, u.handle, t.project, c.expires_at,
@@ -55,8 +55,8 @@ async function overview(env) {
       WHERE c.outcome IS NULL AND c.expires_at > ?1 ORDER BY c.expires_at, c.id`).bind(now, now + 3600000).all(),
     env.DB.prepare("SELECT k, v FROM meta WHERE k IN ('last_sync', 'last_sync_error')").all(),
   ]);
-  return json({ week, allocation, routed_by_origin: { public_routed: routed, self_picked: selfPicked, ballot_directed: {} },
-    routing_note: 'Units handed out, not compute. Ballot-directed routing is planned.',
+  return json({ week, allocation, routed_by_origin: { public_routed: routed, self_picked: selfPicked, ballot_directed: ballotDirected },
+    routing_note: 'Units handed out, not compute. Only public_routed is compared with the allocation.',
     counts: { ready: 0, claimed: 0, submitted: 0, accepted: 0, held: 0, ...Object.fromEntries(counts.results.map((r) => [r.status, r.n])) },
     pending_reviews: pending.n, oldest_review_age_ms: pending.oldest === null ? null : Math.max(0, now - pending.oldest),
     active_claims: claims.results, expiring_claims: claims.results.filter((c) => c.expiring),

@@ -104,6 +104,8 @@ const BAD = {
   next_task: [{ contributor_key: 5 }, { contributor_key: null }, { contributor_key: 'x'.repeat(65) }, { contributor_key: {} }, { extra: 1 }, { id: 3 }],
   claim_task: [{}, { id: '3' }, { id: null }, { id: 0 }, { id: 2.5 }, { id: [3] }, { id: 3, contributor_key: 7 }, { id: 3, extra: 1 }],
   release_task: [{}, { id: '3' }, { id: null }, { id: 0 }, { id: 2.5 }, { id: [3] }, { id: 3, contributor_key: [] }, { id: 3, extra: 1 }],
+  my_week: [{ contributor_key: 5 }, { contributor_key: [] }, { contributor_key: null }, { extra: 1 }, { code: 'SWARM-ABCD-2345' }],
+  link_account: [{}, { code: 5 }, { code: null }, { code: [] }, { code: '' }, { code: 'x'.repeat(25) }, { code: 'SWARM-ABCD-2345', extra: 1 }, { code: 'SWARM-ABCD-2345', contributor_key: 7 }],
   my_work: [{ contributor_key: 5 }, { contributor_key: [] }, { contributor_key: null }, { extra: 1 }, { id: 1 }],
   submit_work: [
     {}, { task_id: 1, body: BODY }, { task_id: 1, sources: [SOURCE] }, { body: BODY, sources: [SOURCE] },

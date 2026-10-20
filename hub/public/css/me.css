@@ -1,0 +1,36 @@
+/* Your Swarm (/me) and the sign-in consent page (/authorize). Same design tokens as the rest of the site. */
+.me-page .page-head { max-width: 1000px; }
+.me-page code, .authorize code { font-family: 'JetBrains Mono', monospace; }
+.me-page .sec-row { display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap; }
+.me-page table.perm th, .me-page table.perm td { text-align: right; }
+.me-page table.perm th:first-child, .me-page table.perm td:first-child { text-align: left; }
+.me-page .origin-name { font-weight: 600; }
+.me-page .num small { display: block; color: #6a6f80; font-size: .7rem; }
+.me-page .origin-note { color: #3d4152; font-size: .82rem; margin: .4rem 0 0; }
+.me-page .code-box { margin: 1rem 0; padding: 1rem 1.2rem; border: 1px dashed #b9a98a; border-radius: 10px; background: #fff8ea; }
+.me-page .code { font-family: 'JetBrains Mono', monospace; font-size: 1.5rem; letter-spacing: .06em; color: #151a2c; }
+.me-page .say-line { font-style: italic; }
+.me-page .bar-line { display: grid; grid-template-columns: minmax(8rem, 14rem) 1fr auto; gap: .6rem 1rem; align-items: center; padding: .35rem 0; }
+.me-page .bar-line .track { height: 9px; border-radius: 6px; background: #e8dcc5; overflow: hidden; }
+.me-page .bar-line .track i { display: block; height: 100%; background: #f2605f; }
+.me-page .bar-line .track i.dir { background: #4aa8ff; }
+.me-page .receipts { list-style: none; margin: 0; padding: 0; }
+.me-page .receipts li { padding: .6rem 0; border-top: 1px solid #eadfc9; }
+.me-page .receipts li:first-child { border-top: 0; }
+.me-page .receipts small { display: block; color: #6a6f80; }
+.me-page .toggle { display: flex; gap: .6rem; align-items: flex-start; font-size: .95rem; }
+.me-page .toggle input { margin-top: .25rem; width: 1.1rem; height: 1.1rem; accent-color: #f2605f; }
+.me-page h3 { margin-top: 1.4rem; }
+.authorize { max-width: 760px; margin: 0 auto; padding-bottom: 4rem; }
+.authorize .panel-card { margin: 1rem 0; }
+.authorize .choice { display: block; border: 1px solid #d6c8ac; border-radius: 10px; padding: .9rem 1.1rem; margin: .7rem 0; cursor: pointer; background: #fffdf8; }
+.authorize .choice input[type=radio] { margin-right: .6rem; accent-color: #f2605f; }
+.authorize .choice strong { color: #151a2c; }
+.authorize .choice p { margin: .3rem 0 0 1.6rem; }
+.authorize .choice input[type=text] { margin: .5rem 0 0 1.6rem; padding: .5rem; border: 1px solid #aaa; border-radius: 6px; min-width: 14rem; font-family: 'JetBrains Mono', monospace; }
+.authorize .scope { display: flex; gap: .6rem; margin: .5rem 0; color: #1a2033; }
+.authorize .scope input { margin-top: .3rem; accent-color: #f2605f; }
+.authorize .scope small { display: block; color: #4a5064; }
+.authorize .warn { border-left: 4px solid #f2605f; padding: .5rem .9rem; background: #fff1ee; color: #5a1d17; }
+.authorize .actions { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1.2rem; }
+@media (max-width: 640px) { .me-page .bar-line { grid-template-columns: 1fr; } }

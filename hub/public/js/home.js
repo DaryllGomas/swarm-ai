@@ -85,6 +85,8 @@
       S.flow($('flow-host'), list, { lite: true, onSelect: (id) => { window.location.href = '/live.html#' + id; } });
       $('board-note').textContent = stats.allocation_note || 'Voted allocation from the weekly ballot snapshot. Routed and accepted measures show real work separately.';
       board(list);
+      const u = stats.routing_origins && stats.routing_origins.units;
+      if (u) $('origins-line').textContent = 'Work this week, in units: ' + S.n0(u.public_routed) + ' public-routed (the only kind compared with the vote) · ' + S.n0(u.ballot_directed) + ' ballot-directed · ' + S.n0(u.self_picked) + ' self-picked.';
       donut(list);
       const real = S.renderReceipts($('receipts-host'), rec, { limit: 4 });
       $('rec-pill').textContent = real ? 'Live' : 'None yet';

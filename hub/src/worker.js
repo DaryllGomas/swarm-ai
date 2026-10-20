@@ -1,6 +1,8 @@
 // Swarm AI hub: static site (public/ via ASSETS) + MCP at /mcp + JSON API at /api/* + D1.
 // Swarm never publishes into a project; submissions wait for a person to review them.
 import { handleAccount } from './accounts.js';
+import { handleMe } from './me.js';
+import { handleAuthorize, oauthEnabled, providerFor } from './oauth.js';
 import { handleVoting, publishSnapshot } from './voting.js';
 import { expireClaims, weekStats } from './core.js';
 import { adminActivateProject, adminRegisterGithub, handleGithubWebhook } from './github.js';
@@ -11,31 +13,64 @@ import { adminHeld, adminPending, adminReview, adminSubmission, adminPublished }
 import { handleOps } from './ops.js';
 import { normalizeClient, setupGuide } from './setup.js';
 
+// Requests the OAuth provider owns: discovery metadata, registration, the token endpoint, /authorize (through its default
+// handler) and /mcp when it carries an OAuth access token. A request with no Authorization header, or a Swarm contributor key
+// (swk_...), never goes through the provider, so public tools and existing keys work exactly as before.
+function isOAuthRoute(req, url) {
+  const p = url.pathname;
+  if (p === '/authorize' || p.startsWith('/oauth/') || p.startsWith('/.well-known/oauth-')) return true;
+  if (p === '/mcp' || p.startsWith('/mcp/')) return /^Bearer\s+(?!swk_)\S/i.test(req.headers.get('Authorization') || '');
+  return false;
+}
+
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
-    try {
-      if (url.pathname.startsWith('/ops') || url.pathname === '/api/ops' || url.pathname.startsWith('/api/ops/')) return await handleOps(req, env, url);
-      if (url.pathname === '/mcp') return await handleMcp(req, env, ctx);
-      if (url.pathname === '/setup' || url.pathname === '/llms.txt') return setupText(req, url);
-      if (url.pathname.startsWith('/api/')) return await api(req, env, ctx, url);
-    } catch (err) {
-      console.error(err);
-      return json({ error: 'Something went wrong. Try again in a moment.' }, 500);
+    if (oauthEnabled(env) && isOAuthRoute(req, url)) {
+      try {
+        // Registration and token calls are open to the internet: one burst limit per network, like every other write.
+        if (url.pathname.startsWith('/oauth/') && req.method === 'POST' && !(await underRateLimit(env, await ipHashFor(env, req)))) return json({ error: 'Slow down.' }, 429);
+        return await providerFor(env, (r, e, c) => handleMcp(r, e, c), (r, e, c) => app(r, e, c)).fetch(req, env, ctx);
+      } catch (err) {
+        console.error(err);
+        return json({ error: 'Something went wrong. Try again in a moment.' }, 500);
+      }
     }
-    return env.ASSETS.fetch(req);
+    return app(req, env, ctx);
   },
 
   // Hourly: free up expired claims and pull fresh tasks from Town Hall.
   async scheduled(_event, env, ctx) {
     ctx.waitUntil((async () => {
       await publishSnapshot(env);
-      await env.DB.batch([env.DB.prepare('DELETE FROM sessions WHERE expires <= ?1').bind(Date.now()), env.DB.prepare('DELETE FROM account_challenges WHERE expires <= ?1').bind(Date.now())]);
+      const now = Date.now();
+      await env.DB.batch([
+        env.DB.prepare('DELETE FROM sessions WHERE expires <= ?1').bind(now),
+        env.DB.prepare('DELETE FROM account_challenges WHERE expires <= ?1').bind(now),
+        env.DB.prepare('DELETE FROM link_codes WHERE expires <= ?1').bind(now),
+        env.DB.prepare('DELETE FROM link_attempts WHERE ts <= ?1').bind(now - 86400000),
+      ]);
       await expireClaims(env);
       await syncTasks(env, { force: true });
     })());
   },
 };
+
+// Everything the Worker serves itself; anything else is a static file from the site.
+async function app(req, env, ctx) {
+  const url = new URL(req.url);
+  try {
+    if (url.pathname.startsWith('/ops') || url.pathname === '/api/ops' || url.pathname.startsWith('/api/ops/')) return await handleOps(req, env, url);
+    if (url.pathname === '/mcp') return await handleMcp(req, env, ctx);
+    if (url.pathname === '/authorize') return await handleAuthorize(req, env);
+    if (url.pathname === '/setup' || url.pathname === '/llms.txt') return setupText(req, url);
+    if (url.pathname.startsWith('/api/')) return await api(req, env, ctx, url);
+  } catch (err) {
+    console.error(err);
+    return json({ error: 'Something went wrong. Try again in a moment.' }, 500);
+  }
+  return env.ASSETS.fetch(req);
+}
 
 // The plain-text set-up guide for AI agents. /llms.txt is the same text; ?client=claude-code (and friends) tailors it.
 function setupText(req, url) {
@@ -49,6 +84,7 @@ function setupText(req, url) {
 async function api(req, env, ctx, url) {
   const path = url.pathname;
   if (path.startsWith('/api/account/')) return handleAccount(req, env, path);
+  if (path === '/api/me' || path.startsWith('/api/me/')) return handleMe(req, env, path);
   if (path === '/api/ballot' || path.startsWith('/api/vote/')) return handleVoting(req, env, path);
   if (path === '/api/github/webhook') return handleGithubWebhook(req, env, ctx); // 404 until GITHUB_WEBHOOK_SECRET is set
   if (path.startsWith('/api/admin/')) {

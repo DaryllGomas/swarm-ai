@@ -121,6 +121,22 @@ export async function unitsByProject(env, week, routed, filter) {
   const { results } = await env.DB.prepare(sql).bind(week, routed).all();
   return Object.fromEntries(results.map((r) => [r.project, r.units]));
 }
+
+// The three routing origins of a claim. Only public_routed is compared with the published public allocation; claims.routed
+// is 1 exactly for it (migration 0008 keeps the two in step).
+export const ORIGINS = ['public_routed', 'ballot_directed', 'self_picked'];
+export const isRouted = (origin) => (origin === 'public_routed' ? 1 : 0);
+
+// Like unitsByProject, but by routing origin, and optionally for one contributor (the steering of one ballot looks only at
+// that contributor's own ballot-directed units).
+export async function originUnitsByProject(env, week, origin, filter, contributor = null) {
+  const sql = `SELECT t.project AS project, SUM(t.units) AS units FROM (
+      SELECT DISTINCT c.task AS task, c.contributor AS contributor FROM claims c
+      WHERE c.week = ?1 AND c.routing_origin = ?2 AND (?3 IS NULL OR c.contributor = ?3) AND ${filter}) d
+    JOIN tasks t ON t.id = d.task GROUP BY t.project`;
+  const { results } = await env.DB.prepare(sql).bind(week, origin, contributor).all();
+  return Object.fromEntries(results.map((r) => [r.project, r.units]));
+}
 export const STANDING = "(c.outcome IS NULL OR c.outcome = 'submitted')";
 // Released or expired claims, unless the same contributor later got that task standing in the same week (then it counts once, as standing).
 export const LOST = `c.outcome IN ('released','expired') AND NOT EXISTS (
@@ -131,11 +147,12 @@ export async function weekStats(env, now = Date.now()) {
   const week = weekOf(now);
   const start = weekStartMs(now);
   const end = start + 7 * 86400000;
-  const [alloc, projects, routed, selfDirected, lost, accepted, acceptedAll, open, pending, active, totals] = await Promise.all([
+  const [alloc, projects, routed, selfDirected, ballotDirected, lost, accepted, acceptedAll, open, pending, active, totals] = await Promise.all([
     currentAllocation(env, now),
     env.DB.prepare('SELECT id, name, kind, summary, url, reviewer, sponsored, active, paused, max_pending FROM projects WHERE active = 1 ORDER BY name').all(),
     unitsByProject(env, week, 1, STANDING),
-    unitsByProject(env, week, 0, STANDING),
+    originUnitsByProject(env, week, 'self_picked', STANDING),
+    originUnitsByProject(env, week, 'ballot_directed', STANDING),
     unitsByProject(env, week, 1, LOST),
     env.DB.prepare(`SELECT t.project AS project, SUM(t.units) AS units FROM submissions s JOIN tasks t ON t.id = s.task
                     WHERE s.status = 'accepted' AND s.reviewed_at >= ?1 AND s.reviewed_at < ?2 GROUP BY t.project`).bind(start, end).all(),
@@ -152,7 +169,8 @@ export async function weekStats(env, now = Date.now()) {
   ]);
   const by = (r) => Object.fromEntries(r.results.map((x) => [x.project, x.units ?? x.n]));
   const acc = by(accepted), accAll = by(acceptedAll), openBy = by(open), pendBy = by(pending), actBy = by(active);
-  const totalRouted = Object.values(routed).reduce((a, b) => a + b, 0);
+  const sum = (m) => Object.values(m).reduce((a, b) => a + b, 0);
+  const totalRouted = sum(routed);
 
   const list = projects.results.map((p) => {
     const share = alloc.shares[p.id] ?? 0;
@@ -174,6 +192,7 @@ export async function weekStats(env, now = Date.now()) {
       routed_units: r,
       routed_share: Math.round(routedShare * 10) / 10,
       self_directed_units: selfDirected[p.id] || 0,
+      ballot_directed_units: ballotDirected[p.id] || 0,
       routed_released_or_expired_units: lost[p.id] || 0,
       accepted_units: acc[p.id] || 0,
       accepted_units_all_time: accAll[p.id] || 0,
@@ -187,7 +206,11 @@ export async function weekStats(env, now = Date.now()) {
   return {
     week, week_start: new Date(start).toISOString(), updated: new Date(now).toISOString(),
     allocation_week: alloc.week, allocation_note: list.some((p) => p.allocation.provisional) ? PROVISIONAL_NOTE : null,
-    routed_note: 'Routed = acknowledged assignments weighted by work units; not compute consumed.',
+    routed_note: 'Routed = acknowledged assignments weighted by work units; not compute consumed. Only public-routed units are compared with the public allocation.',
+    routing_origins: {
+      units: { public_routed: sum(routed), ballot_directed: sum(ballotDirected), self_picked: sum(selfDirected) },
+      note: 'Public-routed: handed out by the public allocation (the only origin compared with the vote). Ballot-directed: handed out by a signed-in voter\'s own ballot to their linked AI. Self-picked: chosen by the contributor with claim_task. Units, not compute; the three are never added together.',
+    },
     projects: list,
     totals: { contributors: totals[0].results[0].n, submissions: totals[1].results[0].n, accepted: totals[2].results[0].n },
   };

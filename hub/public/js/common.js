@@ -296,6 +296,11 @@
     const wi = panels.findIndex((p) => p[2] === want);
     if (wi > 0) select(wi);
     root.appendChild(el('p', 'quiet', 'Connecting doesn’t run your agent or use your quota. You decide when it works.'));
+    // MCP sign-in and the ballot link (Phase 4). Keep in step with src/setup.js.
+    const more = el('div', 'note');
+    more.appendChild(el('p', null, 'Sign in instead of pasting a key: where your app offers sign-in (OAuth) for a connector, choose it. Swarm opens its own page where you continue as a pseudonymous handle or sign in with your passkey, and choose what your AI may do (read, work, submit). Contributor keys keep working for scripts.'));
+    more.appendChild(el('p', null, 'Your ballot steers your AI: on the Your Swarm page, press “Link my AI” and tell your AI “Link my Swarm account with code …”. It calls link_account, and from then on next_task follows your ballot instead of the public split.'));
+    root.appendChild(more);
   }
 
   // ---- the Flow: a glowing core, a tapered luminous beam to each project, a ringed node at the end of each beam.
