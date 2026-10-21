@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { env } from 'cloudflare:workers';
 import { addTask, newUser, resetDb, send, tool } from './helpers.js';
 import { SECURITY_TXT_EXPIRES, TRANSPARENCY_AS_OF, TRANSPARENCY_STALE_DAYS, fillTransparency, longDate, securityTxt, transparencyAgeDays, transparencyStatement, versionInfo, VERSION_NOTE } from '../src/trust.js';
-import privacyHtml from '../public/privacy.html?raw';
+import privacyHtml from '../public/privacy-details.html?raw';
 import transparencyHtml from '../public/transparency.html?raw';
 import securityHtml from '../public/security.html?raw';
 import voteHtml from '../public/vote.html?raw';

@@ -209,7 +209,7 @@ describe('finding C: the 5-person gate counts accounts that own contributors, no
 describe('review 6: pages and docs match the code', () => {
   const strip = (html) => html.replace(/<script[\s\S]*?<\/script>/g, ' ').replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ');
   const load = async () => ({
-    privacy: strip((await import('../public/privacy.html?raw')).default), security: strip((await import('../public/security.html?raw')).default),
+    privacy: strip((await import('../public/privacy-details.html?raw')).default), security: strip((await import('../public/security.html?raw')).default),
     transparency: strip((await import('../public/transparency.html?raw')).default), live: strip((await import('../public/live.html?raw')).default),
     policy: (await import('../../docs/DATA-POLICY.md?raw')).default, arch: (await import('../../docs/ARCHITECTURE.md?raw')).default, run: (await import('../../docs/RUNBOOK.md?raw')).default,
   });

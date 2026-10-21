@@ -181,7 +181,7 @@ describe('finding 3: the operator console', () => {
   it('the database still holds the events (the console just does not show the relationship): direct database access is outside the boundary and the docs say so', async () => {
     const w = await world();
     expect((await one("SELECT COUNT(*) AS n FROM events WHERE type = 'task_claimed' AND contributor = ?1", w.bdId)).n).toBeGreaterThan(0);
-    const policy = (await import('../../docs/DATA-POLICY.md?raw')).default, privacy = (await import('../public/privacy.html?raw')).default;
+    const policy = (await import('../../docs/DATA-POLICY.md?raw')).default, privacy = (await import('../public/privacy-details.html?raw')).default;
     expect(policy).toMatch(/direct (database|D1) access is outside this boundary/i);
     expect(privacy.replace(/<[^>]+>/g, ' ')).toMatch(/direct database access is outside/i);
   });
@@ -459,7 +459,7 @@ describe('finding 8: deleting an account deletes its OAuth grants and tokens', (
   });
 
   it('the policy lists OAuth KV, its lifetimes, and says OAuth stays off until the blockers are closed', async () => {
-    const policy = (await import('../../docs/DATA-POLICY.md?raw')).default, privacy = (await import('../public/privacy.html?raw')).default;
+    const policy = (await import('../../docs/DATA-POLICY.md?raw')).default, privacy = (await import('../public/privacy-details.html?raw')).default;
     expect(policy).toMatch(/OAUTH_KV/); expect(policy).toMatch(/30 days/); expect(policy).toMatch(/blocker/i);
     const page = privacy.replace(/<[^>]+>/g, ' ');
     expect(page).toMatch(/Cloudflare KV, outside the main database/); expect(page).toMatch(/30 days for a refresh token/); expect(page).toMatch(/OAuth sign-in is switched off today/);
@@ -505,7 +505,7 @@ describe('finding 10: /version says what it is', () => {
 
 // ---------------------------------------------------------------- finding 11: wording follows the code
 describe('finding 11: the privacy wording matches what the code does', () => {
-  const page = async () => (await import('../public/privacy.html?raw')).default.replace(/<[^>]+>/g, ' ').replace(/&lt;/g, '<').replace(/&#39;|&rsquo;/g, "'").replace(/\s+/g, ' ');
+  const page = async () => (await import('../public/privacy-details.html?raw')).default.replace(/<[^>]+>/g, ' ').replace(/&lt;/g, '<').replace(/&#39;|&rsquo;/g, "'").replace(/\s+/g, ' ');
 
   it('a retained daily key resolves a candidate address to an unlinked voter and contributor, so the page says codes are searchable while the key exists', async () => {
     const ip = '203.0.113.201';
@@ -550,7 +550,7 @@ describe('finding 11: the privacy wording matches what the code does', () => {
     for (const re of [/Google sees font requests/, /Anonymous credit does not sever the pull request, the sources or a publication link/, /Live work is observable over time/, /Someone who controls most voters can infer the rest/,
       /malicious or compelled operator could also start collecting more/, /not proof of what runs/, /The threat boundary/, /What "fewer than 5" \(k = 5\), noise and weekly releases do/, /52 weekly releases add up to 52 in the worst case/, /not a formal differential-privacy guarantee/,
       /Direct database access\./, /D1 Time Travel/, /Anything already copied/, /cannot undo a copy that someone else already took/, /Anyone can check whether a handle exists/, /deleting your account is not|does not erase your work/i]) expect(text, String(re)).toMatch(re);
-    const html = (await import('../public/privacy.html?raw')).default;
+    const html = (await import('../public/privacy-details.html?raw')).default;
     expect(html).toContain('fonts.googleapis.com');   // the disclosure matches what the page does
   });
 
@@ -572,7 +572,7 @@ describe('finding 12: pairing is an existence oracle for handles, and that is di
     expect(free.isError).toBe(false);                                   // so existence is observable: the oracle is real
   });
   it('the page, the policy, the tool text and the runbook all say so, and tell agents to leave the handle out', async () => {
-    const page = (await import('../public/privacy.html?raw')).default.replace(/<[^>]+>/g, ' ');
+    const page = (await import('../public/privacy-details.html?raw')).default.replace(/<[^>]+>/g, ' ');
     expect(page).toMatch(/Anyone can check whether a handle exists/); expect(page).toMatch(/Leave the handle out when you pair/);
     const policy = (await import('../../docs/DATA-POLICY.md?raw')).default;
     expect(policy).toMatch(/existence oracle/); expect(policy).toMatch(/planned, not built/);
