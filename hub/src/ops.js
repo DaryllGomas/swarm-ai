@@ -1,7 +1,6 @@
 import { verifyAccess } from './access.js';
 import { adminHeld, adminPending, adminReview } from './admin.js';
-import { currentAllocation, expireClaims, originUnitsByProject, STANDING } from './core.js';
-import { coarseCount } from './privacy.js';
+import { currentAllocation, expireClaims } from './core.js';
 import { ipHashFor, json, readJsonResult, sha256, underRateLimit, weekOf } from './lib.js';
 import { syncTasks, UNTRUSTED } from './sync.js';
 
@@ -45,15 +44,15 @@ export async function handleOps(req, env, url) {
   return json(await syncTasks(env, { force: true }));
 }
 
-// The operator console shows work, never who steered it. Per-person routing origin (ballot-directed or self-picked) is not shown here at
-// all, live or by name: active claims carry no contributor, events about claims and links carry no contributor, handle or origin, and the
-// only origin figure is the closed-week release that is also public (noised, only from 5 people). Direct database access is outside this
-// boundary (docs/DATA-POLICY.md).
+// The operator console shows work, never how it was routed. Public routing, a ballot's steering and a self-pick look the same here: there is
+// no origin figure at all (live or weekly), active claims carry no contributor, and events about claims and links carry no contributor,
+// handle or origin. The database still holds the origin for the scheduler, and direct database access is outside this boundary
+// (docs/DATA-POLICY.md).
 async function overview(env) {
   await expireClaims(env);
-  const now = Date.now(), week = weekOf(now);
-  const [allocation, routed, counts, pending, claims, meta, closed] = await Promise.all([
-    currentAllocation(env), originUnitsByProject(env, week, 'public_routed', STANDING),
+  const now = Date.now();
+  const [allocation, counts, pending, claims, meta] = await Promise.all([
+    currentAllocation(env),
     env.DB.prepare('SELECT status, COUNT(*) AS n FROM tasks GROUP BY status').all(),
     env.DB.prepare("SELECT COUNT(*) AS n, MIN(created) AS oldest FROM submissions WHERE status = 'pending'").first(),
     env.DB.prepare(`SELECT c.id, c.task, t.project, c.expires_at,
@@ -61,11 +60,9 @@ async function overview(env) {
       FROM claims c JOIN tasks t ON t.id = c.task
       WHERE c.outcome IS NULL AND c.expires_at > ?1 ORDER BY c.expires_at, c.id`).bind(now, now + 3600000).all(),
     env.DB.prepare("SELECT k, v FROM meta WHERE k IN ('last_sync', 'last_sync_error')").all(),
-    env.DB.prepare('SELECT week, personal_direction_units, people_floor FROM weekly_release ORDER BY week DESC LIMIT 1').first(),
   ]);
-  return json({ week, allocation, routed_by_origin: { public_routed: routed },
-    routing_note: 'Units handed out, not compute. Only public_routed is compared with the allocation. Ballot-directed and self-picked work is not shown here: for a closed week only, the weekly release (noised, at least 5 people) is below.',
-    closed_week_release: closed ? { week: closed.week, personal_direction_units: closed.personal_direction_units, people: coarseCount(closed.people_floor) } : null,
+  return json({ week: weekOf(now), allocation,
+    routing_note: 'No routing figures are shown: units handed out are published once a week for the closed week, every route added together (/api/analytics). This console does not show how any task was routed either.',
     counts: { ready: 0, claimed: 0, submitted: 0, accepted: 0, held: 0, ...Object.fromEntries(counts.results.map((r) => [r.status, r.n])) },
     pending_reviews: pending.n, oldest_review_age_ms: pending.oldest === null ? null : Math.max(0, now - pending.oldest),
     active_claims: claims.results, expiring_claims: claims.results.filter((c) => c.expiring),

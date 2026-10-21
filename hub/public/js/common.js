@@ -86,7 +86,6 @@
       const m = META.find((x) => x.id === l.id) || Object.assign({ id: l.id, name: l.name, focus: l.summary, icon: KIND_ICON[l.kind] || 'file' }, FALLBACK[extra++ % FALLBACK.length]);
       return Object.assign({}, m, {
         voted: l.allocation.share, provisional: !!l.allocation.provisional,
-        routed: l.routed_share, routedUnits: l.routed_units,
         accepted: l.accepted_units, open: l.open_tasks, live: l,
       });
     });
@@ -319,9 +318,9 @@
     const c = 'M' + A.x.toFixed(1) + ',' + A.y.toFixed(1) + ' Q' + m.x.toFixed(1) + ',' + m.y.toFixed(1) + ' ' + B.x.toFixed(1) + ',' + B.y.toFixed(1);
     return { d, c, A, B };
   }
-  // Label lines for a node or list row: the allocation share (provisional until voting opens) and the real routed share.
+  // Label lines for a node or list row: the allocation share (provisional until voting opens) and the units accepted this week. There is no live routed figure.
   function shareText(p) { return pct(p.voted) + ' share' + (p.provisional ? ' (provisional)' : ''); }
-  function routedText(p) { return pct(p.routed) + ' routed · ' + n0(p.routedUnits) + (p.routedUnits === 1 ? ' unit' : ' units'); }
+  function acceptedText(p) { return n0(p.accepted) + (p.accepted === 1 ? ' unit' : ' units') + ' accepted this week'; }
 
   function flow(host, list, opts) {
     opts = opts || {};
@@ -329,7 +328,7 @@
     const dy = opts.tall ? 10 : 0;
     clear(host);
     const s = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'flow', role: 'group' });
-    s.setAttribute('aria-label', 'The Flow: the Swarm AI core with a beam to each of ' + list.map((p) => p.name).join(', ') + '. Beam width is the routed share, the dotted ring is the voted share.');
+    s.setAttribute('aria-label', 'The Flow: the Swarm AI core with a beam to each of ' + list.map((p) => p.name).join(', ') + '. Beam width and the dotted ring are both the voted share.');
     const defs = svg('defs');
     const blur = (id, sd) => { const f = svg('filter', { id, x: '-30%', y: '-60%', width: '160%', height: '220%' }); f.appendChild(svg('feGaussianBlur', { stdDeviation: sd })); defs.appendChild(f); };
     blur('fb6', 7); blur('fb3', 3); blur('fb12', 14);
@@ -360,7 +359,7 @@
     let spare = 0;
     list.forEach((p, idx) => {
       const pos = Object.assign({}, POS[p.id] || SPARE_POS[spare++ % SPARE_POS.length]); pos.y += dy;
-      const hw = Math.min(5 + p.routed * 0.62, 27);
+      const hw = Math.min(5 + p.voted * 0.62, 27);
       const g = beamGeometry(pos, core, hw, 1.6, (pos.y < core.y ? 1 : -1) * (pos.x < core.x ? 1 : -1) * -12);
       const gid = 'bg' + idx;
       const lg = svg('linearGradient', { id: gid, gradientUnits: 'userSpaceOnUse', x1: g.A.x, y1: g.A.y, x2: g.B.x, y2: g.B.y });
@@ -377,7 +376,7 @@
       anim.push(a);
 
       // node
-      const share = shareText(p), routedLine = routedText(p);
+      const share = shareText(p), routedLine = acceptedText(p);
       const n = svg('g', { class: 'node', tabindex: '0', role: 'link', 'aria-label': p.name + ' (live): ' + share + ', ' + routedLine + ', ' + n0(p.open) + ' open tasks. Open the Flow.' });
       const nglow = svg('circle', { cx: pos.x, cy: pos.y, r: 36, fill: p.color, opacity: '0.22', filter: 'url(#fb6)' });
       n.appendChild(nglow);
@@ -436,7 +435,7 @@
   }
 
   // Streams of glowing particles travel out from the core along each beam, in the beam's own color. Stream density
-  // and speed follow the routed share. Now and then a brighter pulse returns from a node to the core (accepted work).
+  // and speed follow the voted share. Now and then a brighter pulse returns from a node to the core (accepted work).
   function runParticles(host, s, anim, flash, opts) {
     const lite = !!opts.lite, CAP = 60;
     const layer = svg('g', { class: 'particles', 'pointer-events': 'none' });
@@ -444,7 +443,7 @@
     let total = 0;
     anim.forEach((a) => {
       a.len = a.path.getTotalLength();
-      const share = Math.min(1, a.p.routed / 32);
+      const share = Math.min(1, a.p.voted / 32);
       let count = lite ? Math.round(1.5 + share * 3.5) : Math.round(3 + share * 9);
       count = Math.max(1, Math.min(count, Math.floor((CAP - total) / (anim.length - anim.indexOf(a)))));
       total += count;
@@ -673,5 +672,5 @@
   }
   document.addEventListener('DOMContentLoaded', () => { wireStaticCopy(); initSearch(); initMotion(); footerCommit(); });
 
-  window.Swarm = { SAY_LINE, shareText, routedText, showBanner, MCP_URL, el, svg, icon, clear, fmtDate, fmtShort, rel, n0, pct, getJson, renderStamp, buildConnect, flow, renderReceipts, privacyChoices, PRIVACY_CHOICES, errorNote, projects, META, reduce, copyText, revealBars, setBar };
+  window.Swarm = { SAY_LINE, shareText, acceptedText, showBanner, MCP_URL, el, svg, icon, clear, fmtDate, fmtShort, rel, n0, pct, getJson, renderStamp, buildConnect, flow, renderReceipts, privacyChoices, PRIVACY_CHOICES, errorNote, projects, META, reduce, copyText, revealBars, setBar };
 })();

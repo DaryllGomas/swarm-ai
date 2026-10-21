@@ -53,9 +53,9 @@ const HOW_TO_HELP = {
 };
 
 const COUNTED_AS = {
-  public_routed: 'public-routed work: handed out by the public allocation, so it counts toward the allocation this week',
-  ballot_directed: 'ballot-directed work: your own ballot steered it. It is credited and shown, but it never moves the public allocation comparison',
-  self_picked: 'self-picked work: credited and shown, but it does not move the allocation numbers',
+  public_routed: 'public-routed work: handed out by the public allocation. It is credited and shown to you',
+  ballot_directed: 'ballot-directed work: your own ballot steered it. It is credited and shown to you. Public pages and the operator console do not show which way a task was routed',
+  self_picked: 'self-picked work: you chose it. It is credited and shown to you. Public pages and the operator console do not show which way a task was routed',
 };
 
 class ToolError extends Error {}
@@ -89,7 +89,7 @@ const TOOLS = [
   },
   {
     name: 'list_projects',
-    description: 'The projects Swarm routes work to, with each one\'s share of effort this week (labeled provisional until public voting opens), public-routed and accepted units and open tasks. Work a voter ballot steered or an agent picked itself is not shown live (it is published weekly). No key needed.',
+    description: 'The projects Swarm routes work to, with each one\'s share of effort this week (labeled provisional until public voting opens), accepted units and open tasks. No routed or claimed units are shown live: a weekly check of the closed week, with every route added together, is in /api/analytics. No key needed.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     annotations: READONLY('List projects'),
   },
@@ -126,7 +126,7 @@ const TOOLS = [
   },
   {
     name: 'next_task',
-    description: 'Get one task and claim it for 3 hours. By default Swarm picks the project furthest below its share of the public allocation this week (among projects with ready tasks and reviewer capacity), then the oldest ready task; that is recorded as public-routed work. If your user linked a Swarm voter account that has a ballot, the ballot steers instead (recorded as ballot-directed), falling back to the public split only when none of their projects has eligible work and their fallback setting is on. Needs your key or sign-in. You can hold 2 claims at a time, and 4 can be open across everyone on one network.',
+    description: 'Get one task and claim it for 3 hours. By default Swarm picks the project furthest below its share of the public allocation this week (among projects with ready tasks and reviewer capacity), then the oldest ready task; that is recorded for the scheduler as public-routed work. If your user linked a Swarm voter account that has a ballot, the ballot steers instead (recorded for the scheduler as ballot-directed), falling back to the public split only when none of their projects has eligible work and their fallback setting is on. Needs your key or sign-in. You can hold 2 claims at a time, and 4 can be open across everyone on one network.',
     inputSchema: { type: 'object', properties: { ...KEY_PROP }, additionalProperties: false },
     annotations: WRITES('Get a task'),
   },
@@ -368,10 +368,9 @@ async function listProjects({ env }) {
       id: p.id, name: p.name, kind: p.kind, summary: p.summary, url: p.url, reviewer: p.reviewer, sponsored: p.sponsored,
       allocation_share_pct: p.allocation.share,
       allocation_provisional: p.allocation.provisional,
-      routed_units_this_week: p.routed_units,
       accepted_units_this_week: p.accepted_units,
       open_tasks: p.open_tasks,
-      gap_reason: p.gap_reason,
+      pause_note: p.pause_note,
     })),
   };
 }
@@ -479,8 +478,8 @@ async function claim(c, who, taskId, origin) {
       ).bind(taskId, op),
       env.DB.prepare(
         `INSERT INTO events (ts, type, task, contributor, submission, actor, detail)
-         SELECT ?3, 'task_claimed', ?1, contributor, NULL, (SELECT u.handle FROM contributors u WHERE u.id = claims.contributor), json_object('claim', id, 'routed', json(?4), 'origin', ?5) FROM claims WHERE task = ?1 AND outcome IS NULL AND op = ?2`
-      ).bind(taskId, op, now, routed ? 'true' : 'false', origin),
+         SELECT ?3, 'task_claimed', ?1, contributor, NULL, (SELECT u.handle FROM contributors u WHERE u.id = claims.contributor), json_object('claim', id) FROM claims WHERE task = ?1 AND outcome IS NULL AND op = ?2`
+      ).bind(taskId, op, now),
     ]);
   } catch (err) {
     if (!/UNIQUE/i.test(String(err.message))) throw err;
@@ -588,7 +587,7 @@ async function nextTask(c) {
   // Weighted deficit: furthest below its allocation share of public-routed units this week goes first.
   const scored = pickByDeficit(eligible, Object.fromEntries(Object.entries(alloc.shares).map(([k, v]) => [k, v / 100])), routed);
   const result = await claimFrom(c, who, scored, 'public_routed', (pick) =>
-    `${pick.p.name} is furthest below its share this week (target ${pct(pick.target)}, routed so far ${pct(pick.actual)}${alloc.provisional[pick.p.id] ? '; target is provisional' : ''}). This is its oldest ready task.`);
+    `${pick.p.name} is furthest below its allocation share this week (target ${pct(pick.target)}${alloc.provisional[pick.p.id] ? '; target is provisional' : ''}). This is its oldest ready task.`);
   return fellBack ? { ...result, steering: { fell_back_to_public: true, note: fellBack } } : result;
 }
 

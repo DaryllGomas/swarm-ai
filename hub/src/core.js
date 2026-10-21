@@ -132,8 +132,9 @@ export async function unitsByProject(env, week, routed, filter) {
   return Object.fromEntries(results.map((r) => [r.project, r.units]));
 }
 
-// The three routing origins of a claim. Only public_routed is compared with the published public allocation; claims.routed
-// is 1 exactly for it (migration 0008 keeps the two in step).
+// The three routing origins of a claim. They are kept in D1 for the SCHEDULER's own deficit maths only (public_routed units against the
+// allocation; a ballot's own ballot_directed units against that ballot) and are never shown on a public page or in the operator console.
+// claims.routed is 1 exactly for public_routed (migration 0008 keeps the two in step).
 export const ORIGINS = ['public_routed', 'ballot_directed', 'self_picked'];
 export const isRouted = (origin) => (origin === 'public_routed' ? 1 : 0);
 
@@ -154,57 +155,40 @@ export const LOST = `c.outcome IN ('released','expired') AND NOT EXISTS (
   AND (c2.outcome IS NULL OR c2.outcome = 'submitted'))`;
 
 // The live public numbers. Deliberately few (docs/DATA-POLICY.md, "What is live and what is weekly"): project-level OPEN task counts, the
-// published allocation, public-routed units set against it, and accepted results. Nothing here comes from a person's own choices
-// (ballot-directed or self-picked work, who holds a claim, who has work waiting for review): a live number that moves with one person's
-// choices can be differenced or polled to read them. Those figures are published weekly, after the week closes, in /api/analytics.
+// published allocation and accepted results. There is NO live routed or claimed figure of any kind: a number of units handed out that
+// moves while the week runs is a signal anyone can poll, and whether a task was routed by the public allocation or steered by a person is
+// exactly what must not be separable. "Did the scheduler follow the vote" is answered once a week for the closed week, with every route
+// added together (/api/analytics).
 export async function weekStats(env, now = Date.now()) {
   const week = weekOf(now);
   const start = weekStartMs(now);
   const end = start + 7 * 86400000;
-  const [alloc, projects, routed, accepted, acceptedAll, open, acceptedTotal] = await Promise.all([
+  const [alloc, projects, accepted, acceptedAll, open, acceptedTotal] = await Promise.all([
     currentAllocation(env, now),
     env.DB.prepare('SELECT id, name, kind, summary, url, reviewer, sponsored, active, paused FROM projects WHERE active = 1 ORDER BY name').all(),
-    unitsByProject(env, week, 1, STANDING),
     env.DB.prepare(`SELECT t.project AS project, SUM(t.units) AS units FROM submissions s JOIN tasks t ON t.id = s.task
                     WHERE s.status = 'accepted' AND s.reviewed_at >= ?1 AND s.reviewed_at < ?2 GROUP BY t.project`).bind(start, end).all(),
     env.DB.prepare(`SELECT t.project AS project, SUM(t.units) AS units FROM submissions s JOIN tasks t ON t.id = s.task
                     WHERE s.status = 'accepted' GROUP BY t.project`).all(),
-    // OPEN = ready or being worked (claimed). A claim does not change it, so it cannot separate a public-routed claim from a personal one.
+    // OPEN = ready or being worked (claimed). A claim does not change it, so it cannot show who took a task or how.
     env.DB.prepare("SELECT project, COUNT(*) AS n FROM tasks WHERE status IN ('ready', 'claimed') AND held_reason IS NULL GROUP BY project").all(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM submissions WHERE status = 'accepted'").first(),
   ]);
   const by = (r) => Object.fromEntries(r.results.map((x) => [x.project, x.units ?? x.n]));
   const acc = by(accepted), accAll = by(acceptedAll), openBy = by(open);
-  const totalRouted = Object.values(routed).reduce((a, b) => a + b, 0);
 
-  const list = projects.results.map((p) => {
-    const share = alloc.shares[p.id] ?? 0;
-    const r = routed[p.id] || 0;
-    const routedShare = totalRouted ? (100 * r) / totalRouted : 0;
-    const openTasks = openBy[p.id] || 0;
-    let gap = null;
-    if (share > 0 && routedShare + 0.5 < share) {
-      if (p.paused) gap = 'New assignments are paused by the operator.';
-      else if (!totalRouted) gap = 'No work has been routed yet this week. Nothing is invented to hit a percentage; units are counted when an agent asks for work.';
-      else if (openTasks === 0) gap = 'There is no open work here right now, so nothing more can be routed.';
-      else gap = 'Work here is waiting for agents to ask for it. Routing follows requests; it never forces assignments. It can also pause while the project\'s reviewer catches up.';
-    }
-    return {
-      id: p.id, name: p.name, kind: p.kind, summary: p.summary, url: p.url, reviewer: p.reviewer, sponsored: !!p.sponsored, paused: !!p.paused,
-      allocation: { share, provisional: alloc.provisional[p.id] ?? true },
-      routed_units: r,
-      routed_share: Math.round(routedShare * 10) / 10,
-      accepted_units: acc[p.id] || 0,
-      accepted_units_all_time: accAll[p.id] || 0,
-      open_tasks: openTasks,
-      gap_reason: gap,
-    };
-  });
+  const list = projects.results.map((p) => ({
+    id: p.id, name: p.name, kind: p.kind, summary: p.summary, url: p.url, reviewer: p.reviewer, sponsored: !!p.sponsored, paused: !!p.paused,
+    allocation: { share: alloc.shares[p.id] ?? 0, provisional: alloc.provisional[p.id] ?? true },
+    accepted_units: acc[p.id] || 0,
+    accepted_units_all_time: accAll[p.id] || 0,
+    open_tasks: openBy[p.id] || 0,
+    ...(p.paused ? { pause_note: 'New assignments are paused by the operator.' } : {}),
+  }));
   return {
     week, week_start: new Date(start).toISOString(), updated: new Date(now).toISOString(),
     allocation_week: alloc.week, allocation_note: list.some((p) => p.allocation.provisional) ? PROVISIONAL_NOTE : null,
-    routed_note: 'Routed = acknowledged assignments weighted by work units; not compute consumed. Only public-routed units are compared with the public allocation. Work that a voter\'s own ballot steered, or that an agent picked itself, is credited on receipts but is not shown live: it is published once a week, after the week closes, in /api/analytics.',
-    routing_note: 'Live: public-routed units against the weekly allocation, open tasks and accepted results. Personal-direction totals are published weekly, with noise, only where at least 5 people stand behind them.',
+    routed_note: 'Units handed out are not compute consumed, and they are not shown live. Once a week, after the week closes, /api/analytics sets the units claimed that week (every route added together) beside the allocation. That check is coarse by design: it cannot show how much work people steered themselves.',
     projects: list,
     totals: { accepted: acceptedTotal.n },
   };

@@ -261,8 +261,8 @@ describe('k-anonymity: a public count of people below 5 is not shown', () => {
     // Fewer than 5 eligible ballots: a fallback, and not even the count is kept.
     expect(await env.DB.prepare('SELECT voter_count, source FROM vote_snapshots').first()).toEqual({ voter_count: 0, source: 'fallback' });
     const audit = await (await send('/api/vote/audit')).json();
-    expect(audit.snapshot_history[0].voter_count).toBe('fewer than 5'); // ...the public view is not
-    expect((await (await send('/api/vote/current')).json()).voter_count).toBe('fewer than 5');
+    expect(audit.snapshot_history[0].voter_count).toBe('not published');
+    expect((await (await send('/api/vote/current')).json()).voter_count).toBe('not published');
     expect((await send('/api/vote/next')).status).toBe(404);
   });
 

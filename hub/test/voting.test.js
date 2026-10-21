@@ -1,7 +1,7 @@
 import { beforeEach, it, expect } from 'vitest';
 import { env } from 'cloudflare:workers';
 import { publishSnapshot } from '../src/voting.js';
-import { currentAllocation, weekStats } from '../src/core.js';
+import { STANDING, currentAllocation, unitsByProject, weekStats } from '../src/core.js';
 import { weekOf, weekStartMs, sha256 } from '../src/lib.js';
 import { random } from '../src/webauthn.js';
 import { makeEnv, send, resetDb, newUser, addTask, BODY, SOURCE } from './helpers.js';
@@ -122,6 +122,6 @@ it('the real weighted-deficit scheduler converges to snapshot 70/30 in routed un
     const u=users[i%users.length],r=await u.call('next_task');expect(r.isError,r.text).toBe(false);
     const sub=await u.call('submit_work',{task_id:r.data.task.id,body:BODY,sources:[SOURCE]});expect(sub.isError,sub.text).toBe(false);
   }
-  const s=await weekStats(env),by=Object.fromEntries(s.projects.map(p=>[p.id,p.routed_units]));
+  const by=await unitsByProject(env,weekOf(),1,STANDING); // the scheduler's own count; no public surface shows it
   const total=by['town-hall']+by['swarm-ai'];expect(total).toBeGreaterThan(60);expect(Math.abs(by['town-hall']/total-0.7)).toBeLessThan(0.04);
 });

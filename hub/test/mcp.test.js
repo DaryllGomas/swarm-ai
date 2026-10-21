@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { env } from 'cloudflare:workers';
+import { STANDING, unitsByProject } from '../src/core.js';
+import { weekOf } from '../src/lib.js';
 import { ADMIN, BODY, SOURCE, addTask, newUser, nextIp, resetDb, rpc, send, tool } from './helpers.js';
 
 beforeEach(resetDb);
@@ -201,17 +203,18 @@ describe('work loop: next_task, claim, submit_work, review', () => {
   it('claim, release, claim again counts the units once', async () => {
     const taskId = await addTask({ units: 3 });
     const user = await newUser();
-    const routed = async () => (await (await send('/api/stats')).json()).projects.find((p) => p.id === 'town-hall');
+    // The scheduler's own count (internal; no public surface shows it).
+    const routed = async () => (await unitsByProject(env, weekOf(), 1, STANDING))['town-hall'] || 0;
     for (let i = 0; i < 3; i++) {
       expect((await user.call('next_task')).data.task.id).toBe(taskId);
-      expect((await routed()).routed_units).toBe(3);
+      expect(await routed()).toBe(3);
       expect((await user.call('release_task', { id: taskId })).isError).toBe(false);
-      expect((await routed()).routed_units).toBe(0);
+      expect(await routed()).toBe(0);
     }
     expect((await user.call('next_task')).isError).toBe(false);
-    const final = await routed();
-    expect(final.routed_units).toBe(3);
-    expect(final.routed_released_or_expired_units).toBeUndefined(); // lifecycle churn is not a live public figure
+    expect(await routed()).toBe(3);
+    const pub = (await (await send('/api/stats')).json()).projects.find((p) => p.id === 'town-hall');
+    expect(Object.keys(pub).filter((k) => /routed|claimed|released|gap/.test(k))).toEqual([]); // nothing routed is live
   });
 
   it('self-directed claims never move the routed numbers', async () => {
@@ -219,8 +222,8 @@ describe('work loop: next_task, claim, submit_work, review', () => {
     const user = await newUser();
     expect((await user.call('claim_task', { id: taskId })).data.claim.routed).toBe(false);
     const th = (await (await send('/api/stats')).json()).projects.find((p) => p.id === 'town-hall');
-    expect(th.routed_units).toBe(0);
-    expect(th.self_directed_units).toBeUndefined(); // self-picked work is not shown live (weekly release only)
+    expect((await unitsByProject(env, weekOf(), 1, STANDING))['town-hall'] || 0).toBe(0); // the scheduler's public-routed count is untouched
+    expect(Object.keys(th).filter((k) => /routed|claimed|self/.test(k))).toEqual([]); // and nothing routed is live
   });
 });
 

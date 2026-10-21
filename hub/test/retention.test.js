@@ -19,7 +19,7 @@ const cid = (handle) => one('SELECT id FROM contributors WHERE handle = ?1', han
 beforeEach(async () => {
   await resetDb();
   await env.DB.batch([
-    env.DB.prepare('DELETE FROM weekly_project_stats'), env.DB.prepare('DELETE FROM weekly_release'), env.DB.prepare('DELETE FROM rollup_weeks'),
+    env.DB.prepare('DELETE FROM weekly_project_stats'), env.DB.prepare('DELETE FROM rollup_weeks'),
     env.DB.prepare("DELETE FROM contributors WHERE handle = ?1").bind(PURGED_HANDLE),
   ]);
   await setupProjects();
@@ -45,7 +45,7 @@ async function pastWork({ contributor, weeksAgo = 1, project = 'town-hall', unit
 }
 
 describe('the weekly rollup', () => {
-  it('writes per-project numbers (public-routed units, accepted units, task counts, review percentiles) and a marker; no origin split, claims count or model data', async () => {
+  it('writes per-project numbers (claimed units with every route added together, accepted units, task counts, review percentiles) and a marker; no origin split, claims count or model data', async () => {
     const a = await newUser(), b = await newUser();
     const [ca, cb] = [await cid(a.handle), await cid(b.handle)];
     const week = weekOf(lastWeekStart());
@@ -59,17 +59,17 @@ describe('the weekly rollup', () => {
     expect(r).toMatchObject({ week, projects: 2, newly: true });
     const th = await one('SELECT * FROM weekly_project_stats WHERE week = ?1 AND project = ?2', week, 'town-hall');
     expect(th).toEqual({
-      week, project: 'town-hall', routed_units: 4, accepted_units: 12, tasks_created: 4, tasks_accepted: 3, tasks_rejected: 1, contributors: 2, reviews: 4,
+      week, project: 'town-hall', claimed_units: 15, accepted_units: 12, tasks_created: 4, tasks_accepted: 3, tasks_rejected: 1, contributors: 2, reviews: 4,
       review_p50_ms: 2000, review_p90_ms: 4000, // nearest rank of the four review times
     });
     // Nothing per origin, nothing about claims, no model family table at all.
-    expect(Object.keys(th).join(' ')).not.toMatch(/ballot|self_picked|claimed|submitted|model/);
+    expect(Object.keys(th).join(' ')).not.toMatch(/ballot|self_picked|routed|submitted|model/);
     expect(await one("SELECT name FROM sqlite_master WHERE name = 'weekly_model_stats'")).toBeNull();
     expect(await one('SELECT week FROM rollup_weeks')).toEqual({ week });
-    // One person steered their own work: fewer than 5 people, so the personal-direction total is not released (and nothing exact is kept).
-    expect(await one('SELECT * FROM weekly_release WHERE week = ?1', week)).toEqual({ week, personal_direction_units: null, people_floor: 0 });
+    // There is no personal-direction release at all.
+    expect(await one("SELECT name FROM sqlite_master WHERE name = 'weekly_release'")).toBeNull();
     // Only aggregates: no contributor, no model name, no handle anywhere in the rollup tables.
-    const dump = JSON.stringify([await all('SELECT * FROM weekly_project_stats'), await all('SELECT * FROM weekly_release')]);
+    const dump = JSON.stringify([await all('SELECT * FROM weekly_project_stats')]);
     for (const secret of [a.handle, b.handle, 'claude-opus-4', 'gpt-5', 'weird-model']) expect(dump).not.toContain(secret);
   });
 
@@ -78,13 +78,13 @@ describe('the weekly rollup', () => {
     await pastWork({ contributor: c, model: 'claude-x' });
     const week = weekOf(lastWeekStart());
     await rollupWeek(env, week, Date.now(), NO_NOISE);
-    const before = JSON.stringify([await all('SELECT * FROM weekly_project_stats'), await all('SELECT * FROM weekly_release'), await all('SELECT week FROM rollup_weeks')]);
+    const before = JSON.stringify([await all('SELECT * FROM weekly_project_stats'), await all('SELECT week FROM rollup_weeks')]);
     expect((await rollupWeek(env, week)).newly).toBe(false);
     await Promise.all([rollupWeek(env, week), rollupWeek(env, week), runRollup(env)]);
     // New work arriving late in an already-rolled-up week does not rewrite its record either.
     await pastWork({ contributor: c, model: 'claude-late' });
     await rollupWeek(env, week);
-    expect(JSON.stringify([await all('SELECT * FROM weekly_project_stats'), await all('SELECT * FROM weekly_release'), await all('SELECT week FROM rollup_weeks')])).toBe(before);
+    expect(JSON.stringify([await all('SELECT * FROM weekly_project_stats'), await all('SELECT week FROM rollup_weeks')])).toBe(before);
     expect((await one('SELECT COUNT(*) AS n FROM weekly_project_stats')).n).toBe(1);
   });
 
@@ -123,27 +123,28 @@ describe('the weekly rollup', () => {
 });
 
 describe('GET /api/analytics', () => {
-  it('serves the rollups: public-routed units exact, people as coarse ranges, no model families, review times from 5 reviews', async () => {
+  it('serves the rollups: claimed units exact (all routes together), people as coarse ranges, no model families, review times from 5 reviews', async () => {
     const users = [];
     for (let i = 0; i < 5; i++) users.push(await newUser());
     const week = weekOf(lastWeekStart());
     // town-hall: 5 contributors; swarm-ai: 1 contributor.
     for (const u of users) await pastWork({ contributor: await cid(u.handle), model: 'claude-x', units: 3 });
     await pastWork({ contributor: await cid(users[0].handle), project: 'swarm-ai', model: 'gpt-5', units: 1 });
+    await env.DB.batch(['town-hall', 'swarm-ai'].map((p) => env.DB.prepare('INSERT INTO allocation(week, project, share, provisional) VALUES (?1, ?2, 5000, 0)').bind(week, p)));
     await runRollup(env);
     const data = await (await send('/api/analytics')).json();
     const w = data.weeks.find((x) => x.week === week);
     const th = w.projects.find((p) => p.project === 'town-hall'), sw = w.projects.find((p) => p.project === 'swarm-ai');
-    expect(th.units).toEqual({ public_routed: 15 }); expect(th.tasks).toEqual({ created: 5, accepted: 5, rejected: 0 }); expect(th.accepted_units).toBe(15);
+    expect(th.claimed_units).toBe(15); expect(th.claimed_share_pct).toBe(93.8); expect(th.allocation_pct).toBe(50); expect(th.tasks).toEqual({ created: 5, accepted: 5, rejected: 0 }); expect(th.accepted_units).toBe(15);
     expect(th.contributors).toBe('5-9'); expect(th.model_families).toBeUndefined();
     expect(th.review.count).toBe(5); expect(th.review.p50_ms).toBeGreaterThan(0);
-    expect(sw.units.public_routed).toBe(1); // work is exact
+    expect(sw.claimed_units).toBe(1); // work is exact
     expect(sw.contributors).toBe('fewer than 5');
     expect(sw.review.count).toBe(1); expect(sw.review.p50_ms).toBeNull();
     expect(data.families).toBeUndefined();
-    const text = JSON.stringify(data);
+    const text = JSON.stringify(data.weeks);
     for (const u of users) expect(text).not.toContain(u.handle);
-    expect(text).not.toMatch(/claude-x|gpt|tasks_claimed|claimed|self_picked|ballot_directed|model_famil/);
+    expect(text).not.toMatch(/claude-x|gpt|tasks_claimed|self_picked|ballot_directed|public_routed|personal|model_famil/);
     expect((await send('/api/analytics?weeks=1')).status).toBe(200);
   });
 });

@@ -30,8 +30,7 @@ describe('operator queries', () => {
     expect(o.allocation.shares['town-hall']).toBe(50); expect(o.allocation.shares['swarm-ai']).toBe(50); // migration 0006's provisional 50/50
     expect(o.counts).toMatchObject({ ready: 0, claimed: 1, submitted: 1, accepted: 0, held: 1 });
     expect(o.pending_reviews).toBe(1); expect(o.oldest_review_age_ms).toBeGreaterThanOrEqual(7200000);
-    expect(o.routed_by_origin.public_routed['town-hall']).toBe(3);
-    expect(o.routed_by_origin.self_picked).toBeUndefined(); expect(o.routed_by_origin.ballot_directed).toBeUndefined(); // personal origin is not an operator figure
+    expect(o.routed_by_origin).toBeUndefined(); expect(o.closed_week_release).toBeUndefined(); // no routing figure of any kind in the console
     expect(o.expiring_claims).toHaveLength(1); expect(o.active_claims[0].task).toBe(ready);
     expect(Object.keys(o.active_claims[0]).sort()).toEqual(['expires_at', 'expiring', 'id', 'project', 'task']); // no contributor, handle or origin
     expect(o.intake).toBe('paused'); expect(o.sync.last_sync_error).toBe('old failure'); expect(o.sync.last_sync).toBeTruthy();

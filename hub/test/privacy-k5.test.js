@@ -44,9 +44,10 @@ describe('a weekly snapshot needs 5 eligible ballots', () => {
       const rows = (await env.DB.prepare('SELECT project, share, provisional FROM allocation WHERE week = ?1 ORDER BY project').bind(weekOf()).all()).results;
       expect(rows).toEqual([{ project: 'swarm-ai', share: 5000, provisional: 1 }, { project: 'town-hall', share: 5000, provisional: 1 }]);
       const v = await publicView();
-      expect(v.current).toMatchObject({ source: 'fallback', provisional: true, voter_count: 'fewer than 5', reason: 'fewer than 5 eligible ballots', shares: { 'town-hall': 5000, 'swarm-ai': 5000 } });
+      expect(v.current).toMatchObject({ source: 'fallback', provisional: true, voter_count: 'not published', shares: { 'town-hall': 5000, 'swarm-ai': 5000 } });
       expect((await send('/api/vote/next')).status).toBe(404);
-      expect(v.audit.snapshot_history[0]).toMatchObject({ source: 'fallback', voter_count: 'fewer than 5' });
+      expect(v.audit.snapshot_history[0]).toMatchObject({ source: 'fallback', voter_count: 'not published' });
+      expect(v.current.reason).toMatch(/previous split is carried forward/);
       expect(stat(v, 'town-hall').allocation).toEqual({ share: 50, provisional: true });
       expect(v.stats.allocation_note).toMatch(/Provisional/);
       expect(JSON.stringify(v)).not.toMatch(/9000|"share":90|"town-hall":90/);
@@ -86,25 +87,18 @@ describe('differencing', () => {
     expect(JSON.stringify(audit)).not.toMatch(/"(ballots|voter_count|eligible_voter_count)":\d/);
     expect((await env.DB.prepare('SELECT voter_count FROM vote_snapshots').first()).voter_count).toBe(5); // the database keeps the bucket edge, not 6
   });
-  it('personally directed units are released once a week as one noised total, and only from 5 different people', async () => {
+  it('there is no personal-direction release any more: five people steering their own work leave only the all-routes total', async () => {
     const mk = async (alloc) => linkedUser(await voter({ allocations: alloc }));
     const { addTask, BODY, SOURCE } = await import('./helpers.js');
     const work = async (u) => { await addTask({ project: 'town-hall', units: 1 }); const r = await u.call('next_task'); expect(r.data.claim.routing_origin).toBe('ballot_directed'); await u.call('submit_work', { task_id: r.data.task.id, body: BODY, sources: [SOURCE] }); };
-    const users = [];
-    for (let i = 0; i < 4; i++) { users.push(await mk({ 'town-hall': 100 })); await work(users[i]); }
-    // Live: nothing about it, whoever is looking.
-    let s = await weekStats(env);
-    expect(s.routing_origins).toBeUndefined();
-    expect(JSON.stringify(s)).not.toMatch(/ballot_directed|self_directed|self_picked/);
+    for (let i = 0; i < 5; i++) await work(await mk({ 'town-hall': 100 }));
+    const s = await weekStats(env);
+    expect(JSON.stringify(s)).not.toMatch(/ballot_directed|self_directed|self_picked|personal|routed_units|routed_share/);
     await rollupWeek(env, weekOf(), Date.now(), NO_NOISE);
-    let a = await (await send('/api/analytics')).json();
-    expect(a.weeks[0].personal_direction.units).toBeNull(); // 4 people: nothing released
-    expect(JSON.stringify(a)).not.toMatch(/ballot_directed|self_picked|tasks_claimed/);
-    users.push(await mk({ 'town-hall': 100 })); await work(users[4]);
-    await env.DB.batch([env.DB.prepare('DELETE FROM weekly_project_stats'), env.DB.prepare('DELETE FROM weekly_release'), env.DB.prepare('DELETE FROM rollup_weeks')]);
-    await rollupWeek(env, weekOf(), Date.now(), NO_NOISE);
-    a = await (await send('/api/analytics')).json();
-    expect(a.weeks[0].personal_direction).toEqual({ units: 5, people: '5-9' }); // 5 people, 1 unit each; this test draws no noise
+    const a = await (await send('/api/analytics')).json();
+    expect(JSON.stringify(a.weeks)).not.toMatch(/personal|ballot_directed|self_picked|tasks_claimed|public_routed/);
+    expect(a.weeks[0].total_claimed_units).toBe(5); // every route added together
+    expect(await env.DB.prepare("SELECT name FROM sqlite_master WHERE name = 'weekly_release'").first()).toBeNull();
   });
 });
 

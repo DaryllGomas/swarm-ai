@@ -8,8 +8,7 @@ import { gate, wrapDb } from './fault.js';
 import { weekOf, weekStartMs } from '../src/lib.js';
 import { closeClaimStmts, expireClaims } from '../src/core.js';
 import { PURGED_HANDLE, deleteAccount, purgeOAuthState, removeHandle } from '../src/privacy.js';
-import { personalDirection, rollupWeek, runRollup, runWeeklyMaintenance, UNPUBLISHED_BODY_DAYS } from '../src/rollup.js';
-import { PERSONAL_CAP_UNITS } from '../src/dp.js';
+import { rollupWeek, runRollup, runWeeklyMaintenance, UNPUBLISHED_BODY_DAYS } from '../src/rollup.js';
 import { NO_NOISE, linkedUser, mePost, publicAllocation, setupProjects, voter } from './voter.js';
 import { connect, mcpTool, o } from './oauth-helpers.js';
 
@@ -26,7 +25,7 @@ function seeded(seed) {
 beforeEach(async () => {
   await resetDb(); await setupProjects();
   await env.DB.batch([
-    env.DB.prepare('DELETE FROM weekly_project_stats'), env.DB.prepare('DELETE FROM weekly_release'), env.DB.prepare('DELETE FROM rollup_weeks'), env.DB.prepare('DELETE FROM oauth_purge'),
+    env.DB.prepare('DELETE FROM weekly_project_stats'), env.DB.prepare('DELETE FROM rollup_weeks'), env.DB.prepare('DELETE FROM oauth_purge'),
     env.DB.prepare('DELETE FROM contributors WHERE handle = ?1').bind(PURGED_HANDLE),
   ]);
   await publicAllocation({ 'town-hall': 5000, 'swarm-ai': 5000 });
@@ -82,12 +81,10 @@ describe('finding 2: nothing live separates a personal claim, and the origins ca
     const after = await stats(), tasks = await ready();
     // The attacker's estimate, using every public number the review used.
     const claimedUnits = tasks.tasks.filter((x) => x.status === 'claimed').reduce((a, x) => a + x.units, 0);
-    const estimate = claimedUnits - after.routed_units - (after.self_directed_units ?? 0);
-    expect(estimate).not.toBe(3);
+    expect(Object.keys(after).filter((k) => /routed|self|directed|claimed/.test(k))).toEqual([]); // there is no routed figure to subtract (review 6: none at all)
     expect(claimedUnits).toBe(0);                                  // a claimed task is shown as ready
     expect(tasks.tasks.find((x) => x.id === t).status).toBe('ready');
     expect(after.open_tasks).toBe(before.open_tasks);             // a claim does not move the open count
-    expect(after.routed_units).toBe(before.routed_units);
   });
 
   it('polling: a personal claim leaves every public surface byte-for-byte unchanged', async () => {
@@ -97,10 +94,11 @@ describe('finding 2: nothing live separates a personal claim, and the origins ca
     expect((await u.call('next_task')).data.claim.routing_origin).toBe('ballot_directed');
     expect((await self.call('claim_task', { id: t2 })).isError).toBe(false);
     expect(await surfaces([t1, t2])).toBe(before);
-    // ...while a PUBLIC-routed claim does show (that is the honest comparison with the allocation), and releasing it hides it again.
+    // ...and so does a PUBLIC-routed claim (review 6: no live routed figure exists, so nothing separates the two).
     const pub = await newUser(); const t3 = await addTask({ units: 8 });
+    const base = await surfaces([t1, t2, t3]);
     const during = (await pub.call('next_task')); expect(during.data.claim.routing_origin).toBe('public_routed');
-    expect(await surfaces([t1, t2, t3])).not.toBe(before.replace(/x/g, 'x'));
+    expect(await surfaces([t1, t2, t3])).toBe(base);
   });
 
   it('indistinguishability: bd 3 + self 8 and bd 8 + self 3 give identical public surfaces, so the split between ballot-directed and self-picked cannot be recovered', async () => {
@@ -129,51 +127,19 @@ describe('finding 2: nothing live separates a personal claim, and the origins ca
     expect(text).not.toMatch(/routing_origin|ballot_directed|self_picked|self_directed|origin/);
   });
 
-  it('the review\'s second probe: four voters direct work to Town Hall, one to Swarm AI: no per-project personal figure exists to unlock (the gate used the wrong group)', async () => {
+  it('the review\'s second probe: four voters direct work to Town Hall, one to Swarm AI: there is no personal figure of any kind to unlock', async () => {
     const mk = async (project) => linkedUser(await voter({ allocations: { [project]: 100 } }));
     const users = [await mk('town-hall'), await mk('town-hall'), await mk('town-hall'), await mk('town-hall'), await mk('swarm-ai')];
     for (const u of users) { await addTask({ project: u === users[4] ? 'swarm-ai' : 'town-hall', units: 1 }); expect((await u.call('next_task')).data.claim.routing_origin).toBe('ballot_directed'); }
     await rollupWeek(env, weekOf(), Date.now(), NO_NOISE);
     const data = await (await send('/api/analytics')).json();
     const w = data.weeks.find((x) => x.week === weekOf());
-    for (const p of w.projects) expect(Object.keys(p.units)).toEqual(['public_routed']);   // no per-project personal units at all
-    expect(w.personal_direction.units).toBe(5);                                           // one weekly total, five people
-    expect(JSON.stringify(data)).not.toMatch(/ballot_directed|self_picked|contributors_this_week/);
+    expect(w.personal_direction).toBeUndefined();
+    expect(w.total_claimed_units).toBe(5);                                                // every route added together
+    for (const p of w.projects) expect(Object.keys(p)).not.toContain('units');
+    expect(JSON.stringify(w)).not.toMatch(/ballot_directed|self_picked|personal|contributors_this_week/);
     const stats = await (await send('/api/stats')).json();
     expect(JSON.stringify(stats)).not.toMatch(/ballot_directed|self_directed|contributors/);
-  });
-
-  it('personal direction is capped per person (one prolific person cannot dominate or be isolated), noised, and absent below 5 people', async () => {
-    const people = [];
-    for (let i = 0; i < 5; i++) people.push(await cid((await newUser()).handle));
-    for (let k = 0; k < 10; k++) await pastClaim({ contributor: people[0], units: 8, origin: 'self_picked' }); // 80 units from one person
-    for (const p of people.slice(1)) await pastClaim({ contributor: p, units: 1, origin: 'ballot_directed' });
-    const week = weekOf(lastWeekStart());
-    const exact = await personalDirection(env, week, NO_NOISE);
-    expect(exact).toEqual({ units: PERSONAL_CAP_UNITS + 4, people: 5 });   // 16 (capped) + 4, not 84
-    // With noise the released figure moves; the mean over many draws stays near the capped truth (loose bounds, seeded).
-    const rng = seeded(55), draws = [];
-    for (let i = 0; i < 300; i++) draws.push((await personalDirection(env, week, rng)).units);
-    const m = draws.reduce((a, b) => a + b, 0) / draws.length;
-    expect(m).toBeGreaterThan(20 - 6); expect(m).toBeLessThan(20 + 8);        // clamping at 0 biases slightly upward
-    expect(new Set(draws).size).toBeGreaterThan(15);
-    // Fewer than 5 distinct people: nothing is released, however many units they did.
-    await env.DB.prepare('DELETE FROM claims WHERE contributor = ?1').bind(people[4]).run();
-    expect(await personalDirection(env, week, NO_NOISE)).toEqual({ units: null, people: 0 });
-  });
-
-  it('the released figure is drawn once per week: re-running the rollup cannot be used to average the noise away', async () => {
-    const ids = [];
-    for (let i = 0; i < 6; i++) ids.push(await cid((await newUser()).handle));
-    for (const c of ids) await pastClaim({ contributor: c, units: 3, origin: 'ballot_directed' });
-    const week = weekOf(lastWeekStart());
-    await rollupWeek(env, week, Date.now(), seeded(1));
-    const first = await one('SELECT * FROM weekly_release WHERE week = ?1', week);
-    for (let k = 2; k < 8; k++) await rollupWeek(env, week, Date.now(), seeded(k));
-    expect(await one('SELECT * FROM weekly_release WHERE week = ?1', week)).toEqual(first);
-    expect(first.personal_direction_units).not.toBe(18); // seeded(1) moved it
-    // No exact total anywhere: the stored figure is the noised one.
-    expect(JSON.stringify(await all('SELECT * FROM weekly_release'))).not.toContain('"personal_direction_units":18');
   });
 });
 
@@ -220,15 +186,16 @@ describe('finding 3: the operator console', () => {
     expect(privacy.replace(/<[^>]+>/g, ' ')).toMatch(/direct database access is outside/i);
   });
 
-  it('origin figures reach the operator only for closed weeks, and then only as the same noised, k-protected total the public sees', async () => {
+  it('not even a closed week gives the operator an origin figure: the console has no origin or personal-direction field', async () => {
     const ids = [];
     for (let i = 0; i < 5; i++) ids.push(await cid((await newUser()).handle));
     for (const c of ids) await pastClaim({ contributor: c, units: 3, origin: 'self_picked' });
     await runRollup(env, Date.now(), NO_NOISE);
     const a = await accessFixture();
     const overview = await (await a.get('overview')).json();
-    expect(overview.closed_week_release).toEqual({ week: weekOf(lastWeekStart()), personal_direction_units: 15, people: '5-9' });
-    expect(overview.routed_by_origin).toEqual({ public_routed: {} });
+    expect(overview.closed_week_release).toBeUndefined();
+    expect(overview.routed_by_origin).toBeUndefined();
+    expect(JSON.stringify(overview)).not.toMatch(/personal|self_picked|ballot_directed|public_routed/);
   });
 
   it('a heavy-churn contributor is flagged by name only above the abuse threshold, and without any route', async () => {

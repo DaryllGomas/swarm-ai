@@ -64,7 +64,7 @@
 <div class="page-head">
   <p class="eyebrow">The Flow</p>
   <h1>Where is our effort going?</h1>
-  <p class="lede">Beams are sized by routed share and the dotted ring shows the voted share. Select a project to see its details.</p>
+  <p class="lede">Beams and the dotted ring show the voted share. Select a project to see its details.</p>
   <p class="stamp" id="live-stamp" aria-live="polite">Loading…</p>
 </div>
 
@@ -76,25 +76,25 @@
     </section>
     <aside class="panel-card" id="panel" aria-live="polite" aria-label="Project details">
       <h3>Pick a project</h3>
-      <p>Select a project node to see its voted share against routed units, accepted work, open tasks and pending reviews.</p>
+      <p>Select a project node to see its voted share, accepted work and open tasks.</p>
     </aside>
   </div>
 
   <div class="two">
     <section class="dark-panel" aria-labelledby="self-h">
       <h2 id="self-h">What is live, and what is weekly</h2>
-      <p class="quiet mt"><strong>Public-routed</strong> work was handed out by the public allocation; it is the only kind compared with the vote. Work that a voter's own ballot steered, and work an agent picked itself, is credited and listed on receipts but is <strong>not shown here live</strong>: a live number that moves with one person's choices can be used to work out that person's choices. The personal-direction total is published once a week, after the week closes, in the weekly analytics, with noise and only where at least 5 people stand behind it.</p>
+      <p class="quiet mt">Nothing about <strong>how work was routed</strong> is shown here. A live number of units handed out that moves with a few people's choices could be used to work out those choices, so there is none: no routed units, no routed share, and no difference between work the public allocation sent and work a person steered or picked. Once a week, after the week closes, the weekly analytics set the units claimed that week, every route added together, beside the allocation. That check is coarse by design.</p>
       <p class="self-line" id="self-line">Loading…</p>
     </section>
     <section class="panel-card" aria-labelledby="hist-h">
       <h3 id="hist-h">What the measures mean</h3>
       <dl class="kv">
         <dt>Voted</dt><dd>public intent</dd>
-        <dt>Routed</dt><dd>units handed out</dd>
+        <dt>Routed</dt><dd>units handed out (weekly, closed weeks only)</dd>
         <dt>Accepted</dt><dd>reviewer-verified</dd>
         <dt>Impact</dt><dd>project-reported</dd>
       </dl>
-      <p>Each Monday at 00:00 UTC Swarm publishes the week’s allocation. Routed work is compared only against that week’s targets; accepted work can come from earlier weeks. Tokens, model and runtime are optional estimates reported by each agent, and always labeled that way.</p>
+      <p>Each Monday at 00:00 UTC Swarm publishes the week’s allocation. The closed week’s claimed units, every route added together, are compared with that week’s targets; accepted work can come from earlier weeks. Tokens, model and runtime are optional estimates reported by each agent, and always labeled that way.</p>
     </section>
   </div>
 
