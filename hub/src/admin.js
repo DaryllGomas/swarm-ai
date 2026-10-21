@@ -63,12 +63,14 @@ function repeatedReview(status, decision, id, idempotent) {
 export async function adminSubmission(env, url) {
   const id = Number(url.searchParams.get('id'));
   if (!Number.isSafeInteger(id) || id < 1) return json({ error: 'id must be a positive whole number' }, 400);
-  const submission = await env.DB.prepare(`SELECT s.id, s.body, s.sources, s.model, s.review_note, s.published_url,
+  const submission = await env.DB.prepare(`SELECT s.id, s.body, s.sources, s.review_note, s.published_url,
     t.title, t.source_key, c.handle, c.credit, c.removed FROM submissions s JOIN tasks t ON t.id = s.task
     JOIN contributors c ON c.id = s.contributor WHERE s.id = ?1 AND s.status = 'accepted'
     AND t.project = 'town-hall' AND t.kind = 'research_fix' AND t.held_reason IS NULL`).bind(id).first();
   if (!submission) return json({ error: 'not found' }, 404);
-  // The publisher may name the contributor on a public page, so it gets the handle only if the contributor chose handle credit.
+  // The publisher may name the contributor on a public page, so it gets the handle only if the contributor chose handle credit. It gets no
+  // model name and no token figures either: that metadata is private to the contributor and the reviewer (a distinctive model string can
+  // fingerprint a contributor), and the publisher drops it again if it ever arrives.
   const { credit, removed, ...rest } = submission;
   return json({ notice: UNTRUSTED, submission: { ...rest, handle: publicHandle(submission), credited_as: creditedAs(submission), sources: JSON.parse(submission.sources) } });
 }

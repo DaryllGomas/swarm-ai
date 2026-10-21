@@ -3,7 +3,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { env } from 'cloudflare:workers';
 import { addTask, newUser, resetDb, send, tool } from './helpers.js';
-import { SECURITY_TXT_EXPIRES, TRANSPARENCY_AS_OF, TRANSPARENCY_STALE_DAYS, fillTransparency, longDate, securityTxt, transparencyAgeDays, transparencyStatement, versionInfo } from '../src/trust.js';
+import { SECURITY_TXT_EXPIRES, TRANSPARENCY_AS_OF, TRANSPARENCY_STALE_DAYS, fillTransparency, longDate, securityTxt, transparencyAgeDays, transparencyStatement, versionInfo, VERSION_NOTE } from '../src/trust.js';
 import privacyHtml from '../public/privacy.html?raw';
 import transparencyHtml from '../public/transparency.html?raw';
 import securityHtml from '../public/security.html?raw';
@@ -24,12 +24,12 @@ describe('GET /version', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('Content-Type')).toMatch(/application\/json/);
     expect(res.headers.get('Cache-Control')).toBe('no-store');
-    expect(await res.json()).toEqual({ commit: SHA, built_at: '2026-10-20T12:34:56.000Z' });
+    expect(await res.json()).toEqual({ commit: SHA, built_at: '2026-10-20T12:34:56.000Z', reported_by: 'operator', note: VERSION_NOTE });
   });
 
   it('says null, not a guess, when nothing was injected, and ignores anything that is not a full commit hash', async () => {
-    expect(await (await send('/version')).json()).toEqual({ commit: null, built_at: null });
-    expect(versionInfo({ GIT_COMMIT: 'main', BUILT_AT: 'yesterday' })).toEqual({ commit: null, built_at: null });
+    expect(await (await send('/version')).json()).toEqual({ commit: null, built_at: null, reported_by: 'operator', note: VERSION_NOTE });
+    expect(versionInfo({ GIT_COMMIT: 'main', BUILT_AT: 'yesterday' })).toEqual({ commit: null, built_at: null, reported_by: 'operator', note: VERSION_NOTE });
     expect(versionInfo({ GIT_COMMIT: `${SHA}\n<script>` }).commit).toBeNull();
     expect(versionInfo({ GIT_COMMIT: 'A'.repeat(40) }).commit).toBeNull(); // lowercase hex only, as git prints it
   });

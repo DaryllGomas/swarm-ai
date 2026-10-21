@@ -40,7 +40,7 @@ test('the footer links the running commit on GitHub, as a text link with rel noo
   assert.equal(link.href, `https://github.com/DaryllGomas/swarm-ai/commit/${sha}`);
   assert.equal(link.textContent, sha.slice(0, 7));
   assert.equal(link.rel, 'noopener noreferrer');
-  assert.match(note.textContent, /Running code: /);
+  assert.match(note.textContent, /Build reported by the operator: /);
 });
 
 test('the footer adds no link for a commit that is not a full hash, and says so when it is not recorded', async () => {

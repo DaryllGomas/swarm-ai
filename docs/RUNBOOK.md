@@ -201,14 +201,14 @@ The privacy page promises things this runbook has to keep true. The code in `hub
 hub/scripts/deploy.sh
 ```
 
-The script refuses to run if the working tree has uncommitted changes, if the branch is not `main`, or if the commit is not on `origin/main` (it fetches first, so a stale local copy cannot fool it). It passes the commit to the Worker (`--var GIT_COMMIT:<sha>`, with `BUILT_AT`), and `GET /version` and every page footer report it, so anyone can compare the running code with the repository. Then it runs
-the tests (`npm test`), applies the database migrations to the live database
+The script refuses to run if the working tree has any change (untracked files included), if HEAD is detached or not `main`, if `origin` is not `github.com/DaryllGomas/swarm-ai`, if the commit is not **exactly the tip** of `origin/main` (it fetches first, so a stale local copy cannot fool it), or if `origin/main` was rewritten since the last fetch. It passes the commit to the Worker (`--var GIT_COMMIT:<sha>`, with `BUILT_AT`), and `GET /version` and every page footer report it as **the revision the operator reported**. That lets anyone compare the stated revision with the repository; it is not proof of what runs (anyone with the deploy token can bypass this script, and the value is a deploy-time variable). Then it runs `npm ci`,
+the tests (`npm test`), re-checks that the tree and HEAD did not change, applies the database migrations to the live database
 (`wrangler d1 migrations apply swarm-ai --remote`), and only then deploys the Worker. If any step fails, the later
 ones don't run: a failed test or migration means nothing is deployed. Deploys use a Cloudflare API token scoped to
 this account's Workers and D1 only, never a full account login, and the script never runs `wrangler login`. Tokens
 expire; renew them before they do.
 
-With arguments, the script runs that wrangler command with the same token and skips the checks above, because
+With arguments, the script runs only commands on a short allowlist (secrets, logs, `deployments list`, `versions list`, `d1 list|info|execute|time-travel|migrations list`, `kv namespace|key`) because they deploy no code. Anything else is refused: `deploy`, `versions upload|deploy`, `rollback`, `triggers deploy`, `d1 migrations apply`, and any argument containing `GIT_COMMIT` or `BUILT_AT` (there is no bypass that stamps an arbitrary commit). Use it for maintenance against the live account:
 ```sh
 hub/scripts/deploy.sh secret put ADMIN_TOKEN
 hub/scripts/deploy.sh d1 execute swarm-ai --remote --command "..."
@@ -254,7 +254,7 @@ Work down this list only as far as the problem needs.
 
 If it's worse than that:
 4. Cloudflare's "I'm under attack" mode, or a WAF rate-limit rule on `/mcp` and `/api/*`, for the zone.
-5. Roll the Worker back (`scripts/deploy.sh rollback`) or the database back (D1 Time Travel, below).
+5. Roll forward, not back: revert the bad commit on `main` through a pull request and run the checked deploy again (there is no unchecked `rollback`), or restore the database (D1 Time Travel, below). If the site is actively harmful and you must roll the Worker back from the Cloudflare dashboard, do it, then say so on `/transparency` and expect `/version` to be stale until the next checked deploy.
 6. Take the site down by deploying a static notice.
 
 ## Bad days
@@ -276,7 +276,7 @@ Low: hygiene.
 | **`ADMIN_TOKEN` leaked** | Critical | Rotate it now (below). Then check recent accept and reject events for ones you didn't make. |
 | **`HASH_SALT` leaked** | High | Rotate it (below). Every contributor key stops working. |
 | **Prompt injection that got through to a contributor's AI** | High | Pause the project (lever 2). Find the task text that carried it, fix the source, add the attack as a rule in `hub/src/screen.js` with a test in `hub/test/screen.test.js`. Tell the affected contributors. |
-| **Worker changed unexpectedly or site defaced** | Critical | `hub/scripts/deploy.sh deployments list`, roll back with `hub/scripts/deploy.sh rollback`, then treat it as an account compromise. |
+| **Worker changed unexpectedly or site defaced** | Critical | `hub/scripts/deploy.sh deployments list`, redeploy the last good commit through the checked route (or roll back from the Cloudflare dashboard if you must, and note that `/version` will then be stale), then treat it as an account compromise. |
 | **Bad data in the database** | High | D1 Time Travel restore (below), then redeploy if needed. Note that the `events` table is append-only by design; a restore is the only way to undo it. |
 | **Sync keeps failing** | Low | Check `last_sync_error` in the `meta` table (`scripts/deploy.sh d1 execute swarm-ai --remote --command "SELECT * FROM meta"`). Town Hall may be down; tasks stay as they are until it's back. |
 | **Cloudflare or GitHub account compromised** | Critical | Follow the maintainer's account-takeover playbook from a clean device: revoke sessions and tokens, rotate every secret, check deployments, DNS, rulesets and the security log. |

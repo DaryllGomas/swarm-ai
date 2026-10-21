@@ -13,7 +13,7 @@ For the plan and the architecture, see [`../docs/PLAN.md`](../docs/PLAN.md) and
 - `src/access.js`: Access JWT verification. `src/ops.js`: private operator APIs. `src/prescreen.js`: advisory Workers AI annotations.
 - `src/mcp.js`: the MCP tools. `src/core.js`: stats, claims, allocation, task intake. `src/lib.js`: helpers.
 - `src/privacy.js`, `src/rollup.js`, `src/pii.js`, `src/trust.js`: privacy and trust (the three choices and credit, the k-anonymity rule, network-hash erasure, delete account and remove handle; the weekly rollup and purge; the personal-details check; `/version`, `security.txt` and the transparency date). See [`../docs/DATA-POLICY.md`](../docs/DATA-POLICY.md).
-- `src/webauthn.js`, `src/accounts.js`, `src/voting.js`: passkey accounts (hand-written WebAuthn on WebCrypto), sessions, ballots, the weekly snapshot and `/api/vote/*`.
+- `src/webauthn.js`, `src/accounts.js`, `src/voting.js`: passkey accounts (hand-written WebAuthn on WebCrypto), sessions, ballots, the weekly snapshot and `/api/vote/*`. `src/dp.js`: the Laplace noise the weekly figures are released with.
 - `src/steering.js`, `src/me.js`, `src/identity.js`: Phase 4. Linking a contributor to a voter account (link codes), the ballot that steers `next_task`, the weekly summary, `/api/me`, and contributor creation.
 - `src/oauth.js`, `src/oauth-scopes.js`: MCP sign-in (OAuth 2.1 + PKCE) on `@cloudflare/workers-oauth-provider`, the `/authorize` page, and the `read`/`work`/`submit` scopes.
 - `src/sync.js`: Town Hall task sync. `src/github.js`: the GitHub connector (issues to tasks, pull-request checks, merges wait for a reviewer, webhook, project registration). `src/screen.js`: screening of project text. `src/links.js`: submission link
@@ -71,10 +71,10 @@ Locally, set `RP_ORIGIN=http://localhost:8787` so the issuer matches.
 
 ## Deploy (maintainer only)
     scripts/deploy.sh
-The script refuses to run with uncommitted changes or from any branch but `main`. Then it runs `npm test`,
-`wrangler d1 migrations apply swarm-ai --remote` and `wrangler deploy`. With arguments it runs wrangler with the deploy
-token instead and skips those checks, for example `scripts/deploy.sh secret put ADMIN_TOKEN` (secrets are `ADMIN_TOKEN`
-and `HASH_SALT`). The token comes from `$CLOUDFLARE_API_TOKEN`, or else the operator's local config. The script never
+The script refuses to run with any uncommitted change, a detached HEAD, any branch but `main`, a non-canonical `origin`, or a commit that is not the
+exact tip of a freshly fetched `origin/main`. Then it runs `npm ci`, `npm test`,
+`wrangler d1 migrations apply swarm-ai --remote` and `wrangler deploy`. With arguments it runs only an allowlist of maintenance commands that deploy
+no code, for example `scripts/deploy.sh secret put ADMIN_TOKEN` (secrets are `ADMIN_TOKEN` and `HASH_SALT`); `deploy`, `rollback` and `--var GIT_COMMIT` are refused. `/version` shows the commit the operator reported, which is a claim, not proof. The token comes from `$CLOUDFLARE_API_TOKEN`, or else the operator's local config. The script never
 runs `wrangler login`.
 
 ## The INTAKE lever

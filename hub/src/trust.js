@@ -66,12 +66,16 @@ export function transparencyJson(now = Date.now()) {
 }
 
 // ---------------------------------------------------------------- /version
-// The commit is injected at deploy time (hub/scripts/deploy.sh passes --var GIT_COMMIT:<sha> and --var BUILT_AT:<time>), so what runs
-// can be compared with the open source code. Without them (local development) both are null: nothing is guessed.
+// The commit is the one the OPERATOR says was deployed: hub/scripts/deploy.sh passes --var GIT_COMMIT:<sha> and --var BUILT_AT:<time> after
+// checking that the tree is clean and the commit is the tip of origin/main. It lets anyone compare that revision with the public code. It
+// is NOT proof of what is running: it is a variable set at deploy time by whoever holds the deploy token, not a measurement of the Worker's
+// bytes, and a malicious or compelled operator could set any value or deploy other code. Without the variables (local development) both
+// are null: nothing is guessed.
+export const VERSION_NOTE = 'The commit and build time are what the operator reported when deploying. They are not cryptographic proof of the code that is running, and an operator who deployed something else could report anything. Compare the commit with the public repository, and treat it as a claim.';
 export function versionInfo(env) {
   const commit = /^[0-9a-f]{40}$/.test(env.GIT_COMMIT || '') ? env.GIT_COMMIT : null;
   const built = env.BUILT_AT && !Number.isNaN(Date.parse(env.BUILT_AT)) ? new Date(env.BUILT_AT).toISOString() : null;
-  return { commit, built_at: built };
+  return { commit, built_at: built, reported_by: 'operator', note: VERSION_NOTE };
 }
 
 // ---------------------------------------------------------------- security.txt (RFC 9116)

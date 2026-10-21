@@ -626,7 +626,7 @@
   async function footerCommit() {
     const note = document.querySelector('.foot-note');
     if (!note) return;
-    const wrap = el('span', 'foot-commit'); wrap.appendChild(document.createTextNode(' Running code: '));
+    const wrap = el('span', 'foot-commit'); wrap.appendChild(document.createTextNode(' Build reported by the operator: ')); wrap.title = 'The commit the operator says was deployed. Compare it with the public code; it is not proof of what runs.';
     try {
       const v = await getJson('/version');
       if (typeof v.commit === 'string' && /^[0-9a-f]{40}$/.test(v.commit)) {

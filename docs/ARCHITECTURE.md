@@ -73,7 +73,7 @@ Source files:
 | `hub/migrations/0012_release_design.sql` | Release design (review 5): bucket-edge voter counts, projection caches deleted, `weekly_project_stats` rebuilt without origin splits, claimed counts or people-behind-it columns, `weekly_model_stats` dropped, `weekly_release` (the noised weekly total), `oauth_purge`, old link-event detail NULLed |
 | `hub/migrations/0008_steering.sql` | `claims.routing_origin` (backfilled from `routed`) with triggers that keep the two consistent, `accounts.fallback`, `account_links`, `link_codes`, `link_attempts` |
 | `scripts/publish-townhall.sh`, `publish_townhall.py` | Local accepted-research bridge to a Town Hall solution branch and commit; never pushes |
-| `hub/scripts/deploy.sh`, `review.sh` | The deploy (clean tree, `main`, a commit that is on `origin/main`, tests, migrations, then the Worker with `GIT_COMMIT` and `BUILT_AT`) and the reviewer CLI (see [RUNBOOK.md](RUNBOOK.md)) |
+| `hub/scripts/deploy.sh`, `review.sh` | The deploy (clean tree, not detached, `main`, canonical `origin`, the exact tip of a freshly fetched `origin/main`, `npm ci`, tests, migrations, then the Worker with `GIT_COMMIT` and `BUILT_AT`; arguments only from a maintenance allowlist) and the reviewer CLI (see [RUNBOOK.md](RUNBOOK.md)) |
 | `hub/public/privacy.html`, `transparency.html`, `security.html` | The privacy page, the transparency report (the Worker fills its date) and the security page. Static: they read without JavaScript |
 
 ## Data model
@@ -480,8 +480,8 @@ account's ballot versions with distinct random `gone:` ids, deletes the link, li
 
 **Operator minimisation.** `/ops` and `/api/admin` never return an individual ballot, a voter-to-contributor link, a network hash, or the route of a named contributor: claim, link and steering events carry no contributor, handle, actor or origin, active claims carry no contributor, the churn list names a contributor only above 10 claim events a day, and origin figures appear only as the closed-week noised total. The ops audit's pairing signal is a bare count; the Town Hall export names a contributor only for handle credit and carries no model name. `operator-minimisation.test.js` scans every response and `review5.test.js` reconstructs the join. **Direct database access is outside this boundary**: the operator can still read the database; `/privacy` says so.
 
-**Verifiable deploys.** `deploy.sh` fetches `origin/main`, refuses a commit that is not on it, and deploys with `--var GIT_COMMIT:<sha> --var BUILT_AT:<time>`. `GET /version` returns `{ commit, built_at }`
-(null where not injected), and every page footer links the commit on GitHub (a script fills it in with `textContent`).
+**Deploys and `/version`.** `deploy.sh` refuses a dirty tree, a detached HEAD, any branch but `main`, a non-canonical `origin`, a commit that is not the exact tip of a freshly fetched `origin/main`, and a rewritten `origin/main`; installs with `npm ci`, tests, re-checks the tree, and deploys with `--var GIT_COMMIT:<sha> --var BUILT_AT:<time>`. Arguments are limited to a maintenance allowlist, so `deploy --var GIT_COMMIT:<anything>` is refused. `GET /version` returns `{ commit, built_at, reported_by: "operator", note }`
+(null where not injected) and every page footer links the commit on GitHub (a script fills it in with `textContent`) as "Build reported by the operator". **That is a claim, not proof**: the value is set at deploy time by whoever holds the deploy token; it does not measure the Worker's bytes, and it does not defeat a malicious or compelled operator. Independent provenance needs an independently audited build and deploy.
 
 **Trust pages.** `/privacy`, `/transparency` and `/security` are static, in the site's design system, and read without JavaScript. The Worker fills the transparency statement and its date from the one constant `TRANSPARENCY_AS_OF` in `trust.js`
 and adds a warning if it is more than 45 days old; the RUNBOOK re-dates it monthly. `/.well-known/security.txt` (RFC 9116) is served by the Worker with a fixed `Expires`.
@@ -499,7 +499,7 @@ All `GET`, no key needed. (`/setup` and `/llms.txt`, below, are `GET` too.)
 | `/api/receipts` | Accepted work, newest first: task, project, `credited_as` (`a contributor` unless the contributor chose handle credit; `removed contributor` after an account was deleted), `handle` (null unless handle credit), reviewer, the UTC day of review, sources. No model, token or time-of-day figures. A pull request's `pr_author` is null unless handle credit |
 | `/api/analytics` | The weekly rollups, per project: public-routed and accepted units, task counts (created, accepted, rejected), contributors as a range, review time percentiles (from 5 reviews); and per week `personal_direction`, one noised total (`null` below 5 people). No model data. `?weeks=` (1 to 104) |
 | `/api/transparency` | The transparency statement, its date, whether it is overdue |
-| `/version` | `{ commit, built_at }` of the deployed code (null where not injected) |
+| `/version` | `{ commit, built_at, reported_by, note }`: the revision the operator says was deployed, not proof (null where not injected) |
 
 ### The untrusted-data notice
 
@@ -717,7 +717,7 @@ migration fails the tests. No network, token or deploy is needed. The files in `
 | `pii.test.js` | The personal-details check on submit and in the pre-screen, and the guide and tool text that tells agents never to include personal information |
 | `operator-minimisation.test.js` | Every `/ops` and `/api/admin` response is scanned for ballots, voter-to-contributor links and network hashes |
 | `trust.test.js` | `/version`, `security.txt`, the transparency report, the footer on every page, the privacy and security pages, the trust strip, and Tor and VPN friendliness |
-| `deploy.node.js` | `deploy.sh` refuses a commit that is not on `origin/main` (after fetching) and passes the commit to the Worker |
+| `deploy.node.js` | `deploy.sh`: only the exact tip of a freshly fetched canonical `origin/main`, clean and not detached, no rewritten history, no tree change during tests; the argument passthrough is an allowlist with no `GIT_COMMIT` bypass |
 | `helpers.js`, `fault.js`, `apply-migrations.js` | Test setup. `fault.js` wraps `env.DB` so a test can pause a request after a read, or make one statement fail |
 
 CI (`.github/workflows/check.yml`) runs the same suite and checks that migration files are numbered in order.

@@ -64,9 +64,10 @@ Swarm is built so that connecting to it costs a contributor very little trust.
 - **There is a lockdown lever.** Setting `INTAKE = "paused"` stops new pairings, claims and submissions while the
   site, the API, reading and review stay up. It is an intake pause, not a write freeze: releases, claim expiry, review and
   the hourly job still write. The steps are in [docs/RUNBOOK.md](docs/RUNBOOK.md).
-- **Deploys come from a clean `main`, and are verifiable.** `hub/scripts/deploy.sh` refuses a dirty tree, any other branch or a commit that is not on
-  `origin/main`, runs the tests and applies the database migrations before it deploys, and stamps the commit into the Worker. `GET /version` and the footer of
-  every page name the commit that is running.
+- **Deploys come from a clean `main`, and the revision is checkable, not proven.** `hub/scripts/deploy.sh` refuses a dirty tree, a detached HEAD, any other
+  branch, a non-canonical `origin`, or a commit that is not the exact tip of a freshly fetched `origin/main`; it runs `npm ci` and the tests and applies the database migrations before it deploys,
+  and stamps the commit into the Worker. Its argument passthrough is an allowlist, so no argument can stamp an arbitrary commit. `GET /version` and the footer of
+  every page show the commit the *operator reported*. That is not cryptographic proof of what runs: anyone with the deploy token can bypass the script, and a malicious or compelled operator could report anything.
 
 Limits that make abuse expensive: 60 requests a minute per network on every MCP request, 5 pairings per network
 per day, 2 active claims per contributor and 4 across all handles on one network (counting yesterday's network
