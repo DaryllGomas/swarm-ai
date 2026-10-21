@@ -8,6 +8,7 @@ import { bucketFloor } from '../src/privacy.js';
 import { publishSnapshot } from '../src/voting.js';
 import { weekOf, weekStartMs } from '../src/lib.js';
 import { resetDb, send } from './helpers.js';
+import dpSource from '../src/dp.js?raw';
 import { NO_NOISE, publicAllocation, setupProjects, voter } from './voter.js';
 
 // A small seeded generator (mulberry32) returning numbers in (0, 1).
@@ -166,7 +167,91 @@ describe('publishSnapshot', () => {
     expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM allocation WHERE week = ?1 AND provisional = 1').bind(weekOf()).first()).n).toBe(2);
   });
 
+  it('review 6, E: a noisy fallback with FIVE eligible ballots is not reported as "fewer than 5", anywhere', async () => {
+    await crowd(5, { 'town-hall': 100 });
+    await publishSnapshot(env, Date.now(), () => 0.0001);          // five eligible voters; the noise happens to leave nothing usable
+    const current = await (await send('/api/vote/current')).json(), audit = await (await send('/api/vote/audit')).json();
+    for (const body of [current, audit.snapshot_history]) expect(JSON.stringify(body)).not.toMatch(/fewer than 5/);
+    expect(current).toMatchObject({ source: 'fallback', provisional: true, voter_count: 'not published' });
+    expect(current.reason).toMatch(/previous split is carried forward/);
+    expect(current.noise).toBeUndefined();
+    expect(audit.snapshot_history[0]).toMatchObject({ source: 'fallback', voter_count: 'not published' });
+    // ...and the honest small-electorate case says the same generic thing (it does not become a fact about the electorate either).
+    await resetDb(); await setupProjects(); await env.DB.batch([env.DB.prepare('UPDATE accounts SET suspended = 1'), env.DB.prepare('DELETE FROM vote_snapshots')]); await publicAllocation({ 'town-hall': 5000, 'swarm-ai': 5000 });
+    await crowd(3);
+    await publishSnapshot(env, Date.now(), () => 0.3);
+    expect((await (await send('/api/vote/current')).json()).reason).toBe(current.reason);
+  });
+
+  it('review 6, A: a legacy exact snapshot (noised = 0) is served as exact, with no noise description; new snapshots are noised = 1', async () => {
+    await env.DB.prepare("INSERT INTO vote_snapshots(week, voter_count, published_at, source, op, noised) VALUES (?1, 7, 1, 'ballots', 'legacy', 0)").bind(weekOf()).run();
+    await env.DB.prepare('DELETE FROM allocation WHERE week = ?1').bind(weekOf()).run();
+    await env.DB.batch([['town-hall', 9000], ['swarm-ai', 1000]].map(([p, sh]) => env.DB.prepare('INSERT INTO allocation(week, project, share, provisional) VALUES (?1, ?2, ?3, 0)').bind(weekOf(), p, sh)));
+    const legacy = await (await send('/api/vote/current')).json();
+    expect(legacy.noise).toBeUndefined();
+    expect(legacy.legacy_exact.note).toMatch(/before random noise was added/);
+    expect((await (await send('/api/vote/audit')).json()).snapshot_history[0].exact_legacy).toBe(true);
+    await env.DB.batch([env.DB.prepare('DELETE FROM vote_snapshots'), env.DB.prepare('DELETE FROM allocation WHERE week = ?1').bind(weekOf())]);
+    await crowd(6);
+    await publishSnapshot(env, Date.now(), seeded(3));
+    expect(await env.DB.prepare('SELECT noised FROM vote_snapshots').first()).toEqual({ noised: 1 });
+    const fresh = await (await send('/api/vote/current')).json();
+    expect(fresh.noise.guarantee).toBe('none_formal'); expect(fresh.noise.note).toMatch(/not a formal differential-privacy guarantee/); expect(fresh.legacy_exact).toBeUndefined();
+  });
+
   it('bucketFloor is the lower edge of the coarse bucket', () => {
     expect([0, 4, 5, 9, 10, 24, 25, 49, 50, 99, 100, 149, 150, 399].map(bucketFloor)).toEqual([0, 0, 5, 5, 10, 10, 25, 25, 50, 50, 100, 100, 150, 350]);
+  });
+});
+
+describe('review 6, F: the sampler can never return 0 or 1, so the noise is always finite', () => {
+  const withWords = (hi, lo) => { const spy = vi.spyOn(crypto, 'getRandomValues').mockImplementation((a) => { a[0] = hi; a[1] = lo; return a; }); return () => spy.mockRestore(); };
+  afterEach(() => vi.restoreAllMocks());
+
+  it('both random words at the maximum (the review\'s endpoint) give a value below 1, and a finite Laplace draw', () => {
+    const done = withWords(0xffffffff, 0xffffffff);
+    const u = secureRng(); done();
+    expect(u).toBeLessThan(1); expect(u).toBe(1 - 2 ** -53);
+    expect(Number.isFinite(laplace(100, () => u))).toBe(true);
+  });
+  it('both words at zero give a value above 0, and a finite Laplace draw', () => {
+    const done = withWords(0, 0);
+    const u = secureRng(); done();
+    expect(u).toBeGreaterThan(0); expect(u).toBe(2 ** -53);
+    expect(Number.isFinite(laplace(100, () => u))).toBe(true);
+  });
+  it('every mapped value is exactly representable: neighbouring source words give distinct, strictly increasing values', () => {
+    const at = (hi, lo) => { const done = withWords(hi, lo); const u = secureRng(); done(); return u; };
+    const lows = [at(0, 0), at(0, 64), at(0, 128)], highs = [at(0xffffffff, 0xffffff40), at(0xffffffff, 0xffffff80), at(0xffffffff, 0xffffffc0)];
+    expect(lows[0]).toBeLessThan(lows[1]); expect(lows[1]).toBeLessThan(lows[2]);
+    expect(highs[0]).toBeLessThan(highs[1]); expect(highs[1]).toBeLessThan(highs[2]); expect(highs[2]).toBe(1 - 2 ** -53);
+    for (const hi of [0, 1, 0x7fffffff, 0xfffffffe, 0xffffffff]) for (const lo of [0, 63, 64, 0x80000000, 0xffffffc0, 0xffffffff]) { const u = at(hi, lo); expect(u > 0 && u < 1, `${hi},${lo}`).toBe(true); }
+  });
+  it('laplace refuses 0, 1, NaN and infinities instead of returning an infinite or NaN draw', () => {
+    for (const bad of [0, 1, -0.1, 1.5, NaN, Infinity, -Infinity, undefined]) expect(() => laplace(100, () => bad), String(bad)).toThrow(RangeError);
+  });
+  it('noisedAllocation and largestRemainder never return NaN: a non-finite weight is refused before anything is stored', () => {
+    expect(() => largestRemainder({ a: Infinity, b: 1 })).toThrow(RangeError);
+    expect(() => largestRemainder({ a: NaN, b: 1 })).toThrow(RangeError);
+    expect(() => largestRemainder({ a: -1, b: 2 })).toThrow(RangeError);
+    expect(() => noisedAllocation({ a: 10, b: 10 }, { rng: () => 1 })).toThrow(RangeError); // the review\'s forced endpoint
+    const extremes = [2 ** -53, 1 - 2 ** -53];
+    for (const u of extremes) { const r = noisedAllocation({ a: 450, b: 50 }, { rng: () => u }); if (r) { expect(Object.values(r).every(Number.isFinite)).toBe(true); expect(r.a + r.b).toBe(10000); } }
+  });
+  it('publishing with the forced endpoint stores nothing: the snapshot fails instead of writing NaN', async () => {
+    await resetDb(); await setupProjects(); await env.DB.batch([env.DB.prepare('UPDATE accounts SET suspended = 1'), env.DB.prepare('DELETE FROM vote_snapshots')]); await publicAllocation({ 'town-hall': 5000, 'swarm-ai': 5000 });
+    for (let i = 0; i < 5; i++) { const v = await voter({ allocations: null }); await env.DB.prepare('INSERT INTO ballot_versions(account, version, allocations, created) VALUES (?1, 1, ?2, ?3)').bind(v.id, JSON.stringify({ 'town-hall': 90, 'swarm-ai': 10 }), weekStartMs() - 1).run(); }
+    await expect(publishSnapshot(env, Date.now(), () => 1)).rejects.toThrow(RangeError);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM vote_snapshots').first()).n).toBe(0);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM allocation WHERE week = ?1 AND (share IS NULL OR share != share)").bind(weekOf()).first()).n).toBe(0);
+  });
+});
+
+describe('review 6, D and G: no claim the mechanism cannot back', () => {
+  it('dp.js makes no formal differential-privacy, "epsilon budget" or advanced-composition claim, and says what it is not', () => {
+    expect(dpSource).not.toMatch(/advanced composition|sqrt\(ln|roughly 25|about 7\.2|epsilon-differentially private|budget/i);
+    expect(dpSource).toMatch(/NOT: a formal differential-privacy guarantee/);
+    expect(dpSource).toMatch(/basic composition/);
+    expect(dpSource).not.toMatch(/PERSONAL_CAP/);
   });
 });

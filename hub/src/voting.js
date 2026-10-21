@@ -5,7 +5,10 @@ import { random } from './webauthn.js';
 import { K_MIN, bucketFloor, coarseCount } from './privacy.js';
 import { BALLOT_POINTS, EPSILON, noisedAllocation, secureRng } from './dp.js';
 
-export const FALLBACK_REASON = 'fewer than 5 eligible ballots';
+// Why a week shows the carried-forward split. Deliberately generic: it is usually a week with fewer than 5 eligible ballots, but the same
+// outcome follows (rarely) when the added noise leaves no usable result, and a noisy failure is not an exact fact about the electorate.
+export const FALLBACK_REASON = 'No new split was published this week, so the previous split is carried forward. This happens when too few ballots were eligible and, rarely, when the added noise left no usable result.';
+export const NOT_PUBLISHED = 'not published';
 
 // The latest ballot strictly before the cutoff. Each complete valid ballot has equal weight.
 // If a project was deactivated, the ballot must be saved again before it counts: never silently reweight a voter.
@@ -24,9 +27,11 @@ const TALLY = `SELECT p.id AS project, COALESCE(SUM(CAST(j.value AS INTEGER)),0)
   WHERE p.active = 1 GROUP BY p.id`;
 // The noise design, stated on the pages that publish the split.
 export const NOISE = { mechanism: 'laplace', epsilon: EPSILON, sensitivity_points: BALLOT_POINTS, scale_points: BALLOT_POINTS / EPSILON, unit: 'basis_points',
-  note: 'The weekly split is published with random noise added (Laplace noise, epsilon 1 per weekly release, one ballot = 100 points) and then rounded to 10000 basis points. This noised split is the official allocation and what the scheduler follows. The exact tally is never stored.' };
+  guarantee: 'none_formal',
+  note: 'Random noise is added to the weekly split so that one ballot cannot be read back from it (Laplace noise with scale 100 points, one ballot = 100 points), and the result is rounded to 10000 basis points. This noised split is the official allocation and what the scheduler follows. This is not a formal differential-privacy guarantee across all releases: whether a result is published at all, and the coarse voter count, depend on the ballots without noise. On new releases the exact tally is not stored; the ballots themselves are.' };
+export const LEGACY = { note: 'This split was published before random noise was added to the weekly split. It is the exact result of that week\'s ballots and carries no noise.' };
 // The weekly snapshot. Once per week, from the ballots saved before Monday: with at least 5 eligible ballots the exact point totals are
-// read, noised (src/dp.js) and dropped, and the noised split becomes the allocation; with fewer, the provisional fallback (the previous
+// read, noised (src/dp.js) and dropped, and the noised split becomes the allocation; with fewer, or if the noise leaves no usable result, the provisional fallback (the previous
 // split carried forward) is published and nothing about the ballots is. The count kept is the lower edge of its coarse bucket, never exact.
 // `rng` returns a uniform number in (0, 1); the default is crypto.getRandomValues, tests pass a seeded one.
 export async function publishSnapshot(env, now = Date.now(), rng = secureRng) {
@@ -43,8 +48,8 @@ export async function publishSnapshot(env, now = Date.now(), rng = secureRng) {
   const ballots = shares !== null;
   const kept = ballots ? Object.entries(shares) : [];
   const res = await env.DB.batch([
-    env.DB.prepare(`INSERT INTO vote_snapshots(week, voter_count, published_at, source, op) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(week) DO NOTHING`)
-      .bind(week, ballots ? bucketFloor(n) : 0, now, ballots ? 'ballots' : 'fallback', op),
+    env.DB.prepare(`INSERT INTO vote_snapshots(week, voter_count, published_at, source, op, noised) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(week) DO NOTHING`)
+      .bind(week, ballots ? bucketFloor(n) : 0, now, ballots ? 'ballots' : 'fallback', op, ballots ? 1 : 0),
     // Replace the provisional seed for this week only when this request won the snapshot insert.
     env.DB.prepare('DELETE FROM allocation WHERE week = ?1 AND EXISTS (SELECT 1 FROM vote_snapshots WHERE week = ?1 AND op = ?2 AND source = \'ballots\')').bind(week, op),
     ...kept.map(([project, share]) => env.DB.prepare(`INSERT INTO allocation(week, project, share, provisional)
@@ -84,19 +89,21 @@ export async function handleVoting(req, env, path) {
   }
   if (path === '/api/vote/current') {
     const a = await currentAllocation(env);
-    const snapshot = await env.DB.prepare('SELECT week, voter_count, published_at, source FROM vote_snapshots WHERE week = ?1').bind(a.week).first();
-    return privateJson({ week: a.week, projected: false, source: snapshot?.source || 'fallback', voter_count: snapshot?.source === 'ballots' ? coarseCount(snapshot.voter_count) : 'fewer than 5',
-      reason: snapshot?.source === 'ballots' ? undefined : FALLBACK_REASON,
+    const snapshot = await env.DB.prepare('SELECT week, voter_count, published_at, source, noised FROM vote_snapshots WHERE week = ?1').bind(a.week).first();
+    const released = snapshot?.source === 'ballots';
+    return privateJson({ week: a.week, projected: false, source: snapshot?.source || 'fallback', voter_count: released ? coarseCount(snapshot.voter_count) : NOT_PUBLISHED,
+      reason: released ? undefined : FALLBACK_REASON,
       published_at: snapshot?.published_at || null, provisional: !snapshot || snapshot.source === 'fallback',
       shares: Object.fromEntries(Object.entries(a.shares).map(([k, v]) => [k, Math.round(v * 100)])), unit: 'basis_points',
-      next_release: 'The next split is published on Monday (UTC). There is no projection of it: nothing is shown before then.', noise: snapshot?.source === 'ballots' ? NOISE : undefined });
+      next_release: 'The next split is published on Monday (UTC). There is no projection of it: nothing is shown before then.',
+      noise: released && snapshot.noised ? NOISE : undefined, legacy_exact: released && !snapshot.noised ? LEGACY : undefined });
   }
   if (path === '/api/vote/audit') {
     // Weekly figures only. No per-day count of ballots and no live count of eligible voters: a number that moves during the week is a signal anyone can poll.
-    const history = await env.DB.prepare('SELECT week, voter_count, published_at, source FROM vote_snapshots ORDER BY week DESC LIMIT 104').all();
-    // A count of people for a group smaller than 5 is not published (k-anonymity): it shows "fewer than 5".
-    return privateJson({ snapshot_history: history.results.map((h) => ({ ...h, voter_count: h.source === 'ballots' ? coarseCount(h.voter_count) : 'fewer than 5', reason: h.source === 'ballots' ? undefined : FALLBACK_REASON })),
-      noise: NOISE, note: 'Published once a week, on Monday. Counts are published only as "fewer than 5" or as a coarse bucket (5-9, 10-24, 25-49, 50-99, then steps of 50), and the database keeps only the bucket. The split itself carries random noise (see "noise"). A week with fewer than 5 eligible ballots publishes the carried-forward fallback, not a result. There are no daily counts and no projection. No voter identities are public.' });
+    const history = await env.DB.prepare('SELECT week, voter_count, published_at, source, noised FROM vote_snapshots ORDER BY week DESC LIMIT 104').all();
+    // A count of people for a group smaller than 5 is not published (k-anonymity): a week without a published result shows no count.
+    return privateJson({ snapshot_history: history.results.map(({ noised, ...h }) => ({ ...h, voter_count: h.source === 'ballots' ? coarseCount(h.voter_count) : NOT_PUBLISHED, reason: h.source === 'ballots' ? undefined : FALLBACK_REASON, exact_legacy: h.source === 'ballots' && !noised ? true : undefined })),
+      noise: NOISE, note: 'Published once a week, on Monday. A voter count is published only as a coarse bucket (5-9, 10-24, 25-49, 50-99, then steps of 50), and the database keeps only the bucket. The split itself carries random noise (see "noise"); this is not a formal differential-privacy guarantee. A week with no published result carries the previous split forward, which usually means fewer than 5 eligible ballots, and shows no count. There are no daily counts and no projection. No voter identities are public.' });
   }
   return privateJson({ error: 'not found' }, 404);
 }
