@@ -1,12 +1,14 @@
 import { beforeEach, it, expect } from 'vitest';
 import { env } from 'cloudflare:workers';
-import { publishSnapshot, projection } from '../src/voting.js';
+import { publishSnapshot } from '../src/voting.js';
 import { currentAllocation, weekStats } from '../src/core.js';
 import { weekOf, weekStartMs, sha256 } from '../src/lib.js';
 import { random } from '../src/webauthn.js';
 import { makeEnv, send, resetDb, newUser, addTask, BODY, SOURCE } from './helpers.js';
 import { post } from './passkeys.js';
 import { wrapDb } from './fault.js';
+import { NO_NOISE } from './voter.js';
+const publish=(e,now)=>publishSnapshot(e,now,NO_NOISE);
 const start=()=>weekStartMs(), week=()=>weekOf();
 beforeEach(async()=>{
   await resetDb();
@@ -55,7 +57,7 @@ it('ballot writes enforce exact Origin, X-Swarm and rate limit; methods and malf
   expect((await post('/api/ballot',{allocations:null}, {cookie:v.cookie,method:'PUT'})).status).toBe(400);
 });
 it('publishes a real 70/30 snapshot in basis points and keeps percent interfaces',async()=>{
-  await crowd(5);expect(await publishSnapshot(env)).toMatchObject({published:true});
+  await crowd(5);expect(await publish(env)).toMatchObject({published:true});
   expect(await shares()).toEqual([{project:'swarm-ai',share:3000,provisional:0},{project:'town-hall',share:7000,provisional:0}]);
   expect((await currentAllocation(env)).shares).toEqual({'swarm-ai':30,'town-hall':70});
   expect((await weekStats(env)).projects.find(p=>p.id==='town-hall').allocation.share).toBe(70);
@@ -64,55 +66,55 @@ it('publishes a real 70/30 snapshot in basis points and keeps percent interfaces
 it('largest remainders sum to 10000 and break ties by project id',async()=>{
   await env.DB.prepare("INSERT INTO projects(id,name,kind,summary,reviewer) VALUES ('third','Third','research','test','reviewer')").run();
   for(const id of ['swarm-ai','town-hall','third','swarm-ai','town-hall','third']) await voter({allocations:{[id]:100}});
-  await publishSnapshot(env);
+  await publish(env);
   const s=await shares();expect(s.reduce((n,r)=>n+r.share,0)).toBe(10000);expect(s.map(r=>r.share)).toEqual([3334,3333,3333]);
   await env.DB.prepare("UPDATE projects SET active = 0 WHERE id = 'third'").run();
 });
 it('snapshot is idempotent under concurrency and ignores later ballot edits',async()=>{
-  const [v]=await crowd(5);const results=await Promise.all(Array.from({length:5},()=>publishSnapshot(env)));
+  const [v]=await crowd(5);const results=await Promise.all(Array.from({length:5},()=>publish(env)));
   expect(results.filter(r=>r.published)).toHaveLength(1);
-  await version(v.id,{'swarm-ai':100},Date.now());expect((await publishSnapshot(env)).published).toBe(false);
+  await version(v.id,{'swarm-ai':100},Date.now());expect((await publish(env)).published).toBe(false);
   expect((await shares()).find(r=>r.project==='town-hall').share).toBe(7000);
 });
 it('zero ballots carries forward a provisional fallback and records no democratic result',async()=>{
   await env.DB.prepare("UPDATE allocation SET share = CASE project WHEN 'town-hall' THEN 7000 ELSE 3000 END, provisional = 0").run();
-  await publishSnapshot(env);
+  await publish(env);
   expect((await shares()).every(r=>r.provisional===1)).toBe(true);
   expect(await env.DB.prepare('SELECT source,voter_count FROM vote_snapshots WHERE week = ?1').bind(week()).first()).toEqual({source:'fallback',voter_count:0});
-  expect(await projection(env)).toEqual({week:weekOf(start()+7*86400000),projected:false,reason:'fewer than 5 ballots',voter_count:'fewer than 5'});
+  expect((await send('/api/vote/next')).status).toBe(404); // there is no projection endpoint
 });
 it('eligibility excludes accounts created at/after cutoff, suspended accounts and late edits; uses earlier versions',async()=>{
   const [v]=await crowd(5);await version(v.id,{'swarm-ai':100},start());
   await voter({created:start()});await voter({created:start()+1});await voter({suspended:1});await voter({saved:start()});
-  await publishSnapshot(env,start()+3600000);
+  await publish(env,start()+3600000);
   expect((await shares()).find(r=>r.project==='town-hall').share).toBe(7000);
-  expect((await env.DB.prepare('SELECT voter_count FROM vote_snapshots WHERE week = ?1').bind(week()).first()).voter_count).toBe(5);
+  expect((await env.DB.prepare('SELECT voter_count FROM vote_snapshots WHERE week = ?1').bind(week()).first()).voter_count).toBe(5); // the lower edge of the 5-9 bucket
 });
 it('Monday UTC and year boundaries produce separate snapshots and persistent ballots',async()=>{
   await crowd(5,{created:Date.parse('2026-01-01Z'),saved:Date.parse('2026-01-01Z')});
   for(const [time,w] of [['2026-12-27T23:59:59.999Z','2026-12-21'],['2026-12-28T00:00:00Z','2026-12-28'],['2027-01-04T00:00:00Z','2027-01-04']]) {
-    expect(await publishSnapshot(env,Date.parse(time))).toEqual({published:true,week:w});expect((await shares(w)).reduce((n,r)=>n+r.share,0)).toBe(10000);
+    expect(await publish(env,Date.parse(time))).toEqual({published:true,week:w});expect((await shares(w)).reduce((n,r)=>n+r.share,0)).toBe(10000);
   }
 });
 it('deactivated projects invalidate old ballots until saved again',async()=>{
   await crowd(5);await env.DB.prepare("UPDATE projects SET active = 0 WHERE id = 'swarm-ai'").run();
-  await publishSnapshot(env);expect((await env.DB.prepare('SELECT source FROM vote_snapshots WHERE week = ?1').bind(week()).first()).source).toBe('fallback');
+  await publish(env);expect((await env.DB.prepare('SELECT source FROM vote_snapshots WHERE week = ?1').bind(week()).first()).source).toBe('fallback');
 });
 it('snapshot transaction rolls back completely if any allocation write fails',async()=>{
   await crowd(5);const db=wrapDb(env.DB,{failBatchAt:2});
-  await expect(publishSnapshot(makeEnv({DB:db}))).rejects.toThrow();
+  await expect(publishSnapshot(makeEnv({DB:db}),Date.now(),NO_NOISE)).rejects.toThrow();
   expect(await env.DB.prepare('SELECT * FROM vote_snapshots WHERE week = ?1').bind(week()).first()).toBeNull();
-  expect((await shares()).every(r=>r.provisional===1)).toBe(true);expect((await publishSnapshot(env)).published).toBe(true);
+  expect((await shares()).every(r=>r.provisional===1)).toBe(true);expect((await publish(env)).published).toBe(true);
 });
-it('audit returns aggregates only, counts daily voters once, fills 30 days and lists snapshot history',async()=>{
+it('audit returns weekly aggregates only (no daily or live counts) and lists snapshot history',async()=>{
   const v=await voter();await version(v.id,{'swarm-ai':100},Date.now()-1);await version(v.id,{'town-hall':100},Date.now());
-  await publishSnapshot(env);const a=await(await send('/api/vote/audit')).json();
-  expect(a.eligible_voter_count).toBe('fewer than 5');expect(a.ballots_per_day).toHaveLength(30);expect(a.ballots_per_day.at(-1).ballots).toBe('<5');expect(a.snapshot_history).toHaveLength(1);
+  await publish(env);const a=await(await send('/api/vote/audit')).json();
+  expect(a.eligible_voter_count).toBeUndefined();expect(a.ballots_per_day).toBeUndefined();expect(a.snapshot_history).toHaveLength(1);expect(a.noise).toMatchObject({mechanism:'laplace',epsilon:1});
   const text=JSON.stringify(a);expect(text).not.toContain(v.id);expect(text).not.toContain('allocations');expect(text).not.toContain('network');
   expect((await send('/api/vote/config')).status).toBe(200);expect((await send('/api/vote/missing')).status).toBe(404);expect((await post('/api/vote/current')).status).toBe(405);
 });
 it('the real weighted-deficit scheduler converges to snapshot 70/30 in routed units',async()=>{
-  await crowd(5);await publishSnapshot(env);
+  await crowd(5);await publish(env);
   await env.DB.prepare("UPDATE projects SET kind = 'research' WHERE id = 'swarm-ai'").run();
   for(const project of ['town-hall','swarm-ai']) for(let i=0;i<55;i++) await addTask({project,units:i%3===0?3:1});
   const users=await Promise.all(Array.from({length:5},()=>newUser()));

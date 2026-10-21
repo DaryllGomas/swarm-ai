@@ -46,11 +46,8 @@
   }
   function allocation(host, data) {
     S.clear(host);
-    if (data.projected === false && data.reason && !data.shares) {
-      host.appendChild(S.el('p', 'quiet', 'Week of ' + data.week + ' · Not shown: ' + data.reason + '. With so few ballots a projection would reveal them.'));
-      return;
-    }
-    host.appendChild(S.el('p', 'quiet', 'Week of ' + data.week + ' · ' + data.voter_count + ' eligible ballots' + (data.projected ? ' · Projected' : '')));
+    host.appendChild(S.el('p', 'quiet', 'Week of ' + data.week + ' · ' + data.voter_count + ' eligible ballots'));
+    if (data.noise) host.appendChild(S.el('p', 'quiet', 'Published with random noise (epsilon ' + data.noise.epsilon + '), so these figures are close to, but not exactly, the votes.'));
     if (data.provisional) host.appendChild(S.el('p', 'prov-note', 'Provisional fallback: ' + (data.reason || 'no eligible ballot result') + '. Carrying the previous allocation.'));
     Object.entries(data.shares).forEach(([id, points]) => {
       const row = S.el('p', 'allocation-line'); row.appendChild(S.el('span', null, projects.find((p) => p.id === id)?.name || id));
@@ -58,15 +55,11 @@
     });
   }
   async function loadPublic() {
-    const [current, next, audit] = await Promise.all([api('/api/vote/current'), api('/api/vote/next'), api('/api/vote/audit')]);
-    allocation($('current-allocation'), current); allocation($('next-allocation'), next);
+    const [current, audit] = await Promise.all([api('/api/vote/current'), api('/api/vote/audit')]);
+    allocation($('current-allocation'), current);
     const host = $('vote-audit'); S.clear(host);
-    host.appendChild(S.el('p', null, audit.eligible_voter_count + ' eligible accounts this week. An eligible account may have no valid ballot.'));
-    host.appendChild(S.el('h3', null, 'Ballots saved per day · last 30 days'));
     host.appendChild(S.el('p', 'quiet', audit.note));
-    const days = S.el('div', 'audit-days');
-    audit.ballots_per_day.forEach((d) => days.appendChild(S.el('p', 'allocation-line', d.day + ' · ' + d.ballots)));
-    host.appendChild(days); host.appendChild(S.el('h3', null, 'Published snapshots'));
+    host.appendChild(S.el('h3', null, 'Published snapshots'));
     if (!audit.snapshot_history.length) host.appendChild(S.el('p', 'quiet', 'No weekly snapshot has been published yet.'));
     audit.snapshot_history.forEach((s) => host.appendChild(S.el('p', 'allocation-line', s.week + ' · ' + s.voter_count + ' ballots · ' + (s.source === 'fallback' ? 'Provisional fallback' : 'Ballots') + ' · ' + new Date(s.published_at).toISOString())));
   }

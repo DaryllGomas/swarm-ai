@@ -4,14 +4,14 @@ import { handleAccount } from './accounts.js';
 import { handleMe } from './me.js';
 import { handleAuthorize, oauthEnabled, providerFor } from './oauth.js';
 import { handleVoting, publishSnapshot } from './voting.js';
-import { expireClaims, weekStats } from './core.js';
+import { expireClaims, publicStatus, publicStatusFilter, weekStats } from './core.js';
 import { adminActivateProject, adminRegisterGithub, handleGithubWebhook } from './github.js';
 import { handleMcp } from './mcp.js';
 import { UNTRUSTED, syncIfStale, syncTasks } from './sync.js';
 import { SECURITY_HEADERS, clean, ipHashFor, isAdmin, iso, isoDay, json, underRateLimit } from './lib.js';
 import { adminHeld, adminPending, adminReview, adminSubmission, adminPublished } from './admin.js';
 import { handleOps } from './ops.js';
-import { creditedAs, forgetNetworks, publicHandle } from './privacy.js';
+import { creditedAs, forgetNetworks, publicHandle, purgeOAuthState } from './privacy.js';
 import { analytics, runWeeklyMaintenance } from './rollup.js';
 import { securityTxt, transparencyJson, transparencyPage, versionInfo } from './trust.js';
 import { normalizeClient, setupGuide } from './setup.js';
@@ -49,6 +49,7 @@ export default {
     ctx.waitUntil((async () => {
       // First, and on its own: forgetting must not wait on, or be skipped by, anything else the job does.
       try { await forgetNetworks(env); } catch (err) { console.error('forgetNetworks failed:', String(err?.message || err).slice(0, 300)); }
+      try { await purgeOAuthState(env); } catch (err) { console.error('oauth purge failed:', String(err?.message || err).slice(0, 300)); }
       await publishSnapshot(env);
       try { await runWeeklyMaintenance(env); } catch (err) { console.error('weekly maintenance failed:', String(err?.message || err).slice(0, 300)); }
       const now = Date.now();
@@ -149,14 +150,15 @@ async function receipts(env, url) {
   ).bind(limit).all();
   return json({
     updated: new Date().toISOString(),
-    note: 'Accepted means a project reviewer accepted it. A contributor is named only if they chose to be credited by their handle. Dates are the UTC day; no times, models or token figures are published. A pull request\'s author is public on GitHub itself.',
+    note: 'Accepted means a project reviewer accepted it. A contributor is named only if they chose to be credited by their handle; a later change applies to receipts read from then on, not to copies already saved. Dates are the UTC day; no times, models or token figures are published, but watching this list over time still tells you roughly when work was accepted. A pull request\'s author, and the sources and publication links, are public and can identify a person whatever the credit setting.',
     notice: UNTRUSTED,
     receipts: results.map((r) => ({
       id: r.id,
       task: { id: r.task, title: r.title, kind: r.kind, units: r.units },
       project: { id: r.project, name: r.project_name },
-      // Computed at read time: "a contributor" unless this contributor chose to be credited by their handle (so switching to
-      // anonymous also hides the handle on past receipts), and "removed contributor" once their account was deleted.
+      // Computed at read time: "a contributor" unless this contributor chose to be credited by their handle, and "removed contributor"
+      // once their account was deleted. Switching to anonymous hides the handle in every receipt read from then on; it cannot recall a
+      // response someone already saved or an archive made while the handle was shown.
       credited_as: creditedAs(r),
       handle: publicHandle(r),
       reviewed_by: r.reviewed_by,
@@ -176,11 +178,12 @@ async function tasks(env, ctx, url) {
   const project = clean(url.searchParams.get('project') || '', 60) || null;
   const status = url.searchParams.get('status') || null;
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 1), 200);
+  const wanted = status === null ? null : publicStatusFilter(status);
   const { results } = await env.DB.prepare(
     `SELECT id, project, parent, kind, title, units, status, created FROM tasks
-     WHERE status != 'held' AND held_reason IS NULL AND (?1 IS NULL OR project = ?1) AND (?2 IS NULL OR status = ?2) ORDER BY created, id LIMIT ?3`
-  ).bind(project, status, limit).all();
-  return json({ updated: new Date().toISOString(), notice: UNTRUSTED, tasks: results.map((t) => ({ ...t, created: iso(t.created) })) });
+     WHERE status != 'held' AND held_reason IS NULL AND (?1 IS NULL OR project = ?1) AND (?2 IS NULL OR status IN (SELECT value FROM json_each(?2))) ORDER BY created, id LIMIT ?3`
+  ).bind(project, wanted === null ? null : JSON.stringify(wanted), limit).all();
+  return json({ updated: new Date().toISOString(), notice: UNTRUSTED, tasks: results.map((t) => ({ ...t, status: publicStatus(t.status), created: iso(t.created) })) });
 }
 
 async function oneTask(env, id) {
@@ -190,5 +193,5 @@ async function oneTask(env, id) {
   const { held_reason: _unused, ...pub } = t;
   // A closed task is history: title and status only, no brief.
   if (t.status === 'closed') { delete pub.brief; delete pub.output_format; }
-  return json({ ...pub, created: iso(t.created), notice: UNTRUSTED, ...(t.status === 'closed' ? { note: 'This task is closed.' } : {}) });
+  return json({ ...pub, status: publicStatus(t.status), created: iso(t.created), notice: UNTRUSTED, ...(t.status === 'closed' ? { note: 'This task is closed.' } : {}) });
 }

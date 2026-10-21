@@ -72,11 +72,14 @@ describe('/ops responses', () => {
       seen += data.events.length; before = data.next_before;
     } while (before);
     expect(seen).toBeGreaterThan(5);
-    // The account_linked event is still listed (it is a fact about the contributor), without the account.
+    // Link and claim events are listed (they say something happened), but with no contributor, handle, route or detail at all.
     const events = (await (await a.get('audit')).json()).events;
-    const linkEvent = events.find((e) => e.type === 'account_linked' && e.contributor === w.cid && /code/.test(e.detail ?? ''));
-    expect(linkEvent, 'the old link event is shown').toBeTruthy();
-    expect(JSON.parse(linkEvent.detail)).toEqual({ via: 'code' });
+    const linkEvents = events.filter((e) => e.type === 'account_linked');
+    expect(linkEvents.length, 'link events are shown').toBeGreaterThan(0);
+    for (const e of linkEvents) expect(e).toMatchObject({ contributor: null, actor: null, detail: null });
+    for (const e of events.filter((x) => ['task_claimed', 'claim_released', 'claim_expired', 'account_unlinked'].includes(x.type))) {
+      expect(e.contributor).toBeNull(); expect(e.actor).toBeNull(); expect(e.detail ?? '').not.toMatch(/origin|routed|via|reason/);
+    }
     // Writes answer with nothing sensitive either.
     for (const [path, body] of [['project', { id: 'town-hall', paused: false, max_pending: 10 }], ['review', { id: w.submission, decision: 'accept', note: 'ok' }], ['revoke', { contributor_id: w.cid }]]) {
       const res = await a.post(path, body);

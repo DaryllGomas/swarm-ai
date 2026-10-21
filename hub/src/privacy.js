@@ -16,8 +16,8 @@ export const DEFAULT_CHOICES = { credit: 'anonymous', history: 'private', resear
 // One plain sentence per choice value, shown in the UI beside the choice and returned by the API.
 export const CHOICE_TEXT = {
   credit: {
-    anonymous: 'Your accepted work shows as "a contributor" on receipts, past ones included, and your handle is never shown.',
-    handle: 'Your handle is shown on your receipts, and switching back to anonymous hides it again, past receipts included.',
+    anonymous: 'Your accepted work shows as "a contributor" on receipts, and your handle is not shown there.',
+    handle: 'Your handle is shown on your receipts, and switching back to anonymous hides it on receipts read from then on (copies someone already saved keep it).',
   },
   history: {
     private: 'Your own claims and submissions stay visible only to you on Your Swarm.',
@@ -80,24 +80,11 @@ export function coarseCount(n, label = 'fewer than 5') {
   return `${Math.floor(n / 50) * 50}+`;
 }
 
-// ---------------------------------------------------------------- model families
-
-const FAMILIES = [
-  ['claude', /claude|anthropic|opus|sonnet|haiku/],
-  ['gpt', /gpt|openai|chatgpt|codex|\bo[134](?:-|\b)/],
-  ['gemini', /gemini|gemma|bard/],
-  ['llama', /llama/],
-  ['mistral', /mistral|mixtral|codestral/],
-  ['qwen', /qwen/],
-  ['deepseek', /deepseek/],
-  ['grok', /grok|\bxai\b/],
-];
-export const MODEL_FAMILIES = [...FAMILIES.map(([f]) => f), 'other', 'unreported'];
-// The coarse family of a self-reported model name. Only the family is ever published, never the name.
-export function modelFamily(model) {
-  const m = String(model ?? '').toLowerCase().trim();
-  if (!m) return 'unreported';
-  return FAMILIES.find(([, re]) => re.test(m))?.[0] ?? 'other';
+// The lower edge of the coarse bucket a count falls in (0 below K_MIN). Counts that are kept in the database are kept as this, never exact.
+export function bucketFloor(n) {
+  if (n < K_MIN) return 0;
+  for (const [lo, hi] of [[5, 9], [10, 24], [25, 49], [50, 99]]) if (n <= hi) return lo;
+  return Math.floor(n / 50) * 50;
 }
 
 // ---------------------------------------------------------------- the account's choices
@@ -170,25 +157,29 @@ export async function contributorsOfAccount(env, account) {
   return results.map((r) => r.id);
 }
 
-// Delete a voter account. One transaction. Gone: the account, its passkeys, sessions, link codes, the link to its AI and ballot
-// ownership. The ballot versions stay (they are part of the audit trail) under random ids that point at nobody. Past snapshots are
-// immutable records of totals and are not touched. The contributors it owned become "removed contributor": their handle becomes a
-// random tombstone, their key stops working, and their accepted work stays credited to the project. Events are scrubbed of the
-// handle, and the deletion is recorded with no detail at all.
+// Delete a voter account. One transaction, and every statement picks its contributors by the account's ownership and link AT COMMIT
+// TIME, not from a list read earlier: a contributor linked or created a moment before cannot be missed, and a request that races the
+// deletion finds the contributor already removed (the claim and submission inserts check that). Gone: the account, its passkeys,
+// sessions, link codes, the link to its AI and ballot ownership. The ballot versions stay (they are part of the audit trail) under
+// random ids that point at nobody. Past snapshots are immutable records of totals and are not touched. The contributors it owned become
+// "removed contributor": their handle becomes a random tombstone, their key stops working, their claims lose their network code, and
+// their accepted work stays credited to the project. Events are scrubbed of the handle, and the deletion is recorded with no detail.
+// Their OAuth grants and tokens (outside D1, in OAUTH_KV) are queued in oauth_purge and deleted right after, and again by the hourly
+// job. NOT erased: the content of their submissions and any pull request author name (see docs/DATA-POLICY.md).
+const OWNED = '(owner_account = ?1 OR id IN (SELECT contributor FROM account_links WHERE account = ?1))';
 export async function deleteAccount(env, account, now = Date.now()) {
-  const owned = await contributorsOfAccount(env, account);
-  const stmts = [];
-  for (const id of owned) {
-    stmts.push(
-      env.DB.prepare(
-        `UPDATE events SET detail = NULL, actor = CASE WHEN actor = (SELECT handle FROM contributors WHERE id = ?1) THEN NULL ELSE actor END
-         WHERE contributor = ?1 AND type != 'contributor_revoked'`
-      ).bind(id),
-      env.DB.prepare('UPDATE contributors SET removed = 1, owner_account = NULL, credit = ?2, handle = ?3, key_hash = ?4, pair_ip = NULL, github = NULL WHERE id = ?1')
-        .bind(id, 'anonymous', tombstone('removed'), await randomKeyHash(env)),
-    );
-  }
-  stmts.push(
+  const res = await env.DB.batch([
+    env.DB.prepare(`INSERT OR IGNORE INTO oauth_purge (contributor, created) SELECT id, ?2 FROM contributors WHERE ${OWNED}`).bind(account, now),
+    env.DB.prepare(
+      `UPDATE events SET detail = NULL, actor = CASE WHEN actor = (SELECT handle FROM contributors WHERE id = events.contributor) THEN NULL ELSE actor END
+       WHERE contributor IN (SELECT id FROM contributors WHERE ${OWNED}) AND type != 'contributor_revoked'`
+    ).bind(account),
+    env.DB.prepare(`UPDATE claims SET network = NULL WHERE contributor IN (SELECT id FROM contributors WHERE ${OWNED})`).bind(account),
+    env.DB.prepare(
+      `UPDATE contributors SET removed = 1, owner_account = NULL, credit = 'anonymous', handle = 'removed-' || lower(hex(randomblob(4))),
+         key_hash = lower(hex(randomblob(32))), pair_ip = NULL, github = NULL
+       WHERE ${OWNED}`
+    ).bind(account),
     env.DB.prepare("UPDATE ballot_versions SET account = 'gone:' || lower(hex(randomblob(16))) WHERE account = ?1").bind(account),
     env.DB.prepare('DELETE FROM account_links WHERE account = ?1').bind(account),
     env.DB.prepare('DELETE FROM link_codes WHERE account = ?1').bind(account),
@@ -197,9 +188,43 @@ export async function deleteAccount(env, account, now = Date.now()) {
     env.DB.prepare('DELETE FROM account_challenges WHERE account = ?1').bind(account),
     env.DB.prepare('DELETE FROM accounts WHERE id = ?1').bind(account),
     env.DB.prepare("INSERT INTO events (ts, type, actor) SELECT ?1, 'account_deleted', 'system' WHERE changes() > 0").bind(now), // only if the DELETE above removed an account
-  );
-  const res = await env.DB.batch(stmts);
-  return { deleted: res.at(-2).meta.changes > 0, contributors: owned.length };
+  ]);
+  const deleted = res.at(-2).meta.changes > 0;
+  if (deleted) { try { await purgeOAuthState(env, now); } catch (err) { console.error('oauth purge failed:', String(err?.message || err).slice(0, 200)); } }
+  return { deleted, contributors: res[3].meta.changes };
+}
+
+// ---------------------------------------------------------------- OAuth state outside D1
+
+// Delete every key under a KV prefix. Returns true when the prefix is empty afterwards.
+async function deletePrefix(kv, prefix) {
+  let cursor;
+  for (let page = 0; page < 100; page++) {
+    const listed = await kv.list({ prefix, ...(cursor ? { cursor } : {}) });
+    await Promise.all(listed.keys.map((k) => kv.delete(k.name)));
+    if (listed.list_complete) return true;
+    cursor = listed.cursor;
+  }
+  return false;
+}
+
+// OAuth grants and tokens of removed contributors. The OAuth library keeps them in OAUTH_KV as grant:<userId>:<grantId> and
+// token:<userId>:<grantId>:<id> (userId is "c" + the contributor id); a grant is what lets a refresh token mint new access tokens.
+// The authoritative marker is the contributor row (removed = 1: every MCP call refuses it) and the oauth_purge row. This deletes the
+// KV records and is safe to repeat. The queue row stays for a day after a successful pass and the hourly job runs it again, so a
+// token refresh that raced the deletion is swept up too. Without an OAUTH_KV binding nothing can be done and the rows stay queued.
+export async function purgeOAuthState(env, now = Date.now()) {
+  if (!env.OAUTH_KV) return { purged: 0, pending: 0 };
+  const { results } = await env.DB.prepare('SELECT contributor, created FROM oauth_purge ORDER BY created LIMIT 200').all();
+  let purged = 0, pending = 0;
+  for (const r of results) {
+    let ok = false;
+    try { ok = (await deletePrefix(env.OAUTH_KV, `grant:c${r.contributor}:`)) && (await deletePrefix(env.OAUTH_KV, `token:c${r.contributor}:`)); } catch { ok = false; }
+    if (!ok) { pending++; continue; }
+    purged++;
+    if (r.created < now - 86400000) await env.DB.prepare('DELETE FROM oauth_purge WHERE contributor = ?1').bind(r.contributor).run();
+  }
+  return { purged, pending };
 }
 
 // Replace a contributor's handle with a random tombstone. The contributor keeps working with the same key; it is just no longer

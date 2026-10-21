@@ -187,7 +187,7 @@ describe('the privacy page', () => {
   it('has a table of what is stored, for how long and why', () => {
     expect(privacyHtml).toMatch(/<th scope="col">What<\/th><th scope="col">Tier<\/th><th scope="col">Kept for<\/th><th scope="col">Why<\/th>/);
     for (const row of ['Your handle', 'contributor key', 'Claims and submissions', 'event log', 'voter account', 'passkey', 'session', 'ballot versions', 'network code', 'research ID', 'Names, email addresses, raw IP addresses']) expect(text.toLowerCase(), row).toContain(row.toLowerCase());
-    expect(text).toMatch(/Two days\. Then the key is deleted/);
+    expect(text).toMatch(/erased about two days after it was made/); expect(text).toMatch(/nearly three days/);
   });
 
   it('explains the three choices with their defaults first, using the same sentences as the app', async () => {
@@ -203,9 +203,10 @@ describe('the privacy page', () => {
     expect(text).toMatch(/Your AI provider sees what your AI does/);
     expect(text).toMatch(/GitHub shows pull request authors/);
     expect(text).toMatch(/operator can be compelled to hand over what is stored/);
-    expect(text).toMatch(/network codes older than two days are irreversible/);
+    expect(text).toMatch(/network codes older than two days are irreversible once their key is deleted/);
     expect(text).toMatch(/Ballots are tied to a random voter number/);
-    expect(text).toMatch(/never with a name, an email or an IP address/);
+    expect(text).toMatch(/stores no name, email address or raw IP address beside a ballot/);
+    expect(text).toMatch(/not the same as being unlinkable/);
     expect(text).toMatch(/cannot make you invisible/);
   });
 
@@ -248,11 +249,11 @@ describe('the security page', () => {
     expect(text).toMatch(/Test against local copies/);
     expect(text).toMatch(/Never touch other users' data/);
   });
-  it('states its scope and a brief security model, including the four independent reviews', () => {
+  it('states its scope and a brief security model, including the five independent reviews', () => {
     expect(text).toMatch(/In scope/); expect(text).toMatch(/Out of scope/);
     expect(text).toMatch(/No custody of AI credentials/); expect(text).toMatch(/Hashed keys/);
-    expect(text).toMatch(/Four independent code reviews by Codex/);
-    expect(text).toMatch(/The four review reports exist/);
+    expect(text).toMatch(/Five independent code reviews by Codex/);
+    expect(text).toMatch(/The five review reports exist/);
     expect(text).toMatch(/not a guarantee/);
   });
 });

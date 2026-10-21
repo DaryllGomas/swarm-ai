@@ -1,9 +1,12 @@
 import { verifyAccess } from './access.js';
 import { adminHeld, adminPending, adminReview } from './admin.js';
 import { currentAllocation, expireClaims, originUnitsByProject, STANDING } from './core.js';
+import { coarseCount } from './privacy.js';
 import { ipHashFor, json, readJsonResult, sha256, underRateLimit, weekOf } from './lib.js';
 import { syncTasks, UNTRUSTED } from './sync.js';
 
+// A contributor appears in the churn list only above this many claim events in 24 hours (abuse signal, not a log of who claimed what).
+const CHURN_MIN = 10;
 const notFound = () => json({ error: 'not found' }, 404);
 
 export async function handleOps(req, env, url) {
@@ -42,21 +45,27 @@ export async function handleOps(req, env, url) {
   return json(await syncTasks(env, { force: true }));
 }
 
+// The operator console shows work, never who steered it. Per-person routing origin (ballot-directed or self-picked) is not shown here at
+// all, live or by name: active claims carry no contributor, events about claims and links carry no contributor, handle or origin, and the
+// only origin figure is the closed-week release that is also public (noised, only from 5 people). Direct database access is outside this
+// boundary (docs/DATA-POLICY.md).
 async function overview(env) {
   await expireClaims(env);
   const now = Date.now(), week = weekOf(now);
-  const [allocation, routed, selfPicked, ballotDirected, counts, pending, claims, meta] = await Promise.all([
-    currentAllocation(env), originUnitsByProject(env, week, 'public_routed', STANDING), originUnitsByProject(env, week, 'self_picked', STANDING), originUnitsByProject(env, week, 'ballot_directed', STANDING),
+  const [allocation, routed, counts, pending, claims, meta, closed] = await Promise.all([
+    currentAllocation(env), originUnitsByProject(env, week, 'public_routed', STANDING),
     env.DB.prepare('SELECT status, COUNT(*) AS n FROM tasks GROUP BY status').all(),
     env.DB.prepare("SELECT COUNT(*) AS n, MIN(created) AS oldest FROM submissions WHERE status = 'pending'").first(),
-    env.DB.prepare(`SELECT c.id, c.task, c.contributor, u.handle, t.project, c.expires_at,
+    env.DB.prepare(`SELECT c.id, c.task, t.project, c.expires_at,
       CASE WHEN c.expires_at <= ?2 THEN 1 ELSE 0 END AS expiring
-      FROM claims c JOIN tasks t ON t.id = c.task JOIN contributors u ON u.id = c.contributor
+      FROM claims c JOIN tasks t ON t.id = c.task
       WHERE c.outcome IS NULL AND c.expires_at > ?1 ORDER BY c.expires_at, c.id`).bind(now, now + 3600000).all(),
     env.DB.prepare("SELECT k, v FROM meta WHERE k IN ('last_sync', 'last_sync_error')").all(),
+    env.DB.prepare('SELECT week, personal_direction_units, people_floor FROM weekly_release ORDER BY week DESC LIMIT 1').first(),
   ]);
-  return json({ week, allocation, routed_by_origin: { public_routed: routed, self_picked: selfPicked, ballot_directed: ballotDirected },
-    routing_note: 'Units handed out, not compute. Only public_routed is compared with the allocation.',
+  return json({ week, allocation, routed_by_origin: { public_routed: routed },
+    routing_note: 'Units handed out, not compute. Only public_routed is compared with the allocation. Ballot-directed and self-picked work is not shown here: for a closed week only, the weekly release (noised, at least 5 people) is below.',
+    closed_week_release: closed ? { week: closed.week, personal_direction_units: closed.personal_direction_units, people: coarseCount(closed.people_floor) } : null,
     counts: { ready: 0, claimed: 0, submitted: 0, accepted: 0, held: 0, ...Object.fromEntries(counts.results.map((r) => [r.status, r.n])) },
     pending_reviews: pending.n, oldest_review_age_ms: pending.oldest === null ? null : Math.max(0, now - pending.oldest),
     active_claims: claims.results, expiring_claims: claims.results.filter((c) => c.expiring),
@@ -111,7 +120,8 @@ async function audit(env, url) {
       SUM(CASE WHEN e.type = 'claim_released' THEN 1 ELSE 0 END) AS releases,
       SUM(CASE WHEN e.type = 'claim_expired' THEN 1 ELSE 0 END) AS expires
       FROM events e JOIN contributors c ON c.id = e.contributor
-      WHERE e.ts >= ?1 AND e.type IN ('task_claimed','claim_released','claim_expired') GROUP BY c.id ORDER BY claims + releases + expires DESC`).bind(since).all(),
+      WHERE e.ts >= ?1 AND e.type IN ('task_claimed','claim_released','claim_expired') GROUP BY c.id
+      HAVING claims + releases + expires >= ${CHURN_MIN} ORDER BY claims + releases + expires DESC`).bind(since).all(),
     env.DB.prepare(`SELECT c.id AS contributor_id, c.handle, COUNT(*) AS reviewed,
       SUM(s.status = 'rejected') AS rejected, 1.0 * SUM(s.status = 'rejected') / COUNT(*) AS rejected_ratio
       FROM submissions s JOIN contributors c ON c.id = s.contributor
@@ -119,14 +129,26 @@ async function audit(env, url) {
     env.DB.prepare(`SELECT s.id, s.contributor AS contributor_id, c.handle, s.task, s.flags, s.status
       FROM submissions s JOIN contributors c ON c.id = s.contributor WHERE json_array_length(s.flags) > 0 ORDER BY s.id DESC LIMIT 100`).all(),
   ]);
-  const page = events.results.slice(0, 50).map((e) => ({ ...e, detail: e.detail == null ? null : withoutAccount(e.detail) }));
+  const page = events.results.slice(0, 50).map(auditView);
   return json({ notice: UNTRUSTED, events: page, next_before: events.results.length > 50 ? page.at(-1).id : null,
     signals: { window_start: since, pairings_near_cap: pairings.results, claim_churn_24h: churn.results,
       rejected_ratios_all_time: rejected.results, link_flagged: flagged.results.map((r) => ({ ...r, flags: JSON.parse(r.flags) })) } });
 }
 
-// Events written before migration 0010 carried a short account id next to a contributor id (account_linked, account_unlinked).
-// Together they would be a voter-to-contributor link, which the console never shows, so any such key is dropped on the way out.
+// Events about claims, links and steering say WHAT happened to a task, never WHO or by which route. Contributor, handle and detail are
+// removed from them on the way out (the claim id stays, so a claim and its release can be paired). Anything else is shown as before, minus
+// an account key that very old link events carried.
+const WORK_EVENTS = new Set(['task_claimed', 'claim_released', 'claim_expired', 'account_linked', 'account_unlinked']);
+export function auditView(e) {
+  if (WORK_EVENTS.has(e.type)) {
+    let claim;
+    try { claim = JSON.parse(e.detail ?? 'null')?.claim; } catch { /* not JSON */ }
+    return { id: e.id, ts: e.ts, type: e.type, task: e.task, contributor: null, submission: e.submission, actor: null, detail: Number.isInteger(claim) ? JSON.stringify({ claim }) : null };
+  }
+  return { ...e, detail: e.detail == null ? null : withoutAccount(e.detail) };
+}
+
+// Events written before migration 0010 carried a short account id next to a contributor id. Any such key is dropped on the way out.
 function withoutAccount(detail) {
   try {
     const d = JSON.parse(detail);

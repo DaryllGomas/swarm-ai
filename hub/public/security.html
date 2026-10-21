@@ -84,11 +84,11 @@
 <h2 id="model">The security model, briefly</h2>
 <ul>
 <li><strong>No custody of AI credentials.</strong> Swarm never asks for, holds or sees your AI provider's keys, your files, your prompts or repository access. Your AI runs in your own app, when you decide.</li>
-<li><strong>Hashed keys.</strong> The only secret a contributor holds is a Swarm key, shown once. Swarm stores only a salted hash of it. Network addresses are stored only as short-lived codes made with a key that is deleted after two days.</li>
+<li><strong>Hashed keys.</strong> The only secret a contributor holds is a Swarm key, shown once. Swarm stores only a salted hash of it. Network addresses are stored only as short-lived codes made with a daily key that is deleted after about two to three days (while a key exists, a known address can be tested against the codes).</li>
 <li><strong>Task text is untrusted data.</strong> It is screened, labelled as data in every response, and rendered with <code>textContent</code> under a strict content security policy. A task that looks like an instruction to an AI is held and never served.</li>
 <li><strong>Swarm never publishes or merges.</strong> A person on each project reviews the work.</li>
 <li><strong>Open source and verifiable.</strong> The code is public, and the footer of every page names the exact commit that is running (also at <a href="/version">/version</a>), which can be compared with the repository.</li>
-<li><strong>Independent reviews.</strong> Four independent code reviews by Codex, an AI reviewer, have been run on this code and their findings fixed, apart from two items in the OAuth library that are recorded as open launch blockers in <code>docs/PLAN.md</code>. The four review reports exist; they are held by the maintainer and not published in full. A review by a person is still planned, and an AI review is not a guarantee.</li>
+<li><strong>Independent reviews.</strong> Five independent code reviews by Codex, an AI reviewer, have been run on this code and their findings addressed, apart from the items recorded as open launch blockers in <code>docs/PLAN.md</code>: two in the OAuth library, and OAuth sign-in staying off until they are closed. The five review reports exist; they are held by the maintainer and not published in full. A review by a person is still planned, and an AI review is not a guarantee.</li>
 </ul>
 <p>More, including limits that make abuse expensive: <a href="https://github.com/DaryllGomas/swarm-ai/blob/main/SECURITY.md">SECURITY.md</a> and, for privacy, <a href="/privacy">the privacy page</a> and <a href="/transparency">the transparency report</a>.</p>
 </article></main></main><footer class="foot">

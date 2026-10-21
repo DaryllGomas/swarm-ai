@@ -117,7 +117,7 @@ describe('fallback', () => {
     expect(r.data.steering.fell_back_to_public).toBe(true);
     expect(r.data.steering.note).toMatch(/recorded as public-routed/);
     expect((await stats())['town-hall'].routed_units).toBe(1); // honest: the public comparison sees it
-    expect((await stats())['town-hall'].ballot_directed_units).toBe(0);
+    expect((await stats())['town-hall'].ballot_directed_units).toBeUndefined();
   });
 
   it('with fallback off, says there is no eligible work in your projects and routes nothing', async () => {
@@ -171,13 +171,10 @@ describe('the public comparison stays honest', () => {
       expect(after[id].routed_units, id).toBe(before[id].routed_units);
       expect(after[id].routed_share, id).toBe(before[id].routed_share);
     }
-    expect(after['town-hall'].ballot_directed_units).toBeNull(); // one voter's AI: hidden (see privacy-k5.test.js)
-    expect(after['swarm-ai'].ballot_directed_units).toBeNull();
-    expect(after['town-hall'].self_directed_units).toBe(0);
+    // No ballot-directed or self-picked figure is public live at all (see review5.test.js).
+    for (const id of ['town-hall', 'swarm-ai']) { expect(after[id].ballot_directed_units).toBeUndefined(); expect(after[id].self_directed_units).toBeUndefined(); }
     const s = await (await send('/api/stats')).json();
-    expect(s.routing_origins.units.ballot_directed).toBeNull();
-    expect(s.routing_origins.units.public_routed).toBe(before['town-hall'].routed_units + before['swarm-ai'].routed_units);
-    expect(s.routing_origins.units.self_picked).toBe(0);
+    expect(s.routing_origins).toBeUndefined();
   });
 
   it('unlinked contributors, and linked ones with no ballot, follow the public split', async () => {
@@ -199,7 +196,7 @@ describe('the public comparison stays honest', () => {
     expect((await u.call('next_task')).data.claim.routing_origin).toBe('public_routed');
   });
 
-  it('self-picked and ballot-directed units are shown apart in /api/stats and never added to routed', async () => {
+  it('self-picked and ballot-directed units are not in /api/stats at all and never added to routed', async () => {
     await fill('town-hall', 6);
     const u = await linkedUser(await voter({ allocations: { 'town-hall': 100 } }));
     await u.call('next_task');
@@ -207,8 +204,8 @@ describe('the public comparison stays honest', () => {
     await u.call('claim_task', { id: t });
     const th = (await (await send('/api/stats')).json()).projects.find((p) => p.id === 'town-hall');
     expect(th.routed_units).toBe(0);
-    expect(th.ballot_directed_units).toBeNull();
-    expect(th.self_directed_units).toBe(3);
+    expect(th.ballot_directed_units).toBeUndefined();
+    expect(th.self_directed_units).toBeUndefined();
   });
 
   it('a ballot saved later changes the steering without relinking', async () => {

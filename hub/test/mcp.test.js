@@ -211,7 +211,7 @@ describe('work loop: next_task, claim, submit_work, review', () => {
     expect((await user.call('next_task')).isError).toBe(false);
     const final = await routed();
     expect(final.routed_units).toBe(3);
-    expect(final.routed_released_or_expired_units).toBe(0);
+    expect(final.routed_released_or_expired_units).toBeUndefined(); // lifecycle churn is not a live public figure
   });
 
   it('self-directed claims never move the routed numbers', async () => {
@@ -220,7 +220,7 @@ describe('work loop: next_task, claim, submit_work, review', () => {
     expect((await user.call('claim_task', { id: taskId })).data.claim.routed).toBe(false);
     const th = (await (await send('/api/stats')).json()).projects.find((p) => p.id === 'town-hall');
     expect(th.routed_units).toBe(0);
-    expect(th.self_directed_units).toBe(1);
+    expect(th.self_directed_units).toBeUndefined(); // self-picked work is not shown live (weekly release only)
   });
 });
 

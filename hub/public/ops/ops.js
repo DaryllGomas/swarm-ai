@@ -53,10 +53,11 @@
     const metrics = el('div', null, 'ops-grid');
     Object.entries(o.counts).forEach(([label, n]) => { const m = el('div', null, 'ops-metric'); m.append(el('strong', n), el('span', label)); metrics.append(m); });
     host.append(metrics, el('p', `${o.pending_reviews} pending reviews · Oldest: ${age(o.oldest_review_age_ms)} · ${o.active_claims.length} active claims · ${o.expiring_claims.length} expire within 1 hour`));
-    const ids = new Set([...Object.keys(o.allocation.shares), ...Object.keys(o.routed_by_origin.public_routed), ...Object.keys(o.routed_by_origin.self_picked), ...Object.keys(o.routed_by_origin.ballot_directed || {})]);
-    host.append(table(['Project', `Allocation (published ${o.allocation.week})`, 'Public routed units', 'Ballot-directed units', 'Self-picked units'], [...ids].map((id) => [id, `${o.allocation.shares[id] ?? 0}%${o.allocation.provisional[id] ? ' · provisional' : ''}`, o.routed_by_origin.public_routed[id] || 0, (o.routed_by_origin.ballot_directed || {})[id] || 0, o.routed_by_origin.self_picked[id] || 0])));
+    const ids = new Set([...Object.keys(o.allocation.shares), ...Object.keys(o.routed_by_origin.public_routed)]);
+    host.append(table(['Project', `Allocation (published ${o.allocation.week})`, 'Public routed units'], [...ids].map((id) => [id, `${o.allocation.shares[id] ?? 0}%${o.allocation.provisional[id] ? ' · provisional' : ''}`, o.routed_by_origin.public_routed[id] || 0])));
+    if (o.closed_week_release) host.append(el('p', `Closed week ${o.closed_week_release.week}: personally directed units (noised, published weekly) ${o.closed_week_release.personal_direction_units === null ? 'not released (fewer than 5 people)' : '≈ ' + o.closed_week_release.personal_direction_units} · people ${o.closed_week_release.people}`, 'quiet'));
     host.append(el('p', o.routing_note, 'quiet'), el('p', `Last sync: ${date(o.sync.last_sync)}`), el('p', `Last sync error: ${o.sync.last_sync_error || 'none'}`, 'ops-text'));
-    if (o.active_claims.length) host.append(table(['Claim', 'Task', 'Contributor', 'Project', 'Expires'], o.active_claims.map((c) => [c.id, c.task, c.handle, c.project, `${date(c.expires_at)}${c.expiring ? ' · expiring' : ''}`])));
+    if (o.active_claims.length) host.append(table(['Claim', 'Task', 'Project', 'Expires'], o.active_claims.map((c) => [c.id, c.task, c.project, `${date(c.expires_at)}${c.expiring ? ' · expiring' : ''}`])));
   }
   function source(url) {
     try {

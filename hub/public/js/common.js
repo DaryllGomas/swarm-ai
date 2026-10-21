@@ -587,8 +587,8 @@
   // ---- privacy choices (voter sign-up on /vote, "Your Swarm" on /me). The sentences match CHOICE_TEXT in hub/src/privacy.js; a test keeps them in step.
   const PRIVACY_CHOICES = [
     { key: 'credit', title: 'How you are credited', options: [
-      { value: 'anonymous', label: 'Anonymous (default)', text: 'Your accepted work shows as "a contributor" on receipts, past ones included, and your handle is never shown.' },
-      { value: 'handle', label: 'Show my handle', text: 'Your handle is shown on your receipts, and switching back to anonymous hides it again, past receipts included.' }] },
+      { value: 'anonymous', label: 'Anonymous (default)', text: 'Your accepted work shows as "a contributor" on receipts, and your handle is not shown there.' },
+      { value: 'handle', label: 'Show my handle', text: 'Your handle is shown on your receipts, and switching back to anonymous hides it on receipts read from then on (copies someone already saved keep it).' }] },
     { key: 'history', title: 'Your history', options: [
       { value: 'private', label: 'Private (default)', text: 'Your own claims and submissions stay visible only to you on Your Swarm.' },
       { value: 'weekly_purge', label: 'Delete weekly', text: 'Each week, after the totals are counted, your per-item detail is deleted and only anonymous totals remain.' }] },

@@ -75,8 +75,11 @@ export function networkOf(ip) {
 //
 // A network (the caller's IPv4 address, or an IPv6 /64) is never stored. What is stored is HMAC-SHA256(day key, network): the
 // day key is 32 random bytes, created on first use for each UTC day and kept in D1 (network_keys). The hourly job deletes keys
-// older than two days and sets the network hashes it made to NULL. Once a day's key is gone, nobody, including the operator,
-// can work out which network a stored code came from, or even tell that two old rows came from the same one.
+// older than a whole UTC day plus two days (so a key lives up to about three days) and sets the network hashes it made to NULL once
+// the ROW is more than two days old (the hourly job adds up to an hour of delay). While a key exists, anyone who can read the database
+// can compute the code of a candidate address and match it to rows (that is what the key is for). Once a day's key is gone from the live
+// database, nobody can work out which network a stored code came from, or even tell that two old rows came from the same one. A copy
+// of the key taken earlier (a database export, D1 Time Travel, memory) is outside this.
 export const NETWORK_KEY_KEEP_DAYS = 2;
 const KEY_CACHE_MS = 5 * 60 * 1000;
 const keyCache = new Map(); // day -> { key: CryptoKey, at }. Isolate memory only; a non-extractable key.

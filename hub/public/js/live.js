@@ -24,7 +24,7 @@
     host.appendChild(S.el('p', 'mt', l.summary));
     host.appendChild(meter('Allocation share' + (p.provisional ? ' (provisional)' : ''), p.voted, p.color));
     host.appendChild(meter('Routed share, this week', p.routed, '#f48a4c'));
-    const rows = [['Public-routed units, this week', S.n0(l.routed_units)], ['Ballot-directed units, this week', (l.ballot_directed_units == null ? 'hidden (fewer than 5 people)' : S.n0(l.ballot_directed_units))], ['Self-picked units, this week', S.n0(l.self_directed_units)], ['Accepted units, this week', S.n0(l.accepted_units)], ['Accepted, all time', S.n0(l.accepted_units_all_time)], ['Open tasks', S.n0(l.open_tasks)], ['Active claims', S.n0(l.active_claims)], ['Pending reviews', l.pending_reviews + ' of ' + l.reviewer_capacity.max_pending]];
+    const rows = [['Public-routed units, this week', S.n0(l.routed_units)], ['Accepted units, this week', S.n0(l.accepted_units)], ['Accepted, all time', S.n0(l.accepted_units_all_time)], ['Open tasks', S.n0(l.open_tasks)]];
     rows.forEach((r) => { kv.appendChild(S.el('dt', null, r[0])); kv.appendChild(S.el('dd', null, r[1])); });
     host.appendChild(kv);
     const why = S.el('div', 'why');
@@ -54,8 +54,7 @@
       const real = S.renderReceipts($('receipts-host'), r, { limit: 20 });
       $('rec-pill').textContent = real ? 'Live' : 'None yet';
       $('rec-note').textContent = real ? '' : 'Nothing has been accepted yet, so there is nothing to show. Pending work is never shown as accepted.';
-      const u = s.routing_origins.units;
-      $('self-line').textContent = 'This week, in units: ' + S.n0(u.public_routed) + ' public-routed · ' + (u.ballot_directed == null ? 'hidden (fewer than 5 people)' : S.n0(u.ballot_directed)) + ' ballot-directed · ' + S.n0(u.self_picked) + ' self-picked';
+      $('self-line').textContent = s.routing_note || '';
     } catch (e) {
       S.errorNote($('flow-host'));
     }

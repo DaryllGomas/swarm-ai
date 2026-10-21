@@ -1,7 +1,7 @@
 // The Swarm MCP server: Streamable HTTP, stateless JSON mode, JSON-RPC 2.0, no SDK.
 // Permission groups are enforced here, not by the client: Read (nothing), Pairing, Work (key), Submit (key + active claim).
 import {
-  CLAIM_TTL_MS, MAX_ACTIVE_CLAIMS, MAX_ACTIVE_CLAIMS_PER_NETWORK, PROVISIONAL_NOTE, STANDING, closeClaimStmts, currentAllocation, expireClaims, isRouted, newOp, originUnitsByProject, unitsByProject, weekStats,
+  CLAIM_TTL_MS, MAX_ACTIVE_CLAIMS, MAX_ACTIVE_CLAIMS_PER_NETWORK, PROVISIONAL_NOTE, STANDING, closeClaimStmts, currentAllocation, expireClaims, isRouted, newOp, originUnitsByProject, publicStatus, publicStatusFilter, unitsByProject, weekStats,
 } from './core.js';
 import { IdentityError, createContributor, keyHash } from './identity.js';
 import { SCOPES, SCOPE_FOR_TOOL, oauthChallenge, oauthEnabled } from './oauth-scopes.js';
@@ -89,7 +89,7 @@ const TOOLS = [
   },
   {
     name: 'list_projects',
-    description: 'The projects Swarm routes work to, with each one\'s share of effort this week (labeled provisional until public voting opens), routed and accepted units, open tasks and pending reviews. No key needed.',
+    description: 'The projects Swarm routes work to, with each one\'s share of effort this week (labeled provisional until public voting opens), public-routed and accepted units and open tasks. Work a voter ballot steered or an agent picked itself is not shown live (it is published weekly). No key needed.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     annotations: READONLY('List projects'),
   },
@@ -116,7 +116,7 @@ const TOOLS = [
   },
   {
     name: 'pair',
-    description: 'Get a pseudonymous handle and a contributor key, shown once. Prefer putting the key in your client config as an `Authorization: Bearer <key>` header: arguments end up in chat logs, so pass `contributor_key` only if your client cannot set headers. No email, no account. Limit: 5 pairings per network per day.',
+    description: 'Get a pseudonymous handle and a contributor key, shown once. Leave the handle out for a random one: a handle you choose can be confirmed to exist by anyone who guesses it, because pairing refuses a name that is taken. Prefer putting the key in your client config as an `Authorization: Bearer <key>` header: arguments end up in chat logs, so pass `contributor_key` only if your client cannot set headers. No email, no account. Limit: 5 pairings per network per day.',
     inputSchema: {
       type: 'object',
       properties: { handle: { type: 'string', pattern: '^[a-z0-9_-]{3,24}$', description: 'Optional public handle: 3 to 24 characters, a-z 0-9 _ -. One is generated if you leave it out.' } },
@@ -167,7 +167,7 @@ const TOOLS = [
   },
   {
     name: 'set_credit',
-    description: 'Choose how your accepted work is credited on public receipts: "anonymous" (the default; receipts say "a contributor") or "handle" (receipts show your handle). It applies to past receipts too, because it is decided when a receipt is read. If your user linked a Swarm voter account, the credit follows that account and is changed at https://swarm.bigpicsolutions.com/me instead. Needs your key or sign-in.',
+    description: 'Choose how your accepted work is credited on public receipts: "anonymous" (the default; receipts say "a contributor") or "handle" (receipts show your handle). It applies to receipts read from then on (a copy someone already saved keeps the handle), because it is decided when a receipt is read. If your user linked a Swarm voter account, the credit follows that account and is changed at https://swarm.bigpicsolutions.com/me instead. Needs your key or sign-in.',
     inputSchema: { type: 'object', properties: { credit: { type: 'string', enum: CREDIT }, ...KEY_PROP }, required: ['credit'], additionalProperties: false },
     annotations: { title: 'Set credit', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
@@ -369,16 +369,16 @@ async function listProjects({ env }) {
       allocation_share_pct: p.allocation.share,
       allocation_provisional: p.allocation.provisional,
       routed_units_this_week: p.routed_units,
-      self_directed_units_this_week: p.self_directed_units,
       accepted_units_this_week: p.accepted_units,
       open_tasks: p.open_tasks,
-      pending_reviews: p.pending_reviews,
       gap_reason: p.gap_reason,
     })),
   };
 }
 
 const taskView = (t) => ({ id: t.id, project: t.project, parent: t.parent, kind: t.kind, title: t.title, units: t.units, status: t.status, created: iso(t.created) });
+// What list_tasks and get_task show to anyone: a claimed task reads as 'ready' (see publicStatus in core.js).
+const publicTaskView = (t) => taskView({ ...t, status: publicStatus(t.status) });
 
 async function listTasks({ env, args }) {
   const status = args.status ?? 'ready';
@@ -387,9 +387,9 @@ async function listTasks({ env, args }) {
   const offset = Math.min(Math.max(Number.isInteger(args.offset) ? args.offset : 0, 0), 5000);
   const project = args.project === undefined ? null : clean(args.project, 60);
   const { results } = await env.DB.prepare(
-    "SELECT id, project, parent, kind, title, units, status, created FROM tasks WHERE status = ?1 AND status != 'held' AND held_reason IS NULL AND (?2 IS NULL OR project = ?2) ORDER BY created, id LIMIT ?3 OFFSET ?4"
-  ).bind(status, project, limit, offset).all();
-  return { status, project, tasks: results.map(taskView), notice: UNTRUSTED };
+    "SELECT id, project, parent, kind, title, units, status, created FROM tasks WHERE status IN (SELECT value FROM json_each(?1)) AND status != 'held' AND held_reason IS NULL AND (?2 IS NULL OR project = ?2) ORDER BY created, id LIMIT ?3 OFFSET ?4"
+  ).bind(JSON.stringify(publicStatusFilter(status)), project, limit, offset).all();
+  return { status, project, tasks: results.map(publicTaskView), notice: UNTRUSTED, ...(status === 'claimed' ? { note: 'A claim is not a public signal, so no task is listed as claimed. Tasks that are open or being worked show as ready.' } : {}) };
 }
 
 async function getTask({ env, args }) {
@@ -398,8 +398,8 @@ async function getTask({ env, args }) {
   const t = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?1 AND status != 'held' AND held_reason IS NULL").bind(args.id).first();
   if (!t) throw new ToolError(`Task ${clean(args.id, 20)} is not available.`);
   // A closed task is history: title and status only, no brief.
-  if (t.status === 'closed') return { ...taskView(t), notice: UNTRUSTED, note: 'This task is closed.' };
-  return { ...taskView(t), brief: t.brief, output_format: t.output_format, notice: UNTRUSTED };
+  if (t.status === 'closed') return { ...publicTaskView(t), notice: UNTRUSTED, note: 'This task is closed.' };
+  return { ...publicTaskView(t), brief: t.brief, output_format: t.output_format, notice: UNTRUSTED };
 }
 
 // ---------------------------------------------------------------- work tools
@@ -466,6 +466,7 @@ async function claim(c, who, taskId, origin) {
         `INSERT INTO claims (task, contributor, routed, week, claimed_at, expires_at, network, op, routing_origin)
          SELECT t.id, ?2, ?3, ?4, ?5, ?6, ?7, ?9, ?10 FROM tasks t JOIN projects p ON p.id = t.project
          WHERE t.id = ?1 AND t.status = 'ready' AND t.held_reason IS NULL AND p.active = 1 AND p.paused = 0 AND p.reviewer != ''
+           AND EXISTS (SELECT 1 FROM contributors u WHERE u.id = ?2 AND u.removed = 0)
            AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = t.id AND (s.contributor = ?2 OR s.status IN ('pending','accepted')))
            AND NOT EXISTS (SELECT 1 FROM claims k WHERE k.task = t.id AND k.outcome IS NULL)
            AND (SELECT COUNT(*) FROM submissions s JOIN tasks t2 ON t2.id = s.task WHERE t2.project = t.project AND s.status = 'pending') < p.max_pending
@@ -478,8 +479,8 @@ async function claim(c, who, taskId, origin) {
       ).bind(taskId, op),
       env.DB.prepare(
         `INSERT INTO events (ts, type, task, contributor, submission, actor, detail)
-         SELECT ?3, 'task_claimed', ?1, ?4, NULL, ?5, json_object('claim', id, 'routed', json(?6), 'origin', ?7) FROM claims WHERE task = ?1 AND outcome IS NULL AND op = ?2`
-      ).bind(taskId, op, now, who.id, who.handle, routed ? 'true' : 'false', origin),
+         SELECT ?3, 'task_claimed', ?1, contributor, NULL, (SELECT u.handle FROM contributors u WHERE u.id = claims.contributor), json_object('claim', id, 'routed', json(?4), 'origin', ?5) FROM claims WHERE task = ?1 AND outcome IS NULL AND op = ?2`
+      ).bind(taskId, op, now, routed ? 'true' : 'false', origin),
     ]);
   } catch (err) {
     if (!/UNIQUE/i.test(String(err.message))) throw err;
@@ -487,6 +488,7 @@ async function claim(c, who, taskId, origin) {
   }
   if (!res[0].meta.changes) {
     // Not claimed: say why, from the current state. A repeat that raced its own first call finds its claim here.
+    if (!(await env.DB.prepare('SELECT 1 AS n FROM contributors WHERE id = ?1 AND removed = 0').bind(who.id).first())) throw new ToolError('This contributor was removed, so it cannot claim work. Pair a new one.');
     task = await readClaimTask(env, who, taskId);
     const again = await myOutstandingClaim(env, who, taskId, Date.now());
     if (again) return { task, claim: { id: again.id, routed: !!again.routed, routing_origin: again.routing_origin, expires_at: iso(again.expires_at) } };
@@ -599,7 +601,7 @@ async function releaseTask({ env, args, who }) {
   // One transaction: the claim, the task and the event change only if this request wins THIS claim (see closeClaimStmts).
   // A stale or repeated release finds the claim already closed and changes nothing, in particular not the task of the
   // contributor who claimed it after us.
-  const res = await env.DB.batch(closeClaimStmts(env, { claim: c.id, task: args.id, contributor: who.id, outcome: 'released', actor: who.handle, now }));
+  const res = await env.DB.batch(closeClaimStmts(env, { claim: c.id, task: args.id, outcome: 'released', now }));
   if (!res[0].meta.changes) return releaseRefusal(env, args.id, who);
   return { released: args.id, note: RELEASE_NOTE };
 }
@@ -671,10 +673,13 @@ async function linkAccount({ env, args, who, ipHash, req, oauth }) {
 }
 
 async function setCredit({ env, args, who }) {
-  const row = await env.DB.prepare('SELECT owner_account FROM contributors WHERE id = ?1').bind(who.id).first();
-  const linked = row?.owner_account || await env.DB.prepare('SELECT 1 AS n FROM account_links WHERE contributor = ?1').bind(who.id).first();
-  if (linked) throw new ToolError('Your credit follows your Swarm voter account. Your user can change it on https://swarm.bigpicsolutions.com/me.');
-  await env.DB.prepare('UPDATE contributors SET credit = ?2 WHERE id = ?1').bind(who.id, args.credit).run();
+  // The decisive write checks, at commit time, that the contributor is still active and neither owned by nor linked to an account: a link
+  // or deletion that lands between an earlier check and this write is respected (the account's own choice wins).
+  const res = await env.DB.prepare(
+    `UPDATE contributors SET credit = ?2 WHERE id = ?1 AND removed = 0 AND owner_account IS NULL
+       AND NOT EXISTS (SELECT 1 FROM account_links WHERE contributor = ?1)`
+  ).bind(who.id, args.credit).run();
+  if (!res.meta.changes) throw new ToolError('Your credit follows your Swarm voter account (or this contributor was removed). Your user can change it on https://swarm.bigpicsolutions.com/me.');
   return { credit: args.credit, text: CHOICE_TEXT.credit[args.credit] };
 }
 
@@ -735,6 +740,7 @@ async function submitWork({ env, args, who, ctx }) {
         `INSERT INTO submissions (task, contributor, claim, body, sources, flags, model, tokens_est, created, op, pr_number, pr_author, pr_state, pr_repo_id, pr_mentions_issue)
          SELECT c.task, c.contributor, c.id, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15 FROM claims c JOIN tasks t ON t.id = c.task
          WHERE c.id = ?3 AND c.task = ?1 AND c.contributor = ?2 AND c.outcome IS NULL AND c.expires_at > ?9
+           AND EXISTS (SELECT 1 FROM contributors u WHERE u.id = c.contributor AND u.removed = 0)
            AND t.status = 'claimed' AND t.held_reason IS NULL
            AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = c.task AND s.status IN ('pending','accepted'))
            AND (SELECT COUNT(*) FROM submissions d WHERE d.contributor = c.contributor AND d.created >= ?9 - 86400000) < ${MAX_SUBMISSIONS_PER_CONTRIBUTOR_PER_DAY}`
@@ -747,8 +753,8 @@ async function submitWork({ env, args, who, ctx }) {
       ).bind(taskId, claim.id, op),
       env.DB.prepare(
         `INSERT INTO events (ts, type, task, contributor, submission, actor, detail)
-         SELECT ?4, 'submission_created', ?1, ?2, id, ?5, ?6 FROM submissions WHERE claim = ?3 AND op = ?7`
-      ).bind(taskId, who.id, claim.id, now, who.handle, allFlags.length ? JSON.stringify({ flags: allFlags }) : null, op),
+         SELECT ?3, 'submission_created', ?1, contributor, id, (SELECT u.handle FROM contributors u WHERE u.id = submissions.contributor), ?4 FROM submissions WHERE claim = ?2 AND op = ?5`
+      ).bind(taskId, claim.id, now, allFlags.length ? JSON.stringify({ flags: allFlags }) : null, op),
     ]);
   } catch (err) {
     if (/UNIQUE/i.test(String(err.message))) return submitRefusal(env, who, taskId, { body, sources, flags, pii });
@@ -778,6 +784,7 @@ async function submitRefusal(env, who, taskId, { body, sources, flags, pii = [] 
     if (live.body === body && live.sources === JSON.stringify(sources)) return submitResult(live.id, live.status, flags, { already_received: true }, pii);
     throw new ToolError(`You already have a ${live.status} submission (${live.id}) for this task.`);
   }
+  if (!(await env.DB.prepare('SELECT 1 AS n FROM contributors WHERE id = ?1 AND removed = 0').bind(who.id).first())) throw new ToolError('This contributor was removed, so it cannot hand in work.');
   const day = await env.DB.prepare('SELECT COUNT(*) AS n FROM submissions WHERE contributor = ?1 AND created >= ?2').bind(who.id, Date.now() - 86400000).first();
   if (day.n >= MAX_SUBMISSIONS_PER_CONTRIBUTOR_PER_DAY) throw new ToolError('Daily submission limit reached. Try again tomorrow.');
   const other = await env.DB.prepare("SELECT id FROM submissions WHERE task = ?1 AND status IN ('pending','accepted')").bind(taskId).first();

@@ -52,11 +52,12 @@ Source files:
 | `hub/src/steering.js` | Phase 4: the account-to-contributor link, link codes (create, redeem, brute-force limit), the ballot that steers, the weighted-deficit ordering, and the weekly summary |
 | `hub/src/me.js` | `GET /api/me` and the writes `link-code`, `unlink` and `fallback` for the Your Swarm page |
 | `hub/src/oauth.js`, `hub/src/oauth-scopes.js` | MCP sign-in: the provider setup, the `/authorize` consent page and decision, and the scope table with the authorization challenge |
-| `hub/src/voting.js` | Ballots (append-only versions), the weekly snapshot (largest remainder, idempotent, fallback), and `/api/vote/*` |
+| `hub/src/voting.js` | Ballots (append-only versions), the weekly snapshot (noised, largest remainder, idempotent, fallback), and `/api/vote/*` (no projection) |
+| `hub/src/dp.js` | The noise: Laplace draws from `crypto.getRandomValues`, the noised allocation (clamp, renormalise, largest remainder), epsilon, the per-person cap of the weekly personal-direction total |
 | `hub/src/setup.js` | The set-up guide text for AI agents, served by `/setup`, `/llms.txt` and `setup_guide` |
 | `hub/src/lib.js` | Shared helpers: responses, body limits, hashing, the forward-secure network hash (daily HMAC keys), weeks, text cleaning |
-| `hub/src/privacy.js` | Privacy and trust: the three choices, how a contributor is credited, the k-anonymity rule, model families, the hourly erasure of network hashes, deleting an account, removing a handle |
-| `hub/src/rollup.js` | The weekly rollup of closed weeks, the purge for `weekly_purge` accounts, and `GET /api/analytics` |
+| `hub/src/privacy.js` | Privacy and trust: the three choices, how a contributor is credited, the k-anonymity rule, the hourly erasure of network hashes, deleting an account (and its OAuth state), removing a handle |
+| `hub/src/rollup.js` | The weekly rollup of closed weeks (and the noised personal-direction total), the purge for `weekly_purge` accounts, and `GET /api/analytics` |
 | `hub/src/pii.js` | The deterministic personal-details check for submissions |
 | `hub/src/trust.js` | `/version`, `security.txt`, the transparency date and statement (one constant) |
 | `hub/migrations/0001_initial.sql` | The original tables and the seed. Idempotent, because the live database was made from it by hand |
@@ -68,7 +69,8 @@ Source files:
 | `hub/migrations/0007_voting.sql` | `accounts`, `credentials`, `account_challenges`, `sessions`, append-only `ballot_versions`, `vote_snapshots`; rebuilds `allocation` with `share` in basis points |
 | `hub/migrations/0009_ownership_and_pr_hint.sql` | `contributors.owner_account` (set once, immutable by trigger; backfilled from existing links), `submissions.pr_mentions_issue` |
 | `hub/migrations/0010_privacy.sql` | `network_keys`; `accounts` rebuilt with a nullable `network` and the choices (`credit`, `history`, `research`, `research_id`); `contributors.credit` and `removed`; `ballot_versions` rebuilt (no foreign key; may only be re-labelled `gone:`); event, ownership and ballot triggers that allow scrubbing and nothing else; the rollup tables |
-| `hub/migrations/0011_k_anonymity_ballots.sql` | Snapshots built from fewer than 5 ballots become fallbacks (carried-forward split, no count kept); `weekly_project_stats.ballot_directed_people` |
+| `hub/migrations/0011_k_anonymity_ballots.sql` | Snapshots built from fewer than 5 ballots become fallbacks (carried-forward split, or an equal-split seed when no earlier eligible week exists; no count kept). Not shipped yet, so repaired in place (review 5) |
+| `hub/migrations/0012_release_design.sql` | Release design (review 5): bucket-edge voter counts, projection caches deleted, `weekly_project_stats` rebuilt without origin splits, claimed counts or people-behind-it columns, `weekly_model_stats` dropped, `weekly_release` (the noised weekly total), `oauth_purge`, old link-event detail NULLed |
 | `hub/migrations/0008_steering.sql` | `claims.routing_origin` (backfilled from `routed`) with triggers that keep the two consistent, `accounts.fallback`, `account_links`, `link_codes`, `link_attempts` |
 | `scripts/publish-townhall.sh`, `publish_townhall.py` | Local accepted-research bridge to a Town Hall solution branch and commit; never pushes |
 | `hub/scripts/deploy.sh`, `review.sh` | The deploy (clean tree, `main`, a commit that is on `origin/main`, tests, migrations, then the Worker with `GIT_COMMIT` and `BUILT_AT`) and the reviewer CLI (see [RUNBOOK.md](RUNBOOK.md)) |
@@ -95,8 +97,9 @@ Monday (UTC) as `YYYY-MM-DD`.
 | `sessions` | `hash` (SHA-256 of the 32-byte session id plus the salt), `account`, `expires` (30 days) |
 | `ballot_versions` | Every saved ballot, append-only (triggers abort delete, and any update except re-labelling `account` to a random `gone:` id when the account is deleted): `account`, `version`, `allocations` (JSON, project id to points, sum 100), `created` |
 | `network_keys` | One random 32-byte key per UTC day, created on first use, deleted when two days old (see "Privacy and trust"). The network hash of a day is the HMAC of the network under that day's key |
-| `rollup_weeks`, `weekly_project_stats`, `weekly_model_stats` | The weekly rollup, kept forever: one marker per rolled-up week; per project and week the units by routing origin (routed, accepted), task counts, contributors, review count and percentiles; and submissions by model family |
-| `vote_snapshots` | One row per ISO week: `voter_count`, `published_at`, `source` (`ballots` or `fallback`). The primary key on `week` makes publishing happen once |
+| `rollup_weeks`, `weekly_project_stats`, `weekly_release` | The weekly rollup, kept forever: one marker per rolled-up week; per project and week the public-routed units, accepted units, task counts (created, accepted, rejected), contributors, review count and percentiles; and per week the one noised personal-direction total with a bucket edge for the people behind it. No per-origin split, no claimed count, no model data (`weekly_model_stats` was dropped by migration 0012) |
+| `oauth_purge` | Contributors whose OAuth grants and tokens (in `OAUTH_KV`, outside D1) are to be deleted after an account deletion; worked off hourly |
+| `vote_snapshots` | One row per ISO week: `voter_count` (the lower edge of its coarse bucket, never exact), `published_at`, `source` (`ballots` or `fallback`). The primary key on `week` makes publishing happen once |
 | `meta` | Key-value state for the sync: `last_sync`, `sync_lock`, `last_sync_error`, and for GitHub `github_last_sync`, `github_last_error`, `github_backoff_until` |
 | `github_deliveries` | Recent webhook delivery ids (kept 3 days), so a replayed delivery is ignored |
 
@@ -212,9 +215,12 @@ allocation by default and records the claim as **`public_routed`**, so the publi
 per voter account (`accounts.fallback`, default on, a toggle on the Your Swarm page). With it off the call fails with "No eligible
 work in your projects" and nothing is routed.
 
-`/api/stats` reports all three origins apart: per project `routed_units` (public), `ballot_directed_units` and
-`self_directed_units` (self-picked), and `routing_origins.units` for the week. They are never added together. A big
-ballot-directed contributor therefore cannot move the voted-versus-routed comparison; only fallback work, which is public-routed, can.
+`/api/stats` reports only `routed_units` (public-routed) against the allocation, plus open tasks and accepted results. **Ballot-directed and
+self-picked work are not live anywhere public**: a live number that moves with one person's choices can be differenced or polled to read them,
+and a gate on it ("at least 5 people") loses to subtraction against the other fields (Codex review 5, finding 2). They are released once a week, after
+the week closes, as a single noised total (`weekly_release`, `personal_direction` in `/api/analytics`), only when at least 5 different people stand
+behind it, capped at 16 units per person. A big ballot-directed contributor cannot move the voted-versus-routed comparison; only fallback work, which is public-routed, can.
+A claimed task is shown to everyone but the claimer as `ready`, and the open count includes it, so a claim moves nothing a public page shows.
 
 ## The scheduler
 
@@ -369,13 +375,16 @@ ceremonies with `userVerification: required`, attestation `none` and algorithms 
 (`MAX(version)+1` in the same statement as the insert). One ballot per account, equal weight; compute, sponsorship and
 contributions never change it.
 
-**The snapshot.** The hourly cron calls `publishSnapshot`. If no `vote_snapshots` row exists for the ISO week, one statement batch inserts it and the
-allocation rows, so it publishes once per week (`ON CONFLICT DO NOTHING`, then writes gated on this request's `op`). Eligible: account created before the week
-started, not suspended, with a ballot version saved before the week started whose projects are all still active and that still sums to 100. Shares are integer basis points by the largest remainder method (ties broken by project id), so they sum to exactly 10000.
-With zero eligible ballots the previous allocation is carried forward with `provisional = 1` and the snapshot's source is `fallback`. Swarm never presents that as a democratic result.
+**The snapshot.** The hourly cron calls `publishSnapshot`. If no `vote_snapshots` row exists for the ISO week, it reads the exact point totals of the eligible ballots, adds
+Laplace noise (epsilon 1 per release, one ballot = 100 points, so scale 100; `dp.js`) to each project's total, clamps at zero, renormalises to 10000 basis points by the
+largest remainder method (ties broken by project id) and writes the **noised** split as the allocation, in one statement batch (`ON CONFLICT DO NOTHING`, then writes gated on this request's `op`, so racing publishers
+draw once). The exact tally is dropped, not stored; the stored `voter_count` is the lower edge of a coarse bucket. The noised split is the official allocation: the scheduler follows it and every public page shows it.
+Eligible: account created before the week started, not suspended, with a ballot version saved before the week started whose projects are all still active and that still sums to 100.
+With fewer than 5 eligible ballots (or a degenerate noised result) the previous allocation is carried forward with `provisional = 1` and the snapshot's source is `fallback`. Swarm never presents that as a democratic result.
+The noise generator is a parameter of `publishSnapshot` and `rollupWeek` so tests can inject a seeded one; production always uses `crypto.getRandomValues`.
 
-`GET /api/vote/current` and `/api/vote/next` (a projection, labelled `projected`) return basis points. `GET /api/vote/audit` returns aggregates only: eligible voter
-count, accounts saving a ballot per day for 30 days, and snapshot history. Routed work is compared only against that week's targets.
+`GET /api/vote/current` returns the noised split in basis points (and the noise description). **There is no `/api/vote/next`**: a projection is a second release, and two releases can be differenced. `GET /api/vote/audit` returns
+the weekly snapshot history (counts as ranges) and the noise description; no per-day counts and no live eligible-voter count. Routed work is compared only against that week's targets.
 
 ### Your Swarm: linking an AI to a voter account
 
@@ -441,35 +450,35 @@ salts contributor keys, sessions and link codes). Caps (5 pairings a day, 3 acco
 and, until the old rows are gone, the same two in the old format (`sha256(HASH_SALT|ip|day|network)`), so they keep working across the switch.
 `forgetNetworks`, the first thing the hourly job does, deletes keys whose day is more than two days old and, in the same transaction, sets
 `claims.network`, `contributors.pair_ip` and `accounts.network` to NULL for rows older than two days (link attempts older than two days are deleted; they are
-deleted after one day anyway). Once a key is gone, nobody, the operator included, can reverse a code made with it, and old rows cannot be matched to each other.
+deleted after one day anyway). A key is deleted once its whole UTC day is more than two days old, so it lives up to nearly three days; the row's code is erased at two days. While a key exists, anyone who can read the database can compute the code of a candidate address and match it to rows. Once a key is gone from the live database nobody can reverse a code made with it, or match old rows to each other (a copy taken earlier is outside this).
 
 **Credit and receipts.** `accounts.credit` is mirrored on `contributors.credit` (set when the choice changes, and when a contributor is linked or created by an
 account); contributors with no account are `anonymous` and change it with `set_credit`. Public receipts compute the name when they are read: `a contributor` unless
-`credit = 'handle'`, `removed contributor` if `removed = 1`. So switching to anonymous hides the handle on past receipts. They show the UTC day, not the time, and no
+`credit = 'handle'`, `removed contributor` if `removed = 1`. So switching to anonymous hides the handle in every receipt read from then on (a copy already saved keeps it). They show the UTC day, not the time, and no
 model or token figures (those stay on `/me`, `my_week` and the reviewer's queue). A pull request's author login is shown only for handle credit; the PR link always is.
 
-**The k-anonymity rule** (`kCount`). A public count of people for a group smaller than 5 shows as `fewer than 5` (`<5` for the per-day ballots on the vote audit). Voters and ballots use the stricter `coarseCount`; a snapshot or projection from fewer than 5 ballots is not published (DATA-POLICY.md, "The weekly vote and k-anonymity"). It applies to
-contributors per project and in total (`/api/stats`), eligible voters, snapshot and projected voter counts, ballots per day, contributors and model-family counts in `/api/analytics`.
-Zero is shown as 0 (nobody is in the group). Units and task counts are about work and stay exact. Review time percentiles show from 5 reviews. The stored snapshot
-rows stay exact: they are immutable records, and only the public view applies the rule.
+**The k-anonymity rule** (`kCount`). A public count of people for a group smaller than 5 shows as `fewer than 5`. Voters and ballots use the stricter `coarseCount`, and the database keeps only the bucket (DATA-POLICY.md, "The weekly vote, noise and k-anonymity"). It applies to
+contributors per project in `/api/analytics` and snapshot voter counts. Zero is shown as 0 (nobody is in the group) except for voters and ballots. Units and task counts are about work and stay exact only where they do not come from people's own choices (DATA-POLICY.md, rule 10).
+Review time percentiles show from 5 reviews. The stored snapshot rows are immutable records and hold no exact count.
 
-**Retention** (`rollup.js`). Once per closed ISO week the hourly job writes, per project, the units by routing origin (routed and accepted), task counts, the number of
-contributors, review times (p50, p90) and the count of submissions by model *family* (`modelFamily` maps the self-reported name to `claude`, `gpt`, `gemini`, ...; only the family is kept).
+**Release design** (`dp.js`, `voting.js`, `rollup.js`, `core.js`). Anything derived from people's choices is released once a week, after the week closes, with noise: the vote split, and one total of personally directed work (ballot plus self-picked, never split, never per project, at least 5 people, 16 units a person at most). Live public figures are limited to open-task counts, the weekly allocation, public-routed units against it, and accepted results. This replaced the daily projection and the per-project suppression of the first k-anonymity commit, both of which lost to differencing and subtraction (review 5). `review5.test.js` builds two worlds that differ only in the secret and checks that the public surfaces are identical.
+
+**Retention** (`rollup.js`). Once per closed ISO week the hourly job writes, per project, the public-routed units, accepted units, task counts (created, accepted, rejected), the number of
+contributors, review times (p50, p90), and one `weekly_release` row with the noised personal-direction total. There is no model-family table any more.
 Every insert is `INSERT OR IGNORE` and a marker row (`rollup_weeks`) goes last, so a repeat, or two overlapping runs, change nothing. After the rollup, for contributors owned by
-(or linked to) an account with `history = 'weekly_purge'`, in weeks that were rolled up: claims and reviewed submissions are re-pointed at the stand-in contributor, bodies (except an accepted write-up a `mission`
-project has yet to publish), model, tokens, pre-screen and PR author are cleared, and the events' `contributor`, `detail` and own-handle `actor` are NULLed. The work, its units, the task and the receipt remain, credited to the project.
+(or linked to) an account with `history = 'weekly_purge'`, in weeks that were rolled up: the events about those claims and submissions (found by task and submission id, so a newer event cannot keep the owner) lose `contributor`, `detail` and own-handle `actor` first; then claims and reviewed submissions are re-pointed at the stand-in contributor, and bodies (except an accepted write-up a `mission`
+project has yet to publish, kept until it is published and at most 30 days after review), model, tokens, pre-screen and PR author are cleared. Expired claims are swept before the rollup. A claim's event takes its contributor from the claim row at commit time. The work, its units, the task and the receipt remain, credited to the project.
 A failed week stops the purge at that week.
 
 **The right to leave** (`privacy.js`, `me.js`). `POST /api/me/delete` (session, exact Origin and `X-Swarm`, and `{"confirm": "delete my account"}`), in one transaction, scrubs the events of
 the contributors the account owns, turns them into removed contributors (random `removed-xxxxxxxx` handle, a random key hash so the key stops working, `owner_account` NULL, `removed = 1`), re-labels the
-account's ballot versions with distinct random `gone:` ids, deletes the link, link codes, sessions, credentials, challenges and the account, and writes an `account_deleted` event with no contributor and no detail. `vote_snapshots` and `allocation` are never touched.
+account's ballot versions with distinct random `gone:` ids, deletes the link, link codes, sessions, credentials, challenges and the account, and writes an `account_deleted` event with no contributor and no detail. Every statement picks the contributors by ownership and link at commit time, and the claim and submission inserts check the contributor is still active, so a request racing the deletion is refused. Afterwards `purgeOAuthState` deletes the contributors' `grant:` and `token:` keys from `OAUTH_KV` (queued in `oauth_purge`, retried hourly for a day). It does not erase submissions or the pull-request author name. `vote_snapshots` and `allocation` are never touched.
 `remove_handle` (tool) and `POST /api/me/remove-handle` replace a handle with `anon-xxxxxxxx`, scrub it from events and write a `handle_removed` event with no detail.
 
 **The personal-details check** (`pii.js`). Emails, phone numbers, street addresses, PO boxes and city-state-zip lines, social-security-like numbers, Luhn-valid card numbers and labelled dates of birth. It runs in `submit_work`
 (adds `personal_details:<kind>` flags and a `personal_details` warning in the result) and in the pre-screen (records the kinds). It never blocks, and only the kinds are stored.
 
-**Operator minimisation.** `/ops` and `/api/admin` never return an individual ballot, a voter-to-contributor link or a network hash. The ops audit's pairing signal is a bare count; link events carry no account id (older ones lose it on the way out);
-the Town Hall export names a contributor only for handle credit. `operator-minimisation.test.js` scans every response. (The operator can still read the database directly; `/privacy` says so.)
+**Operator minimisation.** `/ops` and `/api/admin` never return an individual ballot, a voter-to-contributor link, a network hash, or the route of a named contributor: claim, link and steering events carry no contributor, handle, actor or origin, active claims carry no contributor, the churn list names a contributor only above 10 claim events a day, and origin figures appear only as the closed-week noised total. The ops audit's pairing signal is a bare count; the Town Hall export names a contributor only for handle credit and carries no model name. `operator-minimisation.test.js` scans every response and `review5.test.js` reconstructs the join. **Direct database access is outside this boundary**: the operator can still read the database; `/privacy` says so.
 
 **Verifiable deploys.** `deploy.sh` fetches `origin/main`, refuses a commit that is not on it, and deploys with `--var GIT_COMMIT:<sha> --var BUILT_AT:<time>`. `GET /version` returns `{ commit, built_at }`
 (null where not injected), and every page footer links the commit on GitHub (a script fills it in with `textContent`).
@@ -485,10 +494,10 @@ All `GET`, no key needed. (`/setup` and `/llms.txt`, below, are `GET` too.)
 
 | Endpoint | What |
 |---|---|
-| `/api/stats` | The week's numbers per project: the four measures (routed is public-routed only; ballot-directed and self-picked units are separate fields, and `routing_origins` totals the three), open tasks, pending reviews, active claims, reviewer capacity, gap reason, and `intake` and `paused` |
+| `/api/stats` | The week's numbers per project: allocation, public-routed units, accepted units, open tasks (ready or being worked), gap reason, and `intake` and `paused`. No ballot-directed or self-picked units, no claims, no pending reviews, no people counts |
 | `/api/tasks`, `/api/tasks/:id` | The task list (filter by `project`, `status`), and one task with its brief. Held tasks are never listed, and `:id` answers 404 for one |
 | `/api/receipts` | Accepted work, newest first: task, project, `credited_as` (`a contributor` unless the contributor chose handle credit; `removed contributor` after an account was deleted), `handle` (null unless handle credit), reviewer, the UTC day of review, sources. No model, token or time-of-day figures. A pull request's `pr_author` is null unless handle credit |
-| `/api/analytics` | The weekly rollups, per project: units and task counts (exact), contributors and model-family counts (`fewer than 5` below 5), review time percentiles (from 5 reviews). `?weeks=` (1 to 104) |
+| `/api/analytics` | The weekly rollups, per project: public-routed and accepted units, task counts (created, accepted, rejected), contributors as a range, review time percentiles (from 5 reviews); and per week `personal_direction`, one noised total (`null` below 5 people). No model data. `?weeks=` (1 to 104) |
 | `/api/transparency` | The transparency statement, its date, whether it is overdue |
 | `/version` | `{ commit, built_at }` of the deployed code (null where not injected) |
 
@@ -700,7 +709,10 @@ migration fails the tests. No network, token or deploy is needed. The files in `
 | `migration-0006.test.js` | Migration 0006 on a database that already has rows |
 | `sync-limits.test.js` | The feed fetch: the byte cap (no, false and honest `Content-Length`, a multibyte body), and the deadline |
 | `network-keys.test.js`, `migration-0010.test.js` | Forward-secure network hashing (HMAC under a day key, rotation, the first-use race, erasure of old keys and hashes, caps across the switch) and migration 0010 on a database with rows |
-| `privacy-choices.test.js` | The three choices (defaults, sign-up, `/me`, mirroring to contributors, `set_credit`), anonymous credit on past receipts, minimised public receipts, the k-anonymity rule |
+| `privacy-choices.test.js` | The three choices (defaults, sign-up, `/me`, mirroring to contributors, `set_credit`), anonymous credit on receipts read later, minimised public receipts, the k-anonymity rule |
+| `dp.test.js` | The noise: seeded statistics (mean, scale, symmetry), the secure source, largest remainder, that differencing recovers a lone ballot without noise and fails with it, the noised split as the official allocation, that no exact tally is stored, one draw per week |
+| `review5.test.js` | Codex review 5, finding by finding, each as a reconstruct-and-fail: indistinguishable public surfaces and polling, the per-person cap, the operator join, no model data, the purge joins, the 30-day write-up deadline, the privacy-write races, OAuth KV deletion |
+| `migration-0011.test.js` | Migration 0011 on populated databases (first week, consecutive small weeks, prior valid snapshot, odd project counts) and 0012 on top |
 | `retention.test.js` | The weekly rollup (aggregates, idempotency, closed weeks only), `/api/analytics`, `weekly_purge`, deleting an account, removing a handle |
 | `pii.test.js` | The personal-details check on submit and in the pre-screen, and the guide and tool text that tells agents never to include personal information |
 | `operator-minimisation.test.js` | Every `/ops` and `/api/admin` response is scanned for ballots, voter-to-contributor links and network hashes |

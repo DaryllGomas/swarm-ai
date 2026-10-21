@@ -1,6 +1,5 @@
 // Data rules shared by the MCP server, the public API and the admin API.
 import { weekOf, weekStartMs } from './lib.js';
-import { K_MIN, PURGED_HANDLE, REAL_CONTRIBUTOR, kCount } from './privacy.js';
 
 export const CLAIM_TTL_MS = 3 * 60 * 60 * 1000; // 3 hours
 export const MAX_ACTIVE_CLAIMS = 2; // per contributor
@@ -60,12 +59,22 @@ export async function addTasksBulk(env, tasks) {
 // later statements of the same transaction run only when the row carries their own id.
 export const newOp = () => crypto.randomUUID();
 
+// What a PUBLIC page or tool shows as a task's status. 'claimed' is shown as 'ready' (open or being worked): the moment a task is taken, and
+// whether it was taken through the public allocation or by someone's own choice, is not a live public signal (docs/DATA-POLICY.md). Whoever
+// holds the claim sees their own claim; everyone else sees 'ready' until it is handed in. 'submitted' and later states are shown as they are.
+export const publicStatus = (status) => (status === 'claimed' ? 'ready' : status);
+// The statuses a public filter matches: asking for 'ready' also finds claimed tasks, and 'claimed' matches nothing.
+export const publicStatusFilter = (status) => (status === 'ready' ? ['ready', 'claimed'] : status === 'claimed' ? [] : [status]);
+
 // Close ONE claim as 'released' or 'expired', and reopen its task, as one set of three statements for env.DB.batch.
 // D1 batches are transactional. The task change and the event run only if THIS request won the transition of THIS claim
 // (the claim now has this outcome and this op), so a stale or repeated request changes nothing: it can never reopen a task
 // that a newer claim, submission or review now owns. res[0].meta.changes tells the caller whether it won.
+// The event names the contributor FROM THE CLAIM ROW at commit time, not a value read earlier: if the claim was re-pointed at the
+// stand-in contributor by the weekly purge in between, the event does not bring the original owner back.
+//   actor null: the contributor's CURRENT handle, read inside the same transaction.
 //   outcome 'released': a live claim only (expires_at > now), 'expired': one that has run out (expires_at <= now).
-export function closeClaimStmts(env, { claim, task, contributor, outcome, actor, now = Date.now(), op = newOp() }) {
+export function closeClaimStmts(env, { claim, task, outcome, actor = null, now = Date.now(), op = newOp() }) {
   const expired = outcome === 'expired';
   return [
     env.DB.prepare(
@@ -78,8 +87,8 @@ export function closeClaimStmts(env, { claim, task, contributor, outcome, actor,
     ).bind(claim, task, outcome, op),
     env.DB.prepare(
       `INSERT INTO events (ts, type, task, contributor, submission, actor, detail)
-       SELECT ?5, ?6, ?2, ?7, NULL, ?8, json_object('claim', id) FROM claims WHERE id = ?1 AND outcome = ?3 AND op = ?4`
-    ).bind(claim, task, outcome, op, now, `claim_${outcome}`, contributor, actor),
+       SELECT ?5, ?6, ?2, contributor, NULL, COALESCE(?7, (SELECT u.handle FROM contributors u WHERE u.id = claims.contributor)), json_object('claim', id) FROM claims WHERE id = ?1 AND outcome = ?3 AND op = ?4`
+    ).bind(claim, task, outcome, op, now, `claim_${outcome}`, actor),
   ];
 }
 
@@ -90,10 +99,10 @@ export function closeClaimStmts(env, { claim, task, contributor, outcome, actor,
 export async function expireClaims(env, { task = null } = {}) {
   const now = Date.now();
   const { results } = await env.DB.prepare(
-    'SELECT id, task, contributor FROM claims WHERE outcome IS NULL AND expires_at <= ?1 AND (?2 IS NULL OR task = ?2)'
+    'SELECT id, task FROM claims WHERE outcome IS NULL AND expires_at <= ?1 AND (?2 IS NULL OR task = ?2)'
   ).bind(now, task).all();
   if (!results.length) return 0;
-  const stmts = results.flatMap((c) => closeClaimStmts(env, { claim: c.id, task: c.task, contributor: c.contributor, outcome: 'expired', actor: 'system', now }));
+  const stmts = results.flatMap((c) => closeClaimStmts(env, { claim: c.id, task: c.task, outcome: 'expired', actor: 'system', now }));
   const res = await env.DB.batch(stmts);
   let won = 0;
   for (let i = 0; i < res.length; i += 3) won += res[i].meta.changes;
@@ -144,85 +153,60 @@ export const LOST = `c.outcome IN ('released','expired') AND NOT EXISTS (
   SELECT 1 FROM claims c2 WHERE c2.task = c.task AND c2.contributor = c.contributor AND c2.week = c.week AND c2.routed = c.routed
   AND (c2.outcome IS NULL OR c2.outcome = 'submitted'))`;
 
+// The live public numbers. Deliberately few (docs/DATA-POLICY.md, "What is live and what is weekly"): project-level OPEN task counts, the
+// published allocation, public-routed units set against it, and accepted results. Nothing here comes from a person's own choices
+// (ballot-directed or self-picked work, who holds a claim, who has work waiting for review): a live number that moves with one person's
+// choices can be differenced or polled to read them. Those figures are published weekly, after the week closes, in /api/analytics.
 export async function weekStats(env, now = Date.now()) {
   const week = weekOf(now);
   const start = weekStartMs(now);
   const end = start + 7 * 86400000;
-  const [alloc, bdPeople, projects, routed, selfDirected, ballotDirected, lost, accepted, acceptedAll, open, pending, active, people, totals] = await Promise.all([
+  const [alloc, projects, routed, accepted, acceptedAll, open, acceptedTotal] = await Promise.all([
     currentAllocation(env, now),
-    env.DB.prepare(`SELECT COUNT(DISTINCT COALESCE(l.account, 'c:' || c.contributor)) AS n FROM claims c LEFT JOIN account_links l ON l.contributor = c.contributor
-      WHERE c.week = ?1 AND c.routing_origin = 'ballot_directed' AND ${STANDING}`).bind(week).first(),
-    env.DB.prepare('SELECT id, name, kind, summary, url, reviewer, sponsored, active, paused, max_pending FROM projects WHERE active = 1 ORDER BY name').all(),
+    env.DB.prepare('SELECT id, name, kind, summary, url, reviewer, sponsored, active, paused FROM projects WHERE active = 1 ORDER BY name').all(),
     unitsByProject(env, week, 1, STANDING),
-    originUnitsByProject(env, week, 'self_picked', STANDING),
-    originUnitsByProject(env, week, 'ballot_directed', STANDING),
-    unitsByProject(env, week, 1, LOST),
     env.DB.prepare(`SELECT t.project AS project, SUM(t.units) AS units FROM submissions s JOIN tasks t ON t.id = s.task
                     WHERE s.status = 'accepted' AND s.reviewed_at >= ?1 AND s.reviewed_at < ?2 GROUP BY t.project`).bind(start, end).all(),
     env.DB.prepare(`SELECT t.project AS project, SUM(t.units) AS units FROM submissions s JOIN tasks t ON t.id = s.task
                     WHERE s.status = 'accepted' GROUP BY t.project`).all(),
-    env.DB.prepare("SELECT project, COUNT(*) AS n FROM tasks WHERE status = 'ready' GROUP BY project").all(),
-    env.DB.prepare("SELECT t.project AS project, COUNT(*) AS n FROM submissions s JOIN tasks t ON t.id = s.task WHERE s.status = 'pending' GROUP BY t.project").all(),
-    env.DB.prepare("SELECT t.project AS project, COUNT(*) AS n FROM claims c JOIN tasks t ON t.id = c.task WHERE c.outcome IS NULL AND c.expires_at > ?1 GROUP BY t.project").bind(now).all(),
-    // Distinct contributors with a standing claim this week, per project: a count of people (see kCount).
-    env.DB.prepare(`SELECT t.project AS project, COUNT(DISTINCT c.contributor) AS n FROM claims c JOIN tasks t ON t.id = c.task JOIN contributors u ON u.id = c.contributor
-                    WHERE c.week = ?1 AND ${STANDING} AND u.removed = 0 AND u.handle != '${PURGED_HANDLE}' GROUP BY t.project`).bind(week).all(),
-    env.DB.batch([
-      env.DB.prepare(`SELECT COUNT(*) AS n FROM contributors WHERE ${REAL_CONTRIBUTOR}`),
-      env.DB.prepare('SELECT COUNT(*) AS n FROM submissions'),
-      env.DB.prepare("SELECT COUNT(*) AS n FROM submissions WHERE status = 'accepted'"),
-    ]),
+    // OPEN = ready or being worked (claimed). A claim does not change it, so it cannot separate a public-routed claim from a personal one.
+    env.DB.prepare("SELECT project, COUNT(*) AS n FROM tasks WHERE status IN ('ready', 'claimed') AND held_reason IS NULL GROUP BY project").all(),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM submissions WHERE status = 'accepted'").first(),
   ]);
   const by = (r) => Object.fromEntries(r.results.map((x) => [x.project, x.units ?? x.n]));
-  const acc = by(accepted), accAll = by(acceptedAll), openBy = by(open), pendBy = by(pending), actBy = by(active), peopleBy = by(people);
-  const sum = (m) => Object.values(m).reduce((a, b) => a + b, 0);
-  const totalRouted = sum(routed);
-  // Ballot-directed work follows a voter's own ballot: per project it is public only when at least 5 people stood behind it (else null).
-  const bdShown = bdPeople.n === 0 || bdPeople.n >= K_MIN;
+  const acc = by(accepted), accAll = by(acceptedAll), openBy = by(open);
+  const totalRouted = Object.values(routed).reduce((a, b) => a + b, 0);
 
   const list = projects.results.map((p) => {
     const share = alloc.shares[p.id] ?? 0;
     const r = routed[p.id] || 0;
     const routedShare = totalRouted ? (100 * r) / totalRouted : 0;
     const openTasks = openBy[p.id] || 0;
-    const pend = pendBy[p.id] || 0;
     let gap = null;
     if (share > 0 && routedShare + 0.5 < share) {
       if (p.paused) gap = 'New assignments are paused by the operator.';
       else if (!totalRouted) gap = 'No work has been routed yet this week. Nothing is invented to hit a percentage; units are counted when an agent asks for work.';
-      else if (openTasks === 0) gap = 'There are no ready tasks right now, so nothing more can be routed here.';
-      else if (pend >= p.max_pending) gap = `The reviewer has ${pend} submissions waiting (the limit is ${p.max_pending}), so routing here is paused until some are reviewed.`;
-      else gap = 'Work here is waiting for agents to ask for it. Routing follows requests; it never forces assignments.';
+      else if (openTasks === 0) gap = 'There is no open work here right now, so nothing more can be routed.';
+      else gap = 'Work here is waiting for agents to ask for it. Routing follows requests; it never forces assignments. It can also pause while the project\'s reviewer catches up.';
     }
     return {
       id: p.id, name: p.name, kind: p.kind, summary: p.summary, url: p.url, reviewer: p.reviewer, sponsored: !!p.sponsored, paused: !!p.paused,
       allocation: { share, provisional: alloc.provisional[p.id] ?? true },
       routed_units: r,
       routed_share: Math.round(routedShare * 10) / 10,
-      self_directed_units: selfDirected[p.id] || 0,
-      ballot_directed_units: bdShown ? ballotDirected[p.id] || 0 : null,
-      routed_released_or_expired_units: lost[p.id] || 0,
       accepted_units: acc[p.id] || 0,
       accepted_units_all_time: accAll[p.id] || 0,
       open_tasks: openTasks,
-      pending_reviews: pend,
-      active_claims: actBy[p.id] || 0,
-      contributors_this_week: kCount(peopleBy[p.id] || 0), // people: shown as "fewer than 5" for a small group
-
-      reviewer_capacity: { max_pending: p.max_pending, paused: pend >= p.max_pending },
       gap_reason: gap,
     };
   });
   return {
     week, week_start: new Date(start).toISOString(), updated: new Date(now).toISOString(),
     allocation_week: alloc.week, allocation_note: list.some((p) => p.allocation.provisional) ? PROVISIONAL_NOTE : null,
-    routed_note: 'Routed = acknowledged assignments weighted by work units; not compute consumed. Only public-routed units are compared with the public allocation.',
-    routing_origins: {
-      units: { public_routed: sum(routed), ballot_directed: bdShown ? sum(ballotDirected) : null, self_picked: sum(selfDirected) },
-      note: 'Public-routed: handed out by the public allocation (the only origin compared with the vote). Ballot-directed: handed out by a signed-in voter\'s own ballot to their linked AI. Self-picked: chosen by the contributor with claim_task. Units, not compute; the three are never added together.',
-    },
+    routed_note: 'Routed = acknowledged assignments weighted by work units; not compute consumed. Only public-routed units are compared with the public allocation. Work that a voter\'s own ballot steered, or that an agent picked itself, is credited on receipts but is not shown live: it is published once a week, after the week closes, in /api/analytics.',
+    routing_note: 'Live: public-routed units against the weekly allocation, open tasks and accepted results. Personal-direction totals are published weekly, with noise, only where at least 5 people stand behind them.',
     projects: list,
-    totals: { contributors: kCount(totals[0].results[0].n), submissions: totals[1].results[0].n, accepted: totals[2].results[0].n },
+    totals: { accepted: acceptedTotal.n },
   };
 }
 

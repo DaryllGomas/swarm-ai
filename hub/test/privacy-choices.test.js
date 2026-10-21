@@ -2,12 +2,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { env } from 'cloudflare:workers';
 import { BODY, SOURCE, addTask, newUser, resetDb, review, send, tool } from './helpers.js';
-import { linkedUser, mePost, meGet, publicAllocation, setupProjects, voter } from './voter.js';
+import { NO_NOISE, linkedUser, mePost, meGet, publicAllocation, setupProjects, voter } from './voter.js';
 import { options, passkey, post } from './passkeys.js';
 import { publishSnapshot } from '../src/voting.js';
 import { weekStats } from '../src/core.js';
 import { weekStartMs } from '../src/lib.js';
-import { CHOICE_TEXT, DEFAULT_CHOICES, K_MIN, creditedAs, kCount, modelFamily, parseChoices, publicHandle } from '../src/privacy.js';
+import { CHOICE_TEXT, DEFAULT_CHOICES, K_MIN, creditedAs, kCount, parseChoices, publicHandle } from '../src/privacy.js';
 import commonJs from '../public/js/common.js?raw';
 
 beforeEach(async () => {
@@ -243,66 +243,39 @@ describe('k-anonymity: a public count of people below 5 is not shown', () => {
     return v;
   };
 
-  it('the vote audit shows "<5" for a day with 1 to 4 ballots, and the real number from 5', async () => {
+  it('the vote audit has no per-day counts and no live eligible-voter count, even with 5 ballots on a day', async () => {
     await reset();
-    // Ballots on two days long past (nothing else writes there): 3 on one, 5 on the other.
-    const day = (n) => Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()) - n * 86400000 + 3600000;
-    for (const [n, count] of [[21, 3], [20, 5]]) {
-      for (let i = 0; i < count; i++) await env.DB.prepare('INSERT INTO ballot_versions(account, version, allocations, created) VALUES (?1, 1, ?2, ?3)').bind(`k-${n}-${i}`, JSON.stringify({ 'town-hall': 100 }), day(n)).run();
-    }
+    const day = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()) - 20 * 86400000 + 3600000;
+    for (let i = 0; i < 5; i++) await env.DB.prepare('INSERT INTO ballot_versions(account, version, allocations, created) VALUES (?1, 1, ?2, ?3)').bind(`k-${i}`, JSON.stringify({ 'town-hall': 100 }), day).run();
+    for (let i = 0; i < 6; i++) await voter();
     const a = await (await send('/api/vote/audit')).json();
-    const at = (n) => a.ballots_per_day.find((d) => d.day === new Date(day(n)).toISOString().slice(0, 10)).ballots;
-    expect(at(21)).toBe('<5');
-    expect(at(20)).toBe('5-9'); // coarse buckets, so two counts can never be subtracted into 1-4
-    expect(at(25)).toBe('<5'); // an empty day looks like a day with 1-4: one voter's activity is invisible
-    expect(JSON.stringify(a)).not.toMatch(/"ballots":[1-4]\b/);
+    expect(a.ballots_per_day).toBeUndefined();
+    expect(a.eligible_voter_count).toBeUndefined();
+    expect(JSON.stringify(a)).not.toMatch(/ballots_per_day|eligible_voter/);
   });
 
-  it('the eligible-voter count is "fewer than 5" until there are 5', async () => {
-    await reset();
-    for (let i = 0; i < 4; i++) await voter();
-    expect((await (await send('/api/vote/audit')).json()).eligible_voter_count).toBe('fewer than 5');
-    await voter();
-    expect((await (await send('/api/vote/audit')).json()).eligible_voter_count).toBe('5-9');
-  });
-
-  it('snapshot voter counts, the current and the projected allocation follow the same rule', async () => {
+  it('snapshot voter counts and the current allocation follow the same rule, and there is no projection', async () => {
     await reset();
     for (let i = 0; i < 3; i++) await snapVoter();
-    await publishSnapshot(env);
+    await publishSnapshot(env, Date.now(), NO_NOISE);
     // Fewer than 5 eligible ballots: a fallback, and not even the count is kept.
     expect(await env.DB.prepare('SELECT voter_count, source FROM vote_snapshots').first()).toEqual({ voter_count: 0, source: 'fallback' });
     const audit = await (await send('/api/vote/audit')).json();
     expect(audit.snapshot_history[0].voter_count).toBe('fewer than 5'); // ...the public view is not
     expect((await (await send('/api/vote/current')).json()).voter_count).toBe('fewer than 5');
-    // The projection is hidden below 5 ballots, and works from the start of the UTC day (ballots saved today do not count).
-    expect(await (await send('/api/vote/next')).json()).toMatchObject({ projected: false, reason: 'fewer than 5 ballots' });
+    expect((await send('/api/vote/next')).status).toBe(404);
   });
 
-  it('per-project contributor counts and the total are "fewer than 5" until 5 contributors, and work units stay exact', async () => {
+  it('live stats carry no count of people, no self-picked or ballot-directed units; analytics shows a coarse range', async () => {
     const users = [];
     for (let i = 0; i < 4; i++) users.push(await newUser());
     for (const u of users) { const t = await addTask({ units: 3, project: 'town-hall' }); expect((await u.call('claim_task', { id: t })).isError).toBe(false); }
-    let s = await weekStats(env);
-    let th = s.projects.find((p) => p.id === 'town-hall');
-    expect(th.contributors_this_week).toBe('fewer than 5');
-    expect(s.totals.contributors).toBe('fewer than 5');
-    expect(th.self_directed_units).toBe(12); // units are about work, not people: exact
-    const fifth = await newUser(); const t = await addTask({ units: 3 }); await fifth.call('claim_task', { id: t });
-    s = await weekStats(env);
-    expect(s.projects.find((p) => p.id === 'town-hall').contributors_this_week).toBe(5);
-    expect(s.totals.contributors).toBe(5);
-    // And through the public API.
+    const s = await weekStats(env);
+    const th = s.projects.find((p) => p.id === 'town-hall');
+    for (const gone of ['contributors_this_week', 'self_directed_units', 'ballot_directed_units', 'active_claims', 'pending_reviews', 'routed_released_or_expired_units', 'reviewer_capacity']) expect(th[gone], gone).toBeUndefined();
+    expect(s.totals.contributors).toBeUndefined();
+    expect(s.routing_origins).toBeUndefined();
     const api = await (await send('/api/stats')).json();
-    expect(api.totals.contributors).toBe(5);
-  });
-
-  it('modelFamily maps self-reported names to a coarse family and never returns the name', () => {
-    expect(modelFamily('claude-opus-4')).toBe('claude');
-    expect(modelFamily('GPT-5')).toBe('gpt');
-    expect(modelFamily('gemini-2.5-pro')).toBe('gemini');
-    expect(modelFamily('some-local-model')).toBe('other');
-    expect(modelFamily(null)).toBe('unreported');
-    expect(modelFamily('  ')).toBe('unreported');
+    expect(JSON.stringify(api)).not.toMatch(/contributors|self_directed|ballot_directed|active_claims|pending_reviews/);
   });
 });
