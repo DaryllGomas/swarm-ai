@@ -124,8 +124,8 @@ updated, everything from outside goes through `src/screen.js`:
 Claims last 3 hours. At most 2 active claims per contributor, and at most 4 across all handles on one network
 (enforced in the same conditional `INSERT` as the per-contributor cap; the network hash rotates daily, and the cap
 also counts yesterday's hash so midnight UTC is no loophole). 5 pairings per network per day, 20 submissions per
-contributor per day, 30 sources per submission. Routed units (public-routed only) count each (task, contributor) once per week and exclude
-released or expired claims; ballot-directed and self-picked units are counted the same way, apart. Failed link codes: 5 an hour per contributor and 20 per network; codes last 10 minutes. `next_task` is a weighted-deficit scheduler (at most 10 pending reviews per project).
+contributor per day, 30 sources per submission. Routed units count each (task, contributor) once per week and exclude
+released or expired claims. The scheduler counts public-routed, ballot-directed and self-picked units apart, internally; nothing public or in the operator console shows that split, and the weekly public check adds every route together. Failed link codes: 5 an hour per contributor and 20 per network; codes last 10 minutes. `next_task` is a weighted-deficit scheduler (at most 10 pending reviews per project).
 Allocation is provisional until a weekly ballot snapshot is published. Contributor keys are stored only as salted hashes, never echoed in an
 error and never written to events or logs. Tools prefer the `Authorization` header; the `contributor_key` argument
 is a fallback because arguments end up in chat logs.

@@ -61,8 +61,9 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
 
 1. **Personal steering: yes.** "The public votes. The individual directs. The platform accounts for both."
    - There are three routing origins: `public_routed`, `ballot_directed` and `self_picked`.
-   - Only `public_routed` is compared with the public vote, so one big contributor can't make the public
-     scheduler look like it ignored the vote.
+   - The scheduler counts only `public_routed` against the vote, so one big contributor can't make it look like it
+     ignored the vote. That count is internal: no public page or console shows how any task was routed, and the weekly
+     public check adds every route together (Codex review 6).
    - **Where this plan differs from the earlier spec:** when your projects have no ready work, your agent falls back to the
      public split by default. It's a visible toggle, and the fallback work is recorded honestly as
      `public_routed`. The numbers stay true, and leftover compute isn't wasted.
@@ -157,7 +158,7 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
 
 **Phase 1: Operator console** (1–2 sessions)
 - `/ops` behind Access:
-  - Overview: allocation, routed by origin, ready/claimed/pending, review age.
+  - Overview: allocation, ready/claimed/pending, review age. No routed units and no origin.
   - Review queue: accept or reject with a reason, plus the AI pre-screen.
   - Projects: pause, capacity, sync now.
   - Audit: pairing spikes, claim churn, duplicates.
@@ -209,7 +210,7 @@ As built, `deploy.sh`, `review.sh` and the tests live under `hub/`, next to the 
 - **Forward-secure network hashing.** `HMAC-SHA256(random key of the UTC day, network)`; the key is created on first use (`INSERT OR IGNORE`, then `SELECT`) and deleted by the hourly job after two days, together with every network hash older than two days. Caps keep working across the switch by also counting the old format.
 - **Retention and the right to leave.** A weekly rollup of closed weeks into per-project aggregate tables kept forever; `weekly_purge` accounts lose their per-item detail afterwards; **Delete my account** (passkey session and a typed confirmation) and **Remove my handle**, with events that carry no personal detail.
 - **A personal-details check** on submissions (a flag for the reviewer, a warning to the submitter, never a block), and the `/setup` guide and tool texts tell agents never to include their user's personal information.
-- **Operator minimisation.** `/ops` and `/api/admin` never expose an individual ballot, a voter-to-contributor link, a network hash or a named contributor's route (claim, link and steering events carry no contributor, handle or origin; active claims carry no contributor); a test scans every response and another reconstructs the join. Direct database access is outside this boundary and the pages say so.
+- **Operator minimisation.** `/ops` and `/api/admin` never expose an individual ballot, a voter-to-contributor link, a network hash or how any task was routed (no origin figure of any kind; claim, link and steering events carry no contributor, handle or origin; active claims carry no contributor); a test scans every response and another reconstructs the join. Direct database access is outside this boundary and the pages say so.
 - **Checked deploys, and an honest `/version`.** `deploy.sh` deploys only the exact tip of a freshly fetched `origin/main` of the canonical repository from a clean, non-detached `main`, and its argument passthrough is an allowlist (no `--var GIT_COMMIT` bypass). `GET /version` and every footer show the commit the operator reported; it is a claim, not proof of what runs.
 - **Codex review 5 (2026-10-20) fixes.** (1) The daily projection is gone; the weekly split is released with Laplace noise (epsilon 1 a week, one ballot = 100 points) and the noised split is the official allocation; the exact tally is never stored. (2) Nothing derived from people's choices is live: the live surface is open-task counts, the allocation, public-routed units and accepted results; ballot-directed and self-picked work is released weekly as one noised total, from 5 people, capped per person; a claimed task shows as `ready`. (3) The operator console shows no contributor, handle or route on claim, link and steering events or active claims. (4) Model-family analytics removed. (5) The purge scrubs events by the claim or submission being purged and sweeps expired claims first. (6) An unpublished write-up is kept at most 30 days after review. (7) Privacy writes (claim, submit, deletion, handle removal, `set_credit`) are conditional at commit time. (8) Account deletion deletes the OAuth grants and tokens in KV. (9) The publication export carries no model name. (10) See above. (11) The wording on `/privacy`, `/security`, `/transparency` and in the receipts note was corrected, and the privacy page has a threat boundary section. (12) Pairing still reveals whether a handle exists: disclosed, not fixed (planned: separate private labels from public names). (13) Migration 0011 seeds an explicit provisional split when no earlier eligible week exists.
 - **Pages.** `/privacy` ("Your anonymity is your choice"), `/transparency` (dated statement, re-dated monthly; a lapse is meaningful), `/security` and `/.well-known/security.txt`; a footer on every page and a trust strip on the home page. Nothing blocks Tor or VPN users beyond the per-network caps; the human check on voter sign-up may ask Tor users for an extra challenge.
@@ -235,3 +236,4 @@ missions, recurring Town Hall tasks (objections, monthly source re-checks).
 2. How the CI workflow file gets in [a one-day fine-grained token the maintainer creates, scoped to `swarm-ai` only].
 3. Turn on Cloudflare Zero Trust for `/ops` [yes; a one-time free setup].
 4. The runner on subscriptions [human-started only; ask Anthropic before any subscription autopilot].
+- **Codex review 6 (2026-10-20) fixes.** (A) Migrations 0011/0012 repair every snapshot built from fewer than 5 ballots and every fallback descended from one, and mark earlier exact snapshots as legacy; `deploy.sh` prints a read-only count of ballot-based snapshots first. (B) The routing origin is removed from every public surface and the operator console, live and weekly; the weekly personal-direction total is gone; the public weekly check adds every route together and is coarser by design. (C) People are counted by owning account. (D, G) No formal differential-privacy claim for the whole release, no advanced-composition figure, no "epsilon budget". (E) A noisy fallback is not reported as "fewer than 5". (F) The sampler can no longer return 0 or 1. (H) `secret bulk` is off the maintenance allowlist. These fixes have not been re-reviewed.

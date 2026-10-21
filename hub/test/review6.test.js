@@ -204,3 +204,58 @@ describe('finding C: the 5-person gate counts accounts that own contributors, no
     expect(await people()).toBe(4);
   });
 });
+
+// ---------------------------------------------------------------- the pages and docs say exactly what the code does
+describe('review 6: pages and docs match the code', () => {
+  const strip = (html) => html.replace(/<script[\s\S]*?<\/script>/g, ' ').replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ');
+  const load = async () => ({
+    privacy: strip((await import('../public/privacy.html?raw')).default), security: strip((await import('../public/security.html?raw')).default),
+    transparency: strip((await import('../public/transparency.html?raw')).default), live: strip((await import('../public/live.html?raw')).default),
+    policy: (await import('../../docs/DATA-POLICY.md?raw')).default, arch: (await import('../../docs/ARCHITECTURE.md?raw')).default, run: (await import('../../docs/RUNBOOK.md?raw')).default,
+  });
+
+  it('nothing claims formal differential privacy, an advanced-composition figure or an epsilon budget; the personal-direction release is gone from every page and doc', async () => {
+    const docs = await load();
+    for (const [name, text] of Object.entries(docs)) {
+      expect(text, name).not.toMatch(/advanced composition at delta|roughly 25\b|about 7\.2|epsilon-differentially private|privacy budget (is|of)|personal-direction total in|personally directed work, with noise/i);
+      expect(text, name).not.toMatch(/weekly_release[^.]*(Public record|written once)/);
+    }
+    expect(docs.privacy).toMatch(/not a formal differential-privacy guarantee across all releases/);
+    expect(docs.policy).toMatch(/not a formal differential-privacy guarantee for the release as a whole/);
+    expect(docs.run).toMatch(/not a formal differential-privacy guarantee/);
+    expect(docs.arch).toMatch(/not a formal differential-privacy guarantee for the whole release/);
+  });
+
+  it('/privacy says the weekly check is coarser by design, and that the database holds the origin and the operator could read it', async () => {
+    const { privacy, policy, transparency, run } = await load();
+    expect(privacy).toMatch(/all routes added together/); expect(privacy).toMatch(/That check is coarser by design/);
+    expect(privacy).toMatch(/The database itself holds how each claim was routed/); expect(privacy).toMatch(/The operator, with direct database access, could read it/);
+    expect(policy).toMatch(/The database holds it next to the contributor, and the operator, with direct database access, could read it/);
+    expect(transparency).toMatch(/how each was routed/); expect(run).toMatch(/holds `routing_origin` next to the contributor/);
+    expect(privacy).not.toMatch(/Ballot-directed and self-picked work are not told apart, and nobody is named/);
+  });
+
+  it('the live page, the console page and the vote page show no routed figure', async () => {
+    const { live } = await load();
+    expect(live).not.toMatch(/Public-routed units, this week|Routed share, this week|Where the live numbers stand/i);
+    for (const file of ['../public/js/live.js', '../public/js/home.js', '../public/js/common.js', '../public/ops/ops.js']) {
+      const src = (await import(/* @vite-ignore */ file + '?raw')).default;
+      expect(src, file).not.toMatch(/routed_units|routed_share|routed_by_origin|closed_week_release|gap_reason|personal_direction/);
+    }
+  });
+
+  it('the maintenance allowlist in the docs and in the script agree: no secret bulk, and the preflight is described', async () => {
+    const { policy, run, arch } = await load();
+    const script = (await import('../scripts/deploy.sh?raw')).default;
+    expect(script).not.toMatch(/"secret bulk/);
+    expect(policy).toMatch(/`secret bulk` is not allowed/); expect(arch).toMatch(/`secret bulk` is not on it/);
+    for (const text of [policy, run, arch]) expect(text).toMatch(/preflight/);
+    expect(run).toMatch(/Production is expected to print 0/);
+  });
+
+  it('the API notes say what the code does: the vote notes make no formal claim, the analytics note says the check is coarse', async () => {
+    const audit = await (await send('/api/vote/audit')).json(), analytics = await (await send('/api/analytics')).json();
+    expect(JSON.stringify(audit)).toMatch(/not a formal differential-privacy guarantee/); expect(JSON.stringify(audit)).not.toMatch(/epsilon budget|advanced/i);
+    expect(analytics.note).toMatch(/all routes added together/i); expect(analytics.note).toMatch(/coarse by design/);
+  });
+});

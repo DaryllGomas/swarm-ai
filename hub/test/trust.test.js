@@ -249,11 +249,11 @@ describe('the security page', () => {
     expect(text).toMatch(/Test against local copies/);
     expect(text).toMatch(/Never touch other users' data/);
   });
-  it('states its scope and a brief security model, including the five independent reviews', () => {
+  it('states its scope and a brief security model, including the independent reviews', () => {
     expect(text).toMatch(/In scope/); expect(text).toMatch(/Out of scope/);
     expect(text).toMatch(/No custody of AI credentials/); expect(text).toMatch(/Hashed keys/);
-    expect(text).toMatch(/Five independent code reviews by Codex/);
-    expect(text).toMatch(/The five review reports exist/);
+    expect(text).toMatch(/Six independent code reviews by Codex/);
+    expect(text).toMatch(/The review reports exist/);
     expect(text).toMatch(/not a guarantee/);
   });
 });

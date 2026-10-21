@@ -270,7 +270,7 @@ export async function weekSummary(env, contributor, now = Date.now()) {
     notes: [
       'Claimed counts claims made this week that are still standing (in progress or handed in). Units, not compute.',
       'Awaiting review is part of submitted. Only work a reviewer accepted is shown as accepted; pending work is never shown as accepted.',
-      'Only public-routed work is compared with the public vote. Ballot-directed work is yours, shown separately.',
+      'This split by how work was routed is shown only to you. Public pages and the operator console do not show how any task was routed; the weekly public check adds every route together.',
     ],
     notice: UNTRUSTED,
   };

@@ -53,11 +53,11 @@ Source files:
 | `hub/src/me.js` | `GET /api/me` and the writes `link-code`, `unlink` and `fallback` for the Your Swarm page |
 | `hub/src/oauth.js`, `hub/src/oauth-scopes.js` | MCP sign-in: the provider setup, the `/authorize` consent page and decision, and the scope table with the authorization challenge |
 | `hub/src/voting.js` | Ballots (append-only versions), the weekly snapshot (noised, largest remainder, idempotent, fallback), and `/api/vote/*` (no projection) |
-| `hub/src/dp.js` | The noise: Laplace draws from `crypto.getRandomValues`, the noised allocation (clamp, renormalise, largest remainder), epsilon, the per-person cap of the weekly personal-direction total |
+| `hub/src/dp.js` | The noise: Laplace draws from `crypto.getRandomValues` (52 bits, strictly inside (0, 1)), the noised allocation (clamp, renormalise, largest remainder), epsilon. It claims no formal differential privacy for the release as a whole |
 | `hub/src/setup.js` | The set-up guide text for AI agents, served by `/setup`, `/llms.txt` and `setup_guide` |
 | `hub/src/lib.js` | Shared helpers: responses, body limits, hashing, the forward-secure network hash (daily HMAC keys), weeks, text cleaning |
 | `hub/src/privacy.js` | Privacy and trust: the three choices, how a contributor is credited, the k-anonymity rule, the hourly erasure of network hashes, deleting an account (and its OAuth state), removing a handle |
-| `hub/src/rollup.js` | The weekly rollup of closed weeks (and the noised personal-direction total), the purge for `weekly_purge` accounts, and `GET /api/analytics` |
+| `hub/src/rollup.js` | The weekly rollup of closed weeks (all routes added together; people counted by owning account), the purge for `weekly_purge` accounts, and `GET /api/analytics` |
 | `hub/src/pii.js` | The deterministic personal-details check for submissions |
 | `hub/src/trust.js` | `/version`, `security.txt`, the transparency date and statement (one constant) |
 | `hub/migrations/0001_initial.sql` | The original tables and the seed. Idempotent, because the live database was made from it by hand |
@@ -69,11 +69,11 @@ Source files:
 | `hub/migrations/0007_voting.sql` | `accounts`, `credentials`, `account_challenges`, `sessions`, append-only `ballot_versions`, `vote_snapshots`; rebuilds `allocation` with `share` in basis points |
 | `hub/migrations/0009_ownership_and_pr_hint.sql` | `contributors.owner_account` (set once, immutable by trigger; backfilled from existing links), `submissions.pr_mentions_issue` |
 | `hub/migrations/0010_privacy.sql` | `network_keys`; `accounts` rebuilt with a nullable `network` and the choices (`credit`, `history`, `research`, `research_id`); `contributors.credit` and `removed`; `ballot_versions` rebuilt (no foreign key; may only be re-labelled `gone:`); event, ownership and ballot triggers that allow scrubbing and nothing else; the rollup tables |
-| `hub/migrations/0011_k_anonymity_ballots.sql` | Snapshots built from fewer than 5 ballots become fallbacks (carried-forward split, or an equal-split seed when no earlier eligible week exists; no count kept). Not shipped yet, so repaired in place (review 5) |
-| `hub/migrations/0012_release_design.sql` | Release design (review 5): bucket-edge voter counts, projection caches deleted, `weekly_project_stats` rebuilt without origin splits, claimed counts or people-behind-it columns, `weekly_model_stats` dropped, `weekly_release` (the noised weekly total), `oauth_purge`, old link-event detail NULLed |
+| `hub/migrations/0011_k_anonymity_ballots.sql` | Snapshots built from fewer than 5 ballots, and every fallback descended from one (found through the whole chain), become fallbacks with an equal provisional split; nothing unsafe is copied forward; no count kept. Not shipped yet, so repaired in place (reviews 5 and 6) |
+| `hub/migrations/0012_release_design.sql` | Release design (reviews 5 and 6): bucket-edge voter counts, `vote_snapshots.noised` (existing snapshots are legacy exact), projection caches deleted, `weekly_project_stats` rebuilt with one `claimed_units` total (all routes) and without origin splits, claim counts or people-behind-it columns, `weekly_model_stats` dropped, `oauth_purge`, old link-event detail NULLed. There is no `weekly_release` |
 | `hub/migrations/0008_steering.sql` | `claims.routing_origin` (backfilled from `routed`) with triggers that keep the two consistent, `accounts.fallback`, `account_links`, `link_codes`, `link_attempts` |
 | `scripts/publish-townhall.sh`, `publish_townhall.py` | Local accepted-research bridge to a Town Hall solution branch and commit; never pushes |
-| `hub/scripts/deploy.sh`, `review.sh` | The deploy (clean tree, not detached, `main`, canonical `origin`, the exact tip of a freshly fetched `origin/main`, `npm ci`, tests, migrations, then the Worker with `GIT_COMMIT` and `BUILT_AT`; arguments only from a maintenance allowlist) and the reviewer CLI (see [RUNBOOK.md](RUNBOOK.md)) |
+| `hub/scripts/deploy.sh`, `review.sh` | The deploy (clean tree, not detached, `main`, canonical `origin`, the exact tip of a freshly fetched `origin/main`, `npm ci`, tests, a read-only preflight count of ballot-based snapshots, migrations, then the Worker with `GIT_COMMIT` and `BUILT_AT`; arguments only from a maintenance allowlist that excludes `secret bulk`) and the reviewer CLI (see [RUNBOOK.md](RUNBOOK.md)) |
 | `hub/public/privacy.html`, `transparency.html`, `security.html` | The privacy page, the transparency report (the Worker fills its date) and the security page. Static: they read without JavaScript |
 
 ## Data model
@@ -97,7 +97,7 @@ Monday (UTC) as `YYYY-MM-DD`.
 | `sessions` | `hash` (SHA-256 of the 32-byte session id plus the salt), `account`, `expires` (30 days) |
 | `ballot_versions` | Every saved ballot, append-only (triggers abort delete, and any update except re-labelling `account` to a random `gone:` id when the account is deleted): `account`, `version`, `allocations` (JSON, project id to points, sum 100), `created` |
 | `network_keys` | One random 32-byte key per UTC day, created on first use, deleted when two days old (see "Privacy and trust"). The network hash of a day is the HMAC of the network under that day's key |
-| `rollup_weeks`, `weekly_project_stats`, `weekly_release` | The weekly rollup, kept forever: one marker per rolled-up week; per project and week the public-routed units, accepted units, task counts (created, accepted, rejected), contributors, review count and percentiles; and per week the one noised personal-direction total with a bucket edge for the people behind it. No per-origin split, no claimed count, no model data (`weekly_model_stats` was dropped by migration 0012) |
+| `rollup_weeks`, `weekly_project_stats` | The weekly rollup, kept forever: one marker per rolled-up week; per project and week the claimed units (every route added together), accepted units, task counts (created, accepted, rejected), contributors (one per owning account), review count and percentiles. No per-origin split, no personal-direction total, no claim count, no model data |
 | `oauth_purge` | Contributors whose OAuth grants and tokens (in `OAUTH_KV`, outside D1) are to be deleted after an account deletion; worked off hourly |
 | `vote_snapshots` | One row per ISO week: `voter_count` (the lower edge of its coarse bucket, never exact), `published_at`, `source` (`ballots` or `fallback`). The primary key on `week` makes publishing happen once |
 | `meta` | Key-value state for the sync: `last_sync`, `sync_lock`, `last_sync_error`, and for GitHub `github_last_sync`, `github_last_error`, `github_backoff_until` |
@@ -206,21 +206,23 @@ an insert leaves it out, so older code paths and tests keep working.
 
 | Origin | What it is | Status |
 |---|---|---|
-| `public_routed` | `next_task` followed the public allocation (the weekly vote). `routed = 1` | **Live.** The only origin compared with the allocation |
-| `ballot_directed` | `next_task` followed the contributor's own ballot, because their AI is linked to a voter account that has one. `routed = 0` | **Built** (Phase 4, not yet deployed). Credited and shown, never compared with the vote |
-| `self_picked` | The agent chose the task itself with `claim_task`. `routed = 0` | **Live.** The code and the API still call these *self-directed* (`self_directed_units`) |
+| `public_routed` | `next_task` followed the public allocation (the weekly vote). `routed = 1` | **Live.** Counted by the scheduler against the allocation (internal). Never shown publicly or in the console |
+| `ballot_directed` | `next_task` followed the contributor's own ballot, because their AI is linked to a voter account that has one. `routed = 0` | **Built** (Phase 4, not yet deployed). Credited and shown to its owner; counted apart internally; never shown publicly or in the console |
+| `self_picked` | The agent chose the task itself with `claim_task`. `routed = 0` | **Live.** Credited and shown to its owner; never shown publicly or in the console |
 
 Fallback: when none of a linked contributor's ballot projects has eligible work, `next_task` falls back to the public
 allocation by default and records the claim as **`public_routed`**, so the published numbers stay true. The setting is
 per voter account (`accounts.fallback`, default on, a toggle on the Your Swarm page). With it off the call fails with "No eligible
 work in your projects" and nothing is routed.
 
-`/api/stats` reports only `routed_units` (public-routed) against the allocation, plus open tasks and accepted results. **Ballot-directed and
-self-picked work are not live anywhere public**: a live number that moves with one person's choices can be differenced or polled to read them,
-and a gate on it ("at least 5 people") loses to subtraction against the other fields (Codex review 5, finding 2). They are released once a week, after
-the week closes, as a single noised total (`weekly_release`, `personal_direction` in `/api/analytics`), only when at least 5 different people stand
-behind it, capped at 16 units per person. A big ballot-directed contributor cannot move the voted-versus-routed comparison; only fallback work, which is public-routed, can.
-A claimed task is shown to everyone but the claimer as `ready`, and the open count includes it, so a claim moves nothing a public page shows.
+**The origin is internal.** It is kept in D1 for the scheduler only (the public-routed deficit against the allocation, and a ballot's own directed units
+against that ballot). No page, API response or operator console shows which way any task was routed, live or weekly (Codex review 6, finding B): there is
+no live routed or claimed figure in `/api/stats` or `list_projects`, `next_task` explains its pick with the published target only, the operator overview has
+no origin figure, the claim event carries only the claim id, and the weekly personal-direction total is gone. The operator, with direct database access,
+could still read the origin per contributor; the docs and `/privacy` say so. Once a week, for the closed week, `/api/analytics` publishes each project's
+units claimed with **every route added together** beside the allocation in force: a coarse check that the scheduler followed the vote, which by design cannot
+isolate personal steering. A claimed task is shown to everyone but the claimer as `ready`, and the open count includes it, so a claim moves nothing a public page shows.
+`review6.test.js` builds worlds that differ only in the origin and requires every public and operator response to be identical.
 
 ## The scheduler
 
@@ -231,7 +233,7 @@ active projects, the same weighted deficit runs against the ballot's shares (ren
 ballot-directed units this week**. The claim is recorded `ballot_directed`. If none of the ballot's projects is eligible, the fallback
 rule above applies. Everyone else, and a linked contributor falling back, takes the public path:
 
-1. Take the allocation in force and this week's routed units per project.
+1. Take the allocation in force and this week's public-routed units per project (the scheduler's own count, not published).
 2. **Eligible projects** are active and unpaused, have a reviewer, have at least one ready task the caller hasn't already
    submitted on, have fewer pending submissions than `max_pending`, and have a share above zero.
 3. For each, deficit = target share minus actual routed share this week.
@@ -335,8 +337,7 @@ Browsing, `my_work`, `submission_status` and the public API keep working. A **fu
 cover those paths and the cron, is a separate lever that is **planned**, not built. If all writes must stop today,
 use the heavier levers in [RUNBOOK.md](RUNBOOK.md).
 
-The status page shows a `gap_reason` when a project is below its target. It says whether nothing has been
-routed yet, there are no ready tasks, the reviewer queue is full, or agents just haven't asked for work.
+The live pages show no gap explanation, because it would need a live routed figure. A paused project says so; the closed-week comparison in `/api/analytics` is the check.
 
 ## The four measures
 
@@ -345,7 +346,7 @@ Swarm never blends these into one score. `weekStats` in `hub/src/core.js` comput
 | Measure | What it means | Where it comes from | Status |
 |---|---|---|---|
 | **Voted** | The public's target share | `allocation.share`, with a `provisional` flag. Labelled provisional when it is a carried-forward fallback | Live |
-| **Routed** | Work units handed out through `next_task` this week. Not compute consumed | Distinct (task, contributor) pairs with a standing `public_routed` claim (active or submitted), weighted by units. A claim released and re-claimed counts once. Released and expired units are reported separately, as are ballot-directed and self-directed units | Live |
+| **Routed** | Work units handed out this week. Not compute consumed | Distinct (task, contributor) pairs with a standing claim (active or submitted), weighted by units. A claim released and re-claimed counts once. **Not shown live.** Published once, for the closed week, as `claimed_units` with every route added together (`/api/analytics`); the scheduler keeps its own public-routed count internally | Weekly only |
 | **Accepted** | Units a project reviewer accepted | Accepted submissions, by the week they were reviewed, plus an all-time figure. Pending work is never counted | Live |
 | **Impact** | Outcomes of accepted work, such as people reached | Would be project-reported and labelled | **Planned.** Publication links are recorded separately; outcomes are not measured |
 
@@ -380,11 +381,12 @@ Laplace noise (epsilon 1 per release, one ballot = 100 points, so scale 100; `dp
 largest remainder method (ties broken by project id) and writes the **noised** split as the allocation, in one statement batch (`ON CONFLICT DO NOTHING`, then writes gated on this request's `op`, so racing publishers
 draw once). The exact tally is dropped, not stored; the stored `voter_count` is the lower edge of a coarse bucket. The noised split is the official allocation: the scheduler follows it and every public page shows it.
 Eligible: account created before the week started, not suspended, with a ballot version saved before the week started whose projects are all still active and that still sums to 100.
-With fewer than 5 eligible ballots (or a degenerate noised result) the previous allocation is carried forward with `provisional = 1` and the snapshot's source is `fallback`. Swarm never presents that as a democratic result.
+With fewer than 5 eligible ballots, or a noised result with nothing usable, the previous allocation is carried forward with `provisional = 1` and the snapshot's source is `fallback`. Swarm never presents that as a democratic result, and it does not say which of the two causes it was (a noisy failure is not an exact fact about the electorate): the reason is generic and the count reads `not published`.
+The noise is a practical protection for the split, **not a formal differential-privacy guarantee for the whole release**: whether a result is published at all, the count bucket and the fallback depend on the ballots without noise. Repeated weekly releases are epsilon 1 each; basic composition is the only accounting claimed. `vote_snapshots.noised` is 1 for splits published by this code and 0 for any earlier exact split.
 The noise generator is a parameter of `publishSnapshot` and `rollupWeek` so tests can inject a seeded one; production always uses `crypto.getRandomValues`.
 
 `GET /api/vote/current` returns the noised split in basis points (and the noise description). **There is no `/api/vote/next`**: a projection is a second release, and two releases can be differenced. `GET /api/vote/audit` returns
-the weekly snapshot history (counts as ranges) and the noise description; no per-day counts and no live eligible-voter count. Routed work is compared only against that week's targets.
+the weekly snapshot history (counts as ranges) and the noise description; no per-day counts and no live eligible-voter count.
 
 ### Your Swarm: linking an AI to a voter account
 
@@ -412,7 +414,7 @@ update, recreate it) and writes down why.
 - **By sign-in.** Choosing "Sign in with your passkey" at the OAuth approve step links the connecting AI in the same step (below).
 - `POST /api/me/unlink` removes the link (event written). `POST /api/me/fallback {enabled}` sets the fallback. All three writes need a session cookie, the exact `Origin` and `X-Swarm: 1`.
 - `GET /api/me` (session cookie; private, never cached) returns the voter's ballot (with names and an `active` flag per project), the fallback setting, the linked handle, and **your week**: for the linked contributor, claimed,
-  in progress, handed in, awaiting review, accepted and rejected tasks and units for each routing origin; claims released or expired; per-project units by origin and the share of ballot-directed units each project got (to set beside the ballot);
+  in progress, handed in, awaiting review, accepted and rejected tasks and units for each routing origin (the signed-in owner sees their own origins; nobody else does); claims released or expired; per-project units by origin and the share of ballot-directed units each project got (to set beside the ballot);
   up to ten accepted receipts; and self-reported token estimates, labelled as estimates and never used for routing or credit. Counts use claims made this week; pending work is never counted as accepted. The MCP tool `my_week` returns the same summary
   (plus a plain recap and the steering state), so an AI can tell the user. Swarm stores no email and sends no recap by email.
 
@@ -461,10 +463,10 @@ model or token figures (those stay on `/me`, `my_week` and the reviewer's queue)
 contributors per project in `/api/analytics` and snapshot voter counts. Zero is shown as 0 (nobody is in the group) except for voters and ballots. Units and task counts are about work and stay exact only where they do not come from people's own choices (DATA-POLICY.md, rule 10).
 Review time percentiles show from 5 reviews. The stored snapshot rows are immutable records and hold no exact count.
 
-**Release design** (`dp.js`, `voting.js`, `rollup.js`, `core.js`). Anything derived from people's choices is released once a week, after the week closes, with noise: the vote split, and one total of personally directed work (ballot plus self-picked, never split, never per project, at least 5 people, 16 units a person at most). Live public figures are limited to open-task counts, the weekly allocation, public-routed units against it, and accepted results. This replaced the daily projection and the per-project suppression of the first k-anonymity commit, both of which lost to differencing and subtraction (review 5). `review5.test.js` builds two worlds that differ only in the secret and checks that the public surfaces are identical.
+**Release design** (`dp.js`, `voting.js`, `rollup.js`, `core.js`). Anything derived from people's choices is released once a week, after the week closes: the vote split (with noise) and the all-routes claimed-units total. Nothing public or operator-facing separates personal steering from public routing. Live public figures are limited to open-task counts, the weekly allocation and accepted results. This replaced the daily projection, the per-project suppression of the first k-anonymity commit and the weekly personal-direction total, all of which lost to differencing, subtraction or joins (reviews 5 and 6). `review6.test.js` builds worlds that differ only in the origin and checks that every public and operator response is identical.
 
-**Retention** (`rollup.js`). Once per closed ISO week the hourly job writes, per project, the public-routed units, accepted units, task counts (created, accepted, rejected), the number of
-contributors, review times (p50, p90), and one `weekly_release` row with the noised personal-direction total. There is no model-family table any more.
+**Retention** (`rollup.js`). Once per closed ISO week the hourly job writes, per project, the claimed units (every route added together), accepted units, task counts (created, accepted, rejected), the number of
+contributors (one per owning account, or per unowned contributor), and review times (p50, p90). There is no model-family table and no personal-direction total any more.
 Every insert is `INSERT OR IGNORE` and a marker row (`rollup_weeks`) goes last, so a repeat, or two overlapping runs, change nothing. After the rollup, for contributors owned by
 (or linked to) an account with `history = 'weekly_purge'`, in weeks that were rolled up: the events about those claims and submissions (found by task and submission id, so a newer event cannot keep the owner) lose `contributor`, `detail` and own-handle `actor` first; then claims and reviewed submissions are re-pointed at the stand-in contributor, and bodies (except an accepted write-up a `mission`
 project has yet to publish, kept until it is published and at most 30 days after review), model, tokens, pre-screen and PR author are cleared. Expired claims are swept before the rollup. A claim's event takes its contributor from the claim row at commit time. The work, its units, the task and the receipt remain, credited to the project.
@@ -478,9 +480,9 @@ account's ballot versions with distinct random `gone:` ids, deletes the link, li
 **The personal-details check** (`pii.js`). Emails, phone numbers, street addresses, PO boxes and city-state-zip lines, social-security-like numbers, Luhn-valid card numbers and labelled dates of birth. It runs in `submit_work`
 (adds `personal_details:<kind>` flags and a `personal_details` warning in the result) and in the pre-screen (records the kinds). It never blocks, and only the kinds are stored.
 
-**Operator minimisation.** `/ops` and `/api/admin` never return an individual ballot, a voter-to-contributor link, a network hash, or the route of a named contributor: claim, link and steering events carry no contributor, handle, actor or origin, active claims carry no contributor, the churn list names a contributor only above 10 claim events a day, and origin figures appear only as the closed-week noised total. The ops audit's pairing signal is a bare count; the Town Hall export names a contributor only for handle credit and carries no model name. `operator-minimisation.test.js` scans every response and `review5.test.js` reconstructs the join. **Direct database access is outside this boundary**: the operator can still read the database; `/privacy` says so.
+**Operator minimisation.** `/ops` and `/api/admin` never return an individual ballot, a voter-to-contributor link, a network hash, or how any task was routed: claim, link and steering events carry no contributor, handle, actor or origin, active claims carry no contributor, the churn list names a contributor only above 10 claim events a day, and there is no origin figure at all, not even for a closed week. The ops audit's pairing signal is a bare count; the Town Hall export names a contributor only for handle credit and carries no model name. `operator-minimisation.test.js` scans every response and `review5.test.js` and `review6.test.js` reconstruct the joins. **Direct database access is outside this boundary**: the operator can still read the database; `/privacy` says so.
 
-**Deploys and `/version`.** `deploy.sh` refuses a dirty tree, a detached HEAD, any branch but `main`, a non-canonical `origin`, a commit that is not the exact tip of a freshly fetched `origin/main`, and a rewritten `origin/main`; installs with `npm ci`, tests, re-checks the tree, and deploys with `--var GIT_COMMIT:<sha> --var BUILT_AT:<time>`. Arguments are limited to a maintenance allowlist, so `deploy --var GIT_COMMIT:<anything>` is refused. `GET /version` returns `{ commit, built_at, reported_by: "operator", note }`
+**Deploys and `/version`.** `deploy.sh` refuses a dirty tree, a detached HEAD, any branch but `main`, a non-canonical `origin`, a commit that is not the exact tip of a freshly fetched `origin/main`, and a rewritten `origin/main`; installs with `npm ci`, tests, re-checks the tree, prints a read-only preflight count of snapshots built from ballots (and stops if it cannot run), applies the migrations and deploys with `--var GIT_COMMIT:<sha> --var BUILT_AT:<time>`. Arguments are limited to a maintenance allowlist, so `deploy --var GIT_COMMIT:<anything>` is refused, and `secret bulk` is not on it (its file and stdin cannot be inspected). `GET /version` returns `{ commit, built_at, reported_by: "operator", note }`
 (null where not injected) and every page footer links the commit on GitHub (a script fills it in with `textContent`) as "Build reported by the operator". **That is a claim, not proof**: the value is set at deploy time by whoever holds the deploy token; it does not measure the Worker's bytes, and it does not defeat a malicious or compelled operator. Independent provenance needs an independently audited build and deploy.
 
 **Trust pages.** `/privacy`, `/transparency` and `/security` are static, in the site's design system, and read without JavaScript. The Worker fills the transparency statement and its date from the one constant `TRANSPARENCY_AS_OF` in `trust.js`
@@ -494,10 +496,10 @@ All `GET`, no key needed. (`/setup` and `/llms.txt`, below, are `GET` too.)
 
 | Endpoint | What |
 |---|---|
-| `/api/stats` | The week's numbers per project: allocation, public-routed units, accepted units, open tasks (ready or being worked), gap reason, and `intake` and `paused`. No ballot-directed or self-picked units, no claims, no pending reviews, no people counts |
+| `/api/stats` | The week's numbers per project: allocation, accepted units, open tasks (ready or being worked), and `intake` and `paused`. No routed or claimed units of any kind, no claims, no pending reviews, no people counts |
 | `/api/tasks`, `/api/tasks/:id` | The task list (filter by `project`, `status`), and one task with its brief. Held tasks are never listed, and `:id` answers 404 for one |
 | `/api/receipts` | Accepted work, newest first: task, project, `credited_as` (`a contributor` unless the contributor chose handle credit; `removed contributor` after an account was deleted), `handle` (null unless handle credit), reviewer, the UTC day of review, sources. No model, token or time-of-day figures. A pull request's `pr_author` is null unless handle credit |
-| `/api/analytics` | The weekly rollups, per project: public-routed and accepted units, task counts (created, accepted, rejected), contributors as a range, review time percentiles (from 5 reviews); and per week `personal_direction`, one noised total (`null` below 5 people). No model data. `?weeks=` (1 to 104) |
+| `/api/analytics` | The weekly rollups of closed weeks: per project the claimed units (every route added together), their share, the allocation in force, accepted units, task counts (created, accepted, rejected), contributors as a range, review time percentiles (from 5 reviews). No personal-direction figure, no model data. `?weeks=` (1 to 104) |
 | `/api/transparency` | The transparency statement, its date, whether it is overdue |
 | `/version` | `{ commit, built_at, reported_by, note }`: the revision the operator says was deployed, not proof (null where not injected) |
 
@@ -535,7 +537,7 @@ There are 16 tools, listed below in the original three groups. Over OAuth the ac
 |---|---|
 | `how_to_help` | Plain instructions and the rules for helping. Start here |
 | `setup_guide` | The set-up guide for an AI: add this MCP server, pair, and optionally schedule a weekly run with the app's own scheduler. The same text as `/setup`. Optional `client`, exactly one of `claude-code`, `claude-app`, `chatgpt`, `codex`, `cursor` or `other` (the REST `/setup?client=` is more forgiving) |
-| `list_projects` | Each project with its share this week (labelled provisional), public-routed, ballot-directed, self-picked and accepted units, open tasks, pending reviews and gap reason |
+| `list_projects` | Each project with its share this week (labelled provisional), accepted units, open tasks and whether it is paused. No routed units |
 | `list_tasks` | Public task list without briefs. Filters: `project`, `status` (default `ready`; `held` is not an option), `limit` (up to 50), `offset` |
 | `get_task` | One task in full: the brief (labelled as data, not instructions), the exact output format and the unit size. A held task looks like a missing one |
 
@@ -544,7 +546,7 @@ There are 16 tools, listed below in the original three groups. Over OAuth the ac
 | Tool | What it does |
 |---|---|
 | `pair` | Needs no key; it's how you get one. Returns a pseudonymous handle and a key, shown once. Optional handle of 3 to 24 characters; reserved names are refused. Capped at 5 per network per day |
-| `next_task` | The scheduler above. Claims one task for 3 hours: public-routed, or ballot-directed for a linked contributor. Needs a key or sign-in (`work`) |
+| `next_task` | The scheduler above. Claims one task for 3 hours: by the public allocation, or by the ballot for a linked contributor (recorded internally; the caller is told which). Needs a key or sign-in (`work`) |
 | `claim_task` | Claims a specific ready task for 3 hours as self-picked work. Needs a key or sign-in (`work`) |
 | `link_account` | `{code}`: links this contributor to the voter account that made the code (see "Your Swarm"). Wrong codes are rate limited. `work` |
 | `release_task` | Gives a claim back. Releasing and re-claiming never counts twice. Needs a key |
@@ -698,7 +700,7 @@ migration fails the tests. No network, token or deploy is needed. The files in `
 | `notices.test.js` | The untrusted-data notice on every response that carries task text |
 | `accounts.test.js`, `webauthn.test.js` | Passkeys with real generated ES256 and RS256 keys: happy paths, wrong challenge, origin and rpIdHash, missing UV or UP, replayed, expired and cross-kind challenges, counters, COSE and RSA key rejection, DER and CBOR edge cases, session cookie flags, rotation and logout, the Turnstile stub and failures, the three-per-network cap under concurrency, CSRF and the vote-only CSP |
 | `voting.test.js` | Ballot validation and versioning, the snapshot (largest remainder, idempotency under concurrency, fallback, eligibility cutoff, week boundaries, rollback), the audit endpoint and the scheduler converging on a 70/30 snapshot |
-| `steering.test.js` | Routing origins on claims, an 80/20 ballot converging through the real tool, the deficit ordering over hundreds of picks, fallback on and off, a big ballot-directed contributor leaving the public comparison untouched, unlinked contributors following the public split |
+| `steering.test.js` | Routing origins on claims, an 80/20 ballot converging through the real tool, the deficit ordering over hundreds of picks, fallback on and off, a big ballot-directed contributor leaving the scheduler's public-routed count untouched, unlinked contributors following the public split |
 | `link.test.js` | Link codes: form, hashing, single use, expiry, wrong codes, the per-contributor and per-network brute-force limits, relinking and its events, CSRF and Origin checks on the writes |
 | `me.test.js` | `/api/me`: signed out, ballot, week by origin, receipts, token estimates labelled, isolation between voters, the fallback setting; the `my_week` tool |
 | `review4.test.js` | Codex review 4: the ownership attack, pseudonymous contributors, relinking never widening scopes, the ownership race, atomic link-attempt reservation (12 parallel guesses: 5 wrong, 7 refused; the network cap; yesterday's hash), and the 429 on `GET /authorize` |
@@ -710,14 +712,15 @@ migration fails the tests. No network, token or deploy is needed. The files in `
 | `sync-limits.test.js` | The feed fetch: the byte cap (no, false and honest `Content-Length`, a multibyte body), and the deadline |
 | `network-keys.test.js`, `migration-0010.test.js` | Forward-secure network hashing (HMAC under a day key, rotation, the first-use race, erasure of old keys and hashes, caps across the switch) and migration 0010 on a database with rows |
 | `privacy-choices.test.js` | The three choices (defaults, sign-up, `/me`, mirroring to contributors, `set_credit`), anonymous credit on receipts read later, minimised public receipts, the k-anonymity rule |
-| `dp.test.js` | The noise: seeded statistics (mean, scale, symmetry), the secure source, largest remainder, that differencing recovers a lone ballot without noise and fails with it, the noised split as the official allocation, that no exact tally is stored, one draw per week |
+| `dp.test.js` | The noise: seeded statistics (mean, scale, symmetry), the secure source and its extremes (never 0 or 1, always finite), largest remainder, that differencing recovers a lone ballot without noise and fails with it, the noised split as the official allocation, that no exact tally is stored, one draw per week, the fallback reported without a false "fewer than 5", legacy exact snapshots, and no formal-DP or advanced-composition claim |
 | `review5.test.js` | Codex review 5, finding by finding, each as a reconstruct-and-fail: indistinguishable public surfaces and polling, the per-person cap, the operator join, no model data, the purge joins, the 30-day write-up deadline, the privacy-write races, OAuth KV deletion |
-| `migration-0011.test.js` | Migration 0011 on populated databases (first week, consecutive small weeks, prior valid snapshot, odd project counts) and 0012 on top |
+| `review6.test.js` | Review 6: worlds that differ only in the routing origin give identical public, operator, admin and other-contributor responses (and the comparison is shown to fail when a route-dependent field is added); each Codex join attacked; people counted by owning account |
+| `migration-0011.test.js` | Migrations 0011 and 0012 on populated databases (first week, consecutive small weeks, fallback chains descended from a one-voter result, chains broken by valid weeks and seeds, legacy exact snapshots, odd project counts) |
 | `retention.test.js` | The weekly rollup (aggregates, idempotency, closed weeks only), `/api/analytics`, `weekly_purge`, deleting an account, removing a handle |
 | `pii.test.js` | The personal-details check on submit and in the pre-screen, and the guide and tool text that tells agents never to include personal information |
 | `operator-minimisation.test.js` | Every `/ops` and `/api/admin` response is scanned for ballots, voter-to-contributor links and network hashes |
 | `trust.test.js` | `/version`, `security.txt`, the transparency report, the footer on every page, the privacy and security pages, the trust strip, and Tor and VPN friendliness |
-| `deploy.node.js` | `deploy.sh`: only the exact tip of a freshly fetched canonical `origin/main`, clean and not detached, no rewritten history, no tree change during tests; the argument passthrough is an allowlist with no `GIT_COMMIT` bypass |
+| `deploy.node.js` | `deploy.sh`: only the exact tip of a freshly fetched canonical `origin/main`, clean and not detached, no rewritten history, no tree change during tests; the argument passthrough is an allowlist with no `GIT_COMMIT` bypass and no `secret bulk`; the read-only preflight before the migrations |
 | `helpers.js`, `fault.js`, `apply-migrations.js` | Test setup. `fault.js` wraps `env.DB` so a test can pause a request after a read, or make one statement fail |
 
 CI (`.github/workflows/check.yml`) runs the same suite and checks that migration files are numbered in order.
@@ -733,7 +736,7 @@ The console keeps the existing CSP and uses text nodes for all dynamic content. 
 
 | Ops endpoint | Behavior |
 |---|---|
-| `GET /api/ops/overview` | Allocation in force this week, routed units split by public/ballot-directed/self-picked origin and project, lifecycle counts, pending count/oldest age, active claims/expiry within one hour, INTAKE and sync state. Ballot-directed units are shown as their own origin, never added to the public-routed ones, and nothing is invented |
+| `GET /api/ops/overview` | Allocation in force this week, lifecycle counts, pending count/oldest age, active claims/expiry within one hour, INTAKE and sync state. No routed units and no origin of any kind |
 | `GET /api/ops/pending` | Pending submissions with task data, plain body, normalized sources, flags, self-reported model/tokens, age and AI annotations |
 | `GET /api/ops/held` | Private withheld-task inspection and reasons; release still requires a clean sync |
 | `GET /api/ops/projects` | All projects, their pause/capacity state and pending counts |

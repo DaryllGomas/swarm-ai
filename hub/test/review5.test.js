@@ -548,7 +548,7 @@ describe('finding 11: the privacy wording matches what the code does', () => {
   it('the list of limits is complete: Google, same-network correlation, live work over time, PR/source identity, the compelled operator, four-of-five, the threat boundary', async () => {
     const text = await page();
     for (const re of [/Google sees font requests/, /Anonymous credit does not sever the pull request, the sources or a publication link/, /Live work is observable over time/, /Someone who controls most voters can infer the rest/,
-      /malicious or compelled operator could also start collecting more/, /not proof of what runs/, /The threat boundary/, /What "fewer than 5" \(k = 5\), noise and weekly releases do/, /52 weekly releases is a total epsilon of up to 52/,
+      /malicious or compelled operator could also start collecting more/, /not proof of what runs/, /The threat boundary/, /What "fewer than 5" \(k = 5\), noise and weekly releases do/, /52 weekly releases add up to 52 in the worst case/, /not a formal differential-privacy guarantee/,
       /Direct database access\./, /D1 Time Travel/, /Anything already copied/, /cannot undo a copy that someone else already took/, /Anyone can check whether a handle exists/, /deleting your account is not|does not erase your work/i]) expect(text, String(re)).toMatch(re);
     const html = (await import('../public/privacy.html?raw')).default;
     expect(html).toContain('fonts.googleapis.com');   // the disclosure matches what the page does
@@ -586,8 +586,8 @@ describe('finding 12: pairing is an existence oracle for handles, and that is di
 describe('the docs state the release design', () => {
   it('DATA-POLICY, ARCHITECTURE and RUNBOOK describe the noise, epsilon, the yearly budget and the weekly release', async () => {
     const policy = (await import('../../docs/DATA-POLICY.md?raw')).default, arch = (await import('../../docs/ARCHITECTURE.md?raw')).default, run = (await import('../../docs/RUNBOOK.md?raw')).default;
-    for (const [name, text, res] of [['policy', policy, [/epsilon = 1 per weekly release/, /52/, /Laplace/, /crypto\.getRandomValues/, /never stored|Nothing exact is stored/, /Threat boundary/, /at least 5 distinct people/i, /Direct database access is outside this boundary/]],
-      ['arch', arch, [/Laplace/, /not live anywhere public|are not live anywhere public/, /Direct database access is outside this boundary/, /claim, not proof/]],
+    for (const [name, text, res] of [['policy', policy, [/epsilon = 1/, /52/, /Laplace/, /crypto\.getRandomValues/, /not stored|Nothing exact is stored/, /Threat boundary/, /not a formal differential-privacy guarantee/, /Direct database access is outside this boundary/]],
+      ['arch', arch, [/Laplace/, /No page, API response or operator console shows which way any task was routed/, /Direct database access is outside this boundary/, /claim, not proof/]],
       ['runbook', run, [/Laplace noise/, /yearly privacy budget|52 over a year/, /allowlist/, /oauth_purge|OAUTH_KV/]]]) for (const re of res) expect(text, `${name} ${re}`).toMatch(re);
   });
 });

@@ -46,9 +46,10 @@
   }
   function allocation(host, data) {
     S.clear(host);
-    host.appendChild(S.el('p', 'quiet', 'Week of ' + data.week + ' · ' + data.voter_count + ' eligible ballots'));
-    if (data.noise) host.appendChild(S.el('p', 'quiet', 'Published with random noise (epsilon ' + data.noise.epsilon + '), so these figures are close to, but not exactly, the votes.'));
-    if (data.provisional) host.appendChild(S.el('p', 'prov-note', 'Provisional fallback: ' + (data.reason || 'no eligible ballot result') + '. Carrying the previous allocation.'));
+    host.appendChild(S.el('p', 'quiet', 'Week of ' + data.week + ' · ' + (data.source === 'ballots' ? data.voter_count + ' eligible ballots' : 'no new result this week')));
+    if (data.noise) host.appendChild(S.el('p', 'quiet', 'Random noise was added to this split, so these figures are close to, but not exactly, the votes. This is not a formal differential-privacy guarantee.'));
+    if (data.legacy_exact) host.appendChild(S.el('p', 'prov-note', data.legacy_exact.note));
+    if (data.provisional) host.appendChild(S.el('p', 'prov-note', 'Provisional fallback. ' + (data.reason || 'No new result was published.')));
     Object.entries(data.shares).forEach(([id, points]) => {
       const row = S.el('p', 'allocation-line'); row.appendChild(S.el('span', null, projects.find((p) => p.id === id)?.name || id));
       row.appendChild(S.el('strong', null, (points / 100).toFixed(2) + '%')); host.appendChild(row);
@@ -61,7 +62,7 @@
     host.appendChild(S.el('p', 'quiet', audit.note));
     host.appendChild(S.el('h3', null, 'Published snapshots'));
     if (!audit.snapshot_history.length) host.appendChild(S.el('p', 'quiet', 'No weekly snapshot has been published yet.'));
-    audit.snapshot_history.forEach((s) => host.appendChild(S.el('p', 'allocation-line', s.week + ' · ' + s.voter_count + ' ballots · ' + (s.source === 'fallback' ? 'Provisional fallback' : 'Ballots') + ' · ' + new Date(s.published_at).toISOString())));
+    audit.snapshot_history.forEach((s) => host.appendChild(S.el('p', 'allocation-line', s.week + ' · ' + (s.source === 'fallback' ? 'no new result (previous split carried forward)' : s.voter_count + ' ballots' + (s.exact_legacy ? ' · exact, published before noise' : '')) + ' · ' + new Date(s.published_at).toISOString())));
   }
   function humanCheck(siteKey) {
     if (!siteKey) { message('Registration is not configured yet. Existing voters can sign in.'); return; }

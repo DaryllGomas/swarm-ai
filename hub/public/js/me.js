@@ -3,8 +3,8 @@
   'use strict';
   const S = window.Swarm, $ = (id) => document.getElementById(id);
   const ORIGINS = [
-    ['public_routed', 'Public-routed', 'Handed out by the public allocation. This is the only kind compared with the public vote.'],
-    ['ballot_directed', 'Ballot-directed', 'Handed out by your own ballot to your linked AI. Credited to you; it never moves the public comparison.'],
+    ['public_routed', 'Public-routed', 'Handed out by the public allocation.'],
+    ['ballot_directed', 'Ballot-directed', 'Handed out by your own ballot to your linked AI. Credited to you. Only you see this split.'],
     ['self_picked', 'Self-picked', 'Chosen by your AI with claim_task. Credited and shown; it never moves the allocation.'],
   ];
   let expiryTimer = 0;

@@ -16,7 +16,9 @@ test('the data policy exists and covers every tier, table and the things Swarm c
 test('every table in the schema is in the data policy', () => {
   const d = doc('DATA-POLICY.md');
   const migrations = readdirSync(new URL('../migrations/', import.meta.url)).sort().map((f) => readFileSync(new URL(`../migrations/${f}`, import.meta.url), 'utf8')).join('\n');
-  const tables = new Set([...migrations.matchAll(/CREATE TABLE (?:IF NOT EXISTS )?([a-z_]+)/g)].map((m) => m[1]).filter((t) => !t.endsWith('_bak') && t !== 'allocation_percent' && t !== 'tasks_bak'));
+  // A table a later migration drops (a working table such as 0011's _unsafe_weeks, or weekly_model_stats) is not part of the schema.
+  const dropped = new Set([...migrations.matchAll(/DROP TABLE (?:IF EXISTS )?([a-z_]+)/g)].map((m) => m[1]));
+  const tables = new Set([...migrations.matchAll(/CREATE TABLE (?:IF NOT EXISTS )?([a-z_]+)/g)].map((m) => m[1]).filter((t) => !t.endsWith('_bak') && t !== 'allocation_percent' && t !== 'tasks_bak' && !dropped.has(t)));
   assert.ok(tables.size >= 18);
   for (const t of tables) assert.ok(d.includes('`' + t + '`') || d.includes(t), `table ${t} is not in DATA-POLICY.md`);
 });

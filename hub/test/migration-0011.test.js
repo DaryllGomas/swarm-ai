@@ -55,6 +55,7 @@ describe('migration 0011 on a populated database', () => {
     expect(JSON.stringify(await all('SELECT * FROM allocation'))).not.toMatch(/9000|1000/);
     await applyD1Migrations(db(), upTo(/^0012/));
     expect(JSON.stringify(await all('SELECT * FROM allocation'))).not.toMatch(/9000|1000/); // and 0012 on top leaves it that way
+    expect(await all('PRAGMA foreign_key_check')).toEqual([]);
   });
 
   it('a valid snapshot, a seed or a later valid week breaks the chain: fallbacks after them are not touched', async () => {
