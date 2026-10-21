@@ -28,16 +28,39 @@
     });
     $('ballot-ring').setAttribute('aria-label', 'Your allocation: ' + rows.map((r, i) => r.project.name + ' ' + values[i] + ' points').join(', '));
   }
+  // The points are linked: they always add up to exactly 100. Changing one project takes the difference from (or gives
+  // it to) the others in proportion to what they hold, so the total can never drift away from 100.
+  function split(total, weights) {
+    const sum = weights.reduce((a, b) => a + b, 0);
+    const raw = weights.map((w) => (sum > 0 ? (w / sum) * total : total / weights.length));
+    const out = raw.map(Math.floor);
+    let left = total - out.reduce((a, b) => a + b, 0);
+    raw.map((r, i) => [r - Math.floor(r), i]).sort((a, b) => b[0] - a[0]).forEach(([, i]) => { if (left > 0) { out[i] += 1; left -= 1; } });
+    return out;
+  }
+  function rebalance(changed, value) {
+    let v = Math.round(Number(value));
+    if (!Number.isFinite(v)) return;
+    v = Math.max(0, Math.min(100, v));
+    const others = rows.map((r, i) => i).filter((i) => i !== changed);
+    const shares = split(100 - v, others.map((i) => Number(rows[i].number.value) || 0));
+    rows[changed].number.value = rows[changed].slider.value = String(v);
+    others.forEach((i, k) => { rows[i].number.value = rows[i].slider.value = String(shares[k]); });
+    update();
+  }
   function ballotEditor(ballot) {
     rows = []; S.clear($('ballot-inputs'));
+    // A saved ballot opens as saved; a new one starts as an even split, so the total is 100 from the first moment.
+    const saved = projects.map((p) => Number(ballot.allocations?.[p.id]) || 0);
+    const start = saved.reduce((a, b) => a + b, 0) === 100 ? saved : split(100, projects.map(() => 1));
     projects.forEach((p, i) => {
       const row = S.el('div', 'ballot-row'), label = S.el('label', null, p.name);
       const number = S.el('input'), slider = S.el('input');
       number.type = 'number'; number.id = 'points-' + i; label.setAttribute('for', number.id);
       slider.type = 'range'; slider.setAttribute('aria-label', p.name + ' points');
-      [number, slider].forEach((input) => { input.min = '0'; input.max = '100'; input.step = '1'; input.value = String(ballot.allocations[p.id] || 0); });
-      slider.addEventListener('input', () => { number.value = slider.value; update(); });
-      number.addEventListener('input', () => { slider.value = number.value; update(); });
+      [number, slider].forEach((input) => { input.min = '0'; input.max = '100'; input.step = '1'; input.value = String(start[i]); });
+      slider.addEventListener('input', () => rebalance(i, slider.value));
+      number.addEventListener('input', () => { if (number.value !== '') rebalance(i, number.value); });
       row.appendChild(label); row.appendChild(slider); row.appendChild(number); $('ballot-inputs').appendChild(row);
       rows.push({ project: p, number, slider });
     });
