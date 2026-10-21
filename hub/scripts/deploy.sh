@@ -28,7 +28,9 @@ if [ $# -gt 0 ]; then
     *GIT_COMMIT*|*BUILT_AT*) echo "Refusing: the stamped commit and build time are set only by the checked deploy route." >&2; exit 1 ;;
   esac
   case "$1 ${2:-} ${3:-}" in
-    "secret put "*|"secret delete "*|"secret list "*|"secret bulk "*) ;;
+    # `secret bulk` is NOT allowed: it reads secret names from a file or stdin that this script cannot inspect, so it could set the stamped
+    # GIT_COMMIT / BUILT_AT. Set secrets one at a time with `secret put NAME` (the name is on the command line, where it is checked above).
+    "secret put "*|"secret delete "*|"secret list "*) ;;
     "whoami "*|"tail "*|"deployments list"*|"deployments status"*|"versions list"*|"versions view"*) ;;
     "d1 list"*|"d1 info"*|"d1 migrations list"*|"d1 execute"*|"d1 time-travel"*|"kv namespace"*|"kv key"*) ;; # database and key-value work that deploys no code
     *) echo "Refusing 'wrangler $*': not on the maintenance allowlist. Deploys, version uploads, rollbacks and migrations go through the checked route (run this script with no arguments)." >&2; exit 1 ;;
@@ -88,6 +90,13 @@ if [ -n "$(git -C "$root" status --porcelain --untracked-files=all)" ] || [ "$(g
   echo "Refusing to deploy: the working tree or HEAD changed while installing or testing." >&2
   exit 1
 fi
+# Preflight for migrations 0011 and 0012 (read-only: one SELECT, nothing is changed). They replace weekly vote snapshots built from fewer than 5
+# ballots, and every fallback descended from one, with an equal provisional split. Production is expected to have NO snapshot built from ballots
+# (count 0). A non-zero count means ballot-based results were published before; read docs/RUNBOOK.md ("Before the first deploy that includes
+# migrations 0011 and 0012") before going on. If the check cannot run, nothing is migrated or deployed.
+echo "Preflight (read-only): weekly vote snapshots built from ballots on the live database:"
+npx wrangler d1 execute swarm-ai --remote --command "SELECT COUNT(*) AS ballot_snapshots FROM vote_snapshots WHERE source = 'ballots'" \
+  || { echo "Refusing to deploy: the read-only preflight on vote_snapshots could not run." >&2; exit 1; }
 # 0001 is idempotent, so the first run on the live DB (which has no d1_migrations record) is harmless.
 npx wrangler d1 migrations apply swarm-ai --remote
 # GET /version reports these (as the operator-stamped revision, not proof), and the site footer links the commit on GitHub.

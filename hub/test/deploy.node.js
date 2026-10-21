@@ -24,7 +24,7 @@ function fixture() {
   git(work, 'checkout', '-q', '-B', 'main'); git(work, 'add', '-A'); git(work, 'commit', '-q', '-m', 'first'); git(work, 'push', '-q', 'origin', 'main');
   mkdirSync(bin);
   // The npm stub can dirty the tree during `npm test` when STUB_DIRTY_FILE is set (a test that changes the tree while it runs).
-  for (const cmd of ['npm', 'npx']) { writeFileSync(path.join(bin, cmd), `#!/bin/sh\necho "${cmd} $*" >> "${log}"\nif [ "$1" = test ] && [ -n "$STUB_DIRTY_FILE" ]; then echo x > "$STUB_DIRTY_FILE"; fi\n`); chmodSync(path.join(bin, cmd), 0o755); }
+  for (const cmd of ['npm', 'npx']) { writeFileSync(path.join(bin, cmd), `#!/bin/sh\necho "${cmd} $*" >> "${log}"\nif [ "$1" = test ] && [ -n "$STUB_DIRTY_FILE" ]; then echo x > "$STUB_DIRTY_FILE"; fi\nif [ -n "$STUB_FAIL_D1_EXECUTE" ] && [ "$2" = d1 ] && [ "$3" = execute ]; then exit 1; fi\n`); chmodSync(path.join(bin, cmd), 0o755); }
   const env = (extra = {}) => ({ ...process.env, ...GIT_ENV, PATH: `${bin}:${process.env.PATH}`, CLOUDFLARE_API_TOKEN: 'test-token-not-real', SWARM_DEPLOY_ALLOW_ORIGIN: origin, ...extra });
   const run = (extra = {}) => spawnSync('bash', [path.join(work, 'hub/scripts/deploy.sh')], { cwd: path.join(work, 'hub'), encoding: 'utf8', env: env(extra) });
   const pass = (args, extra = {}) => spawnSync('bash', [path.join(work, 'hub/scripts/deploy.sh'), ...args], { cwd: path.join(work, 'hub'), encoding: 'utf8', env: env({ SWARM_DEPLOY_ALLOW_ORIGIN: '', ...extra }) });
@@ -140,5 +140,42 @@ test('the maintenance passthrough is an allowlist: secrets and read-only command
       const r = f.pass(args);
       assert.notEqual(r.status, 0, args.join(' ')); assert.match(r.stderr, /Refusing/); assert.equal(f.calls(), before, args.join(' '));
     }
+  } finally { f.cleanup(); }
+});
+
+test('preflight: a read-only count of ballot-based snapshots runs and is printed BEFORE the migrations; if it cannot run, nothing is migrated or deployed', () => {
+  let f = fixture();
+  try {
+    const r = f.run();
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Preflight \(read-only\)/);
+    const calls = f.calls().split('\n');
+    const pre = calls.findIndex((l) => /d1 execute swarm-ai --remote --command SELECT COUNT\(\*\) AS ballot_snapshots FROM vote_snapshots WHERE source = 'ballots'$/.test(l));
+    const mig = calls.findIndex((l) => /d1 migrations apply/.test(l));
+    assert.ok(pre >= 0, f.calls()); assert.ok(mig > pre, 'the preflight runs before the migrations');
+    // It is a single SELECT: no write keyword in the command.
+    assert.doesNotMatch(calls[pre], /\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE)\b/i);
+  } finally { f.cleanup(); }
+  f = fixture();
+  try {
+    const r = f.run({ STUB_FAIL_D1_EXECUTE: '1' });
+    assert.notEqual(r.status, 0); assert.match(r.stderr, /preflight .* could not run/);
+    assert.equal(f.calls().includes('migrations apply'), false); assert.equal(f.calls().includes('wrangler deploy'), false);
+  } finally { f.cleanup(); }
+});
+
+test('H: secret bulk is not on the maintenance allowlist (file and stdin are not inspected), so it cannot set the stamped commit', () => {
+  const f = fixture();
+  try {
+    writeFileSync(path.join(f.work, 'secrets.json'), JSON.stringify({ GIT_COMMIT: 'a'.repeat(40), BUILT_AT: '2026-01-01T00:00:00Z' }));
+    git(f.work, 'checkout', '-q', '-b', 'feature');
+    for (const args of [['secret', 'bulk', 'secrets.json'], ['secret', 'bulk', '/dev/stdin'], ['secret', 'bulk']]) {
+      const before = f.calls();
+      const r = f.pass(args);
+      assert.notEqual(r.status, 0, args.join(' ')); assert.match(r.stderr, /not on the maintenance allowlist/); assert.equal(f.calls(), before, args.join(' '));
+    }
+    // One at a time still works, and the stamped names are still refused there.
+    assert.equal(f.pass(['secret', 'put', 'ADMIN_TOKEN']).status, 0);
+    assert.notEqual(f.pass(['secret', 'put', 'GIT_COMMIT']).status, 0);
   } finally { f.cleanup(); }
 });
