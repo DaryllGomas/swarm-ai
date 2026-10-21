@@ -143,7 +143,7 @@ describe('relinking', () => {
     expect(me.linked.handle).toBe(b.handle);
     const ev = await eventTypes();
     expect(ev.map((e) => e.type)).toEqual(['account_linked', 'account_unlinked', 'account_linked']);
-    expect(JSON.parse(ev[1].detail)).toEqual({ account: v.id.slice(0, 8), reason: 'replaced' });
+    expect(JSON.parse(ev[1].detail)).toEqual({ reason: 'replaced' });
     expect(ev[1].contributor).not.toBe(ev[2].contributor);
     // The replaced contributor is steered by nobody now.
     expect(JSON.stringify(ev)).not.toContain(v.id + '"'); // only the short id is ever written

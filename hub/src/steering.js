@@ -87,7 +87,7 @@ export async function redeemLinkCode(env, contributor, networkHash, rawCode, now
       // A link that is about to be replaced is recorded first (unless it is the very same pair).
       env.DB.prepare(
         `INSERT INTO events (ts, type, contributor, actor, detail)
-         SELECT ?2, 'account_unlinked', l.contributor, 'system', json_object('account', substr(l.account, 1, 8), 'reason', 'replaced')
+         SELECT ?2, 'account_unlinked', l.contributor, 'system', json_object('reason', 'replaced')
          FROM account_links l WHERE ${valid} AND (l.account = ${codeAccount} OR l.contributor = ?3) AND NOT (l.account = ${codeAccount} AND l.contributor = ?3)`
       ).bind(hash, now, contributor),
       env.DB.prepare(`DELETE FROM account_links WHERE ${valid} AND (account = ${codeAccount} OR contributor = ?3)`).bind(hash, now, contributor),
@@ -99,7 +99,7 @@ export async function redeemLinkCode(env, contributor, networkHash, rawCode, now
       ).bind(hash, now, contributor),
       env.DB.prepare(
         `INSERT INTO events (ts, type, contributor, actor, detail)
-         SELECT ?2, 'account_linked', ?3, 'system', json_object('account', substr(account, 1, 8), 'via', 'code')
+         SELECT ?2, 'account_linked', ?3, 'system', json_object('via', 'code')
          FROM account_links WHERE contributor = ?3 AND linked_at = ?2 AND via = 'code'`
       ).bind(hash, now, contributor),
       env.DB.prepare("DELETE FROM link_codes WHERE hash = ?1 AND EXISTS (SELECT 1 FROM account_links WHERE contributor = ?3 AND linked_at = ?2 AND via = 'code')").bind(hash, now, contributor),
@@ -127,7 +127,7 @@ export async function linkDirect(env, account, contributor, via = 'oauth', now =
   const res = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO events (ts, type, contributor, actor, detail)
-       SELECT ?3, 'account_unlinked', l.contributor, 'system', json_object('account', substr(l.account, 1, 8), 'reason', 'replaced')
+       SELECT ?3, 'account_unlinked', l.contributor, 'system', json_object('reason', 'replaced')
        FROM account_links l WHERE ${ok} AND (l.account = ?1 OR l.contributor = ?2) AND NOT (l.account = ?1 AND l.contributor = ?2)`
     ).bind(account, contributor, now),
     env.DB.prepare(`DELETE FROM account_links WHERE ${ok} AND (account = ?1 OR contributor = ?2) AND NOT (account = ?1 AND contributor = ?2)`).bind(account, contributor),
@@ -135,7 +135,7 @@ export async function linkDirect(env, account, contributor, via = 'oauth', now =
     env.DB.prepare(`INSERT OR IGNORE INTO account_links (account, contributor, linked_at, via) SELECT id, ?2, ?3, ?4 FROM accounts WHERE id = ?1 AND suspended = 0 AND ${ownerOk('?2', '?1')}`).bind(account, contributor, now, via),
     env.DB.prepare(
       `INSERT INTO events (ts, type, contributor, actor, detail)
-       SELECT ?3, 'account_linked', ?2, 'system', json_object('account', substr(?1, 1, 8), 'via', ?4) WHERE changes() > 0`
+       SELECT ?3, 'account_linked', ?2, 'system', json_object('via', ?4) WHERE changes() > 0`
     ).bind(account, contributor, now, via),
   ]);
   return res[3].meta.changes > 0;
@@ -145,7 +145,7 @@ export async function unlinkAccount(env, account, now = Date.now()) {
   const res = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO events (ts, type, contributor, actor, detail)
-       SELECT ?2, 'account_unlinked', contributor, 'voter', json_object('account', substr(account, 1, 8), 'reason', 'unlinked')
+       SELECT ?2, 'account_unlinked', contributor, 'voter', json_object('reason', 'unlinked')
        FROM account_links WHERE account = ?1`
     ).bind(account, now),
     env.DB.prepare('DELETE FROM account_links WHERE account = ?1').bind(account),
@@ -270,7 +270,7 @@ export async function weekSummary(env, contributor, now = Date.now()) {
     notes: [
       'Claimed counts claims made this week that are still standing (in progress or handed in). Units, not compute.',
       'Awaiting review is part of submitted. Only work a reviewer accepted is shown as accepted; pending work is never shown as accepted.',
-      'Only public-routed work is compared with the public vote. Ballot-directed work is yours, shown separately.',
+      'This split by how work was routed is shown only to you. Public pages and the operator console do not show how any task was routed; the weekly public check adds every route together.',
     ],
     notice: UNTRUSTED,
   };

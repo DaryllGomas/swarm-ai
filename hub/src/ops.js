@@ -1,9 +1,11 @@
 import { verifyAccess } from './access.js';
 import { adminHeld, adminPending, adminReview } from './admin.js';
-import { currentAllocation, expireClaims, originUnitsByProject, STANDING } from './core.js';
+import { currentAllocation, expireClaims } from './core.js';
 import { ipHashFor, json, readJsonResult, sha256, underRateLimit, weekOf } from './lib.js';
 import { syncTasks, UNTRUSTED } from './sync.js';
 
+// A contributor appears in the churn list only above this many claim events in 24 hours (abuse signal, not a log of who claimed what).
+const CHURN_MIN = 10;
 const notFound = () => json({ error: 'not found' }, 404);
 
 export async function handleOps(req, env, url) {
@@ -42,21 +44,25 @@ export async function handleOps(req, env, url) {
   return json(await syncTasks(env, { force: true }));
 }
 
+// The operator console shows work, never how it was routed. Public routing, a ballot's steering and a self-pick look the same here: there is
+// no origin figure at all (live or weekly), active claims carry no contributor, and events about claims and links carry no contributor,
+// handle or origin. The database still holds the origin for the scheduler, and direct database access is outside this boundary
+// (docs/DATA-POLICY.md).
 async function overview(env) {
   await expireClaims(env);
-  const now = Date.now(), week = weekOf(now);
-  const [allocation, routed, selfPicked, ballotDirected, counts, pending, claims, meta] = await Promise.all([
-    currentAllocation(env), originUnitsByProject(env, week, 'public_routed', STANDING), originUnitsByProject(env, week, 'self_picked', STANDING), originUnitsByProject(env, week, 'ballot_directed', STANDING),
+  const now = Date.now();
+  const [allocation, counts, pending, claims, meta] = await Promise.all([
+    currentAllocation(env),
     env.DB.prepare('SELECT status, COUNT(*) AS n FROM tasks GROUP BY status').all(),
     env.DB.prepare("SELECT COUNT(*) AS n, MIN(created) AS oldest FROM submissions WHERE status = 'pending'").first(),
-    env.DB.prepare(`SELECT c.id, c.task, c.contributor, u.handle, t.project, c.expires_at,
+    env.DB.prepare(`SELECT c.id, c.task, t.project, c.expires_at,
       CASE WHEN c.expires_at <= ?2 THEN 1 ELSE 0 END AS expiring
-      FROM claims c JOIN tasks t ON t.id = c.task JOIN contributors u ON u.id = c.contributor
+      FROM claims c JOIN tasks t ON t.id = c.task
       WHERE c.outcome IS NULL AND c.expires_at > ?1 ORDER BY c.expires_at, c.id`).bind(now, now + 3600000).all(),
     env.DB.prepare("SELECT k, v FROM meta WHERE k IN ('last_sync', 'last_sync_error')").all(),
   ]);
-  return json({ week, allocation, routed_by_origin: { public_routed: routed, self_picked: selfPicked, ballot_directed: ballotDirected },
-    routing_note: 'Units handed out, not compute. Only public_routed is compared with the allocation.',
+  return json({ week: weekOf(now), allocation,
+    routing_note: 'No routing figures are shown: units handed out are published once a week for the closed week, every route added together (/api/analytics). This console does not show how any task was routed either.',
     counts: { ready: 0, claimed: 0, submitted: 0, accepted: 0, held: 0, ...Object.fromEntries(counts.results.map((r) => [r.status, r.n])) },
     pending_reviews: pending.n, oldest_review_age_ms: pending.oldest === null ? null : Math.max(0, now - pending.oldest),
     active_claims: claims.results, expiring_claims: claims.results.filter((c) => c.expiring),
@@ -102,7 +108,8 @@ async function audit(env, url) {
   const since = Date.now() - 86400000;
   const [events, pairings, churn, rejected, flagged] = await Promise.all([
     env.DB.prepare('SELECT id, ts, type, task, contributor, submission, actor, detail FROM events WHERE id < ?1 ORDER BY id DESC LIMIT 51').bind(before).all(),
-    env.DB.prepare(`SELECT pair_ip AS network_day, COUNT(*) AS pairings FROM contributors
+    // Only the COUNT per network is returned. The network hash itself never leaves the database, not even to the operator console.
+    env.DB.prepare(`SELECT COUNT(*) AS pairings FROM contributors
       WHERE created >= ?1 AND pair_ip IS NOT NULL AND pair_ip != '' GROUP BY pair_ip HAVING COUNT(*) >= 4 ORDER BY pairings DESC`).bind(since).all(),
     // Count lifecycle events, not the claim's final outcome: a claim and release both count.
     env.DB.prepare(`SELECT c.id AS contributor_id, c.handle,
@@ -110,7 +117,8 @@ async function audit(env, url) {
       SUM(CASE WHEN e.type = 'claim_released' THEN 1 ELSE 0 END) AS releases,
       SUM(CASE WHEN e.type = 'claim_expired' THEN 1 ELSE 0 END) AS expires
       FROM events e JOIN contributors c ON c.id = e.contributor
-      WHERE e.ts >= ?1 AND e.type IN ('task_claimed','claim_released','claim_expired') GROUP BY c.id ORDER BY claims + releases + expires DESC`).bind(since).all(),
+      WHERE e.ts >= ?1 AND e.type IN ('task_claimed','claim_released','claim_expired') GROUP BY c.id
+      HAVING claims + releases + expires >= ${CHURN_MIN} ORDER BY claims + releases + expires DESC`).bind(since).all(),
     env.DB.prepare(`SELECT c.id AS contributor_id, c.handle, COUNT(*) AS reviewed,
       SUM(s.status = 'rejected') AS rejected, 1.0 * SUM(s.status = 'rejected') / COUNT(*) AS rejected_ratio
       FROM submissions s JOIN contributors c ON c.id = s.contributor
@@ -118,8 +126,30 @@ async function audit(env, url) {
     env.DB.prepare(`SELECT s.id, s.contributor AS contributor_id, c.handle, s.task, s.flags, s.status
       FROM submissions s JOIN contributors c ON c.id = s.contributor WHERE json_array_length(s.flags) > 0 ORDER BY s.id DESC LIMIT 100`).all(),
   ]);
-  const page = events.results.slice(0, 50);
+  const page = events.results.slice(0, 50).map(auditView);
   return json({ notice: UNTRUSTED, events: page, next_before: events.results.length > 50 ? page.at(-1).id : null,
     signals: { window_start: since, pairings_near_cap: pairings.results, claim_churn_24h: churn.results,
       rejected_ratios_all_time: rejected.results, link_flagged: flagged.results.map((r) => ({ ...r, flags: JSON.parse(r.flags) })) } });
+}
+
+// Events about claims, links and steering say WHAT happened to a task, never WHO or by which route. Contributor, handle and detail are
+// removed from them on the way out (the claim id stays, so a claim and its release can be paired). Anything else is shown as before, minus
+// an account key that very old link events carried.
+const WORK_EVENTS = new Set(['task_claimed', 'claim_released', 'claim_expired', 'account_linked', 'account_unlinked']);
+export function auditView(e) {
+  if (WORK_EVENTS.has(e.type)) {
+    let claim;
+    try { claim = JSON.parse(e.detail ?? 'null')?.claim; } catch { /* not JSON */ }
+    return { id: e.id, ts: e.ts, type: e.type, task: e.task, contributor: null, submission: e.submission, actor: null, detail: Number.isInteger(claim) ? JSON.stringify({ claim }) : null };
+  }
+  return { ...e, detail: e.detail == null ? null : withoutAccount(e.detail) };
+}
+
+// Events written before migration 0010 carried a short account id next to a contributor id. Any such key is dropped on the way out.
+function withoutAccount(detail) {
+  try {
+    const d = JSON.parse(detail);
+    if (d && typeof d === 'object' && !Array.isArray(d)) { delete d.account; return JSON.stringify(d); }
+  } catch { /* not JSON: shown as it is */ }
+  return detail;
 }

@@ -30,8 +30,12 @@ These are frozen design rules. Don't bend them.
   labelled "Example" in the UI and the API, and removed once real data exists.
 - **Four separate measures: voted, routed, accepted, impact.** Never blend them into one score, and never
   treat tokens, assignments and accepted outcomes as interchangeable.
-- **Routed is not compute.** It means work units handed out through `next_task`. Self-directed work is shown
-  and credited, but never moves the allocation numbers.
+- **Routed is not compute.** It means work units handed out through `next_task`. Self-directed and
+  ballot-directed work never moves the vote split or the public scheduler's own count.
+- **Routing origin is private.** Whether work was publicly routed, ballot-directed or self-picked stays in the
+  database for the scheduler's maths only. It is never shown on any public or operator surface, live or weekly,
+  except to the contributor about their own work. The public "did the scheduler follow the vote" check is a
+  closed-week total of all routes combined, coarse by design (see `docs/DATA-POLICY.md`).
 - **Every accepted result links to a receipt.** Pending work is never shown as accepted.
 - **A project can't look successful by generating more tasks.** Sponsorship never buys voting weight.
 - **Don't invent assignments to hit a percentage.** The scheduler shows why a gap exists.

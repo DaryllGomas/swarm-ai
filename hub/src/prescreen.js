@@ -1,3 +1,4 @@
+import { detectPersonalDetails } from './pii.js';
 // Advisory only. No source URL is fetched, and model output never changes lifecycle state.
 export const PRESCREEN_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 
@@ -14,10 +15,11 @@ export function similarity(a, b) {
 }
 
 export async function prescreenSubmission(env, id) {
-  let result;
+  let result, personal = [];
   try {
     const s = await env.DB.prepare('SELECT s.body, s.sources, s.task, t.output_format FROM submissions s JOIN tasks t ON t.id = s.task WHERE s.id = ?1').bind(id).first();
     if (!s) return;
+    personal = detectPersonalDetails(s.body); // deterministic, so it is recorded even when the AI is unavailable; only the kinds are kept
     const { results } = await env.DB.prepare('SELECT id, body FROM submissions WHERE task = ?1 AND id < ?2 ORDER BY id DESC LIMIT 100').bind(s.task, id).all();
     const duplicate = results.find((r) => similarity(s.body, r.body) >= 0.85)?.id ?? null;
     // A fresh boundary and JSON encoding keep supplied delimiter text inside the data region.
@@ -34,5 +36,6 @@ export async function prescreenSubmission(env, id) {
     if (!raw || !['format_ok', 'sources_relevant', 'injection_suspected'].every((k) => typeof raw[k] === 'boolean') || typeof raw.summary !== 'string') throw new Error('invalid annotation');
     result = { format_ok: raw.format_ok, sources_relevant: raw.sources_relevant, injection_suspected: raw.injection_suspected, duplicate_of: duplicate, summary: raw.summary.slice(0, 1000) };
   } catch { result = { error: 'unavailable' }; }
+  if (personal.length) result = { ...result, personal_details: personal };
   await env.DB.prepare('UPDATE submissions SET prescreen = ?2 WHERE id = ?1 AND prescreen IS NULL').bind(id, JSON.stringify(result)).run();
 }

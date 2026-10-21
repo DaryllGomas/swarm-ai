@@ -30,8 +30,9 @@ describe('operator queries', () => {
     expect(o.allocation.shares['town-hall']).toBe(50); expect(o.allocation.shares['swarm-ai']).toBe(50); // migration 0006's provisional 50/50
     expect(o.counts).toMatchObject({ ready: 0, claimed: 1, submitted: 1, accepted: 0, held: 1 });
     expect(o.pending_reviews).toBe(1); expect(o.oldest_review_age_ms).toBeGreaterThanOrEqual(7200000);
-    expect(o.routed_by_origin.public_routed['town-hall']).toBe(3); expect(o.routed_by_origin.self_picked['town-hall']).toBe(3);
+    expect(o.routed_by_origin).toBeUndefined(); expect(o.closed_week_release).toBeUndefined(); // no routing figure of any kind in the console
     expect(o.expiring_claims).toHaveLength(1); expect(o.active_claims[0].task).toBe(ready);
+    expect(Object.keys(o.active_claims[0]).sort()).toEqual(['expires_at', 'expiring', 'id', 'project', 'task']); // no contributor, handle or origin
     expect(o.intake).toBe('paused'); expect(o.sync.last_sync_error).toBe('old failure'); expect(o.sync.last_sync).toBeTruthy();
     expect(JSON.stringify(o)).not.toContain('Test brief'); expect(held).toBeTruthy();
   });
@@ -147,7 +148,7 @@ describe('operator writes', () => {
     const after = await one('SELECT key_hash FROM contributors WHERE id = ?1', c.id);
     expect(after.key_hash).not.toBe(c.key_hash); expect(after.key_hash).toMatch(/^[0-9a-f]{64}$/);
     expect((await p.u.call('my_work')).isError).toBe(true);
-    expect((await (await send('/api/receipts')).json()).receipts[0].handle).toBe(p.u.handle);
+    expect((await (await send('/api/receipts')).json()).receipts[0].credited_as).toBe('a contributor');
     expect((await one("SELECT actor FROM events WHERE contributor = ?1 AND type = 'contributor_revoked'", c.id)).actor).toBe('owner@example.com');
     expect(await (await a.get('audit')).text()).not.toContain(after.key_hash);
     expect((await a.post('revoke', { contributor_id: c.id })).status).toBe(200);
@@ -199,9 +200,13 @@ describe('sync and audit', () => {
     const t2 = await addTask(); await p.u.call('claim_task', { id: t2 });
     await env.DB.prepare('UPDATE claims SET expires_at = 1 WHERE task = ?1').bind(t2).run(); await a.get('overview');
     await env.DB.batch(Array.from({ length: 55 }, () => env.DB.prepare("INSERT INTO events (ts,type) VALUES (1,'pagination-test')")));
+    // Churn is an abuse signal: a contributor appears only above a threshold of claim events in 24 hours.
+    expect((await (await a.get('audit')).json()).signals.claim_churn_24h).toEqual([]);
+    const cid = (await one('SELECT id FROM contributors WHERE handle = ?1', p.u.handle)).id;
+    await env.DB.batch(Array.from({ length: 7 }, () => env.DB.prepare("INSERT INTO events (ts,type,contributor,actor) VALUES (?1,'task_claimed',?2,?3)").bind(Date.now(), cid, p.u.handle)));
     const data = await (await a.get('audit')).json();
     expect(data.notice).toBe(UNTRUSTED); expect(data.signals.pairings_near_cap).toContainEqual(expect.objectContaining({ pairings: 4 }));
-    expect(data.signals.claim_churn_24h).toContainEqual(expect.objectContaining({ handle: p.u.handle, claims: 3, releases: 1, expires: 1 }));
+    expect(data.signals.claim_churn_24h).toContainEqual(expect.objectContaining({ handle: p.u.handle, claims: 10, releases: 1, expires: 1 }));
     expect(data.signals.rejected_ratios_all_time).toContainEqual(expect.objectContaining({ handle: p.u.handle, rejected_ratio: 1 }));
     expect(data.signals.link_flagged[0].flags).toEqual(['shortener:bit.ly']);
     expect(data.events).toHaveLength(50); expect(data.next_before).toBeTruthy();

@@ -2,9 +2,14 @@
 
 ## Reporting a vulnerability
 
-Report it privately to the maintainer. Please don't open a public issue for a vulnerability. We aim to respond
-within a few days. **Planned:** once the repository is on GitHub, **Security → Report a vulnerability** (private
-vulnerability reporting) becomes the way to do it. The repository has no GitHub remote yet.
+Report it privately through GitHub's **private vulnerability reporting** on [DaryllGomas/swarm-ai](https://github.com/DaryllGomas/swarm-ai/security/advisories/new)
+(Security, then Report a vulnerability). There is no email address for security reports, on purpose. Please don't open a
+public issue for a vulnerability. We aim to respond within a few days. The live site says the same at
+[/security](https://swarm.bigpicsolutions.com/security) and in `/.well-known/security.txt` (RFC 9116, from `hub/src/trust.js`).
+
+**Safe harbor.** If you look for problems in good faith, test only against a local copy (`npm test` in `hub/` runs the hub locally),
+never touch other users' data, don't disrupt the service, and give us 90 days to fix a problem before you publish it, we will not take
+legal action against you or ask anyone else to. It covers Swarm's own code and service, not Cloudflare, GitHub, an AI provider or a project Swarm points at.
 
 In scope:
 - **The hub:** the Worker, the JSON API, the scheduler and the database it uses (`hub/`).
@@ -43,8 +48,13 @@ Swarm is built so that connecting to it costs a contributor very little trust.
 - **Swarm never asks for credentials, files, prompts or repository access.** The only secret a contributor
   holds is the Swarm key from `pair`, and it only opens that contributor's Swarm handle.
 - **Keys are hashed.** Swarm stores a salted SHA-256 hash of each contributor key, never the key. It's shown
-  once and can't be recovered. Network addresses are only stored as a salted hash that rotates daily, used for
-  rate limits and to cap pairings and active claims.
+  once and can't be recovered. Network addresses are only stored as an HMAC under a random key that exists for one UTC day; the key is deleted after two
+  days, together with every hash made with it, so old codes can't be reversed or matched to each other. They are used only for rate limits and to cap
+  pairings, accounts and active claims.
+- **Anonymous by default, and the operator sees little.** Public receipts say "a contributor" unless the contributor chose their handle; counts of people below 5
+  are not published; `/ops` and `/api/admin` never return a ballot, a voter-to-contributor link or a network hash (a test scans every response). Likely
+  personal details in a submission are flagged for the reviewer and warned about. What Swarm stores, and what it cannot protect against, is on
+  [/privacy](https://swarm.bigpicsolutions.com/privacy) and in [docs/DATA-POLICY.md](docs/DATA-POLICY.md).
 - **Swarm never publishes or merges.** Submitted work waits for a person on the project to review it.
 - **The admin endpoints are hidden.** `/api/admin/*` needs a secret token and returns 404 to anyone without it.
 - **Submission links are pre-screened.** Links that can never be a public web page (other schemes, a login in
@@ -54,8 +64,10 @@ Swarm is built so that connecting to it costs a contributor very little trust.
 - **There is a lockdown lever.** Setting `INTAKE = "paused"` stops new pairings, claims and submissions while the
   site, the API, reading and review stay up. It is an intake pause, not a write freeze: releases, claim expiry, review and
   the hourly job still write. The steps are in [docs/RUNBOOK.md](docs/RUNBOOK.md).
-- **Deploys come from a clean `main`.** `hub/scripts/deploy.sh` refuses a dirty tree or any other branch, runs
-  the tests and applies the database migrations before it deploys.
+- **Deploys come from a clean `main`, and the revision is checkable, not proven.** `hub/scripts/deploy.sh` refuses a dirty tree, a detached HEAD, any other
+  branch, a non-canonical `origin`, or a commit that is not the exact tip of a freshly fetched `origin/main`; it runs `npm ci` and the tests and applies the database migrations before it deploys,
+  and stamps the commit into the Worker. Its argument passthrough is an allowlist, so no argument can stamp an arbitrary commit. `GET /version` and the footer of
+  every page show the commit the *operator reported*. That is not cryptographic proof of what runs: anyone with the deploy token can bypass the script, and a malicious or compelled operator could report anything.
 
 Limits that make abuse expensive: 60 requests a minute per network on every MCP request, 5 pairings per network
 per day, 2 active claims per contributor and 4 across all handles on one network (counting yesterday's network

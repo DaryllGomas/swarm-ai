@@ -6,12 +6,12 @@ export const SCOPES = ['read', 'work', 'submit'];
 // Tools with no entry (how_to_help, setup_guide, list_projects, list_tasks, get_task, pair) need no scope and no sign-in.
 export const SCOPE_FOR_TOOL = {
   my_work: 'read', submission_status: 'read', my_week: 'read',
-  next_task: 'work', claim_task: 'work', release_task: 'work', link_account: 'work',
+  next_task: 'work', claim_task: 'work', release_task: 'work', link_account: 'work', set_credit: 'work', remove_handle: 'work',
   submit_work: 'submit',
 };
 export const SCOPE_TEXT = {
   read: 'See your handle, your claims, your submissions and your weekly recap.',
-  work: 'Ask for tasks (next_task), claim and release them, and link your Swarm voter account.',
+  work: 'Ask for tasks (next_task), claim and release them, link your Swarm voter account, and change how you are credited (set_credit, remove_handle).',
   submit: 'Hand in finished work under your handle (submit_work). A person reviews it; nothing is published automatically.',
 };
 

@@ -59,9 +59,8 @@
     wrap.appendChild(S.el('em', 'tag live', 'Live'));
     name.appendChild(wrap); tr.appendChild(name);
     tr.appendChild(S.el('td', 'c-focus', p.focus));
-    // Allocation share (provisional until voting opens) and the real routed share with its units.
+    // Allocation share (provisional until voting opens). There is no live routed figure.
     tr.appendChild(barCell(p.voted, p.color, p.provisional ? 'share, provisional' : 'share'));
-    tr.appendChild(barCell(p.routed, '#f48a4c', S.n0(p.routedUnits) + (p.routedUnits === 1 ? ' unit' : ' units') + ' this week'));
     const a = S.el('td', 'c-pill'); a.appendChild(S.el('span', 'cell green', S.n0(p.accepted))); tr.appendChild(a);
     const o = S.el('td', 'c-pill'); o.appendChild(S.el('span', 'cell blue', S.n0(p.open))); tr.appendChild(o);
     const go = S.el('td', 'c-act');
@@ -83,17 +82,16 @@
       const list = S.projects(stats);
       S.renderStamp($('how-stamp'), stats);
       S.flow($('flow-host'), list, { lite: true, onSelect: (id) => { window.location.href = '/live.html#' + id; } });
-      $('board-note').textContent = stats.allocation_note || 'Voted allocation from the weekly ballot snapshot. Routed and accepted measures show real work separately.';
+      $('board-note').textContent = stats.allocation_note || 'Voted allocation from the weekly ballot snapshot. Accepted work is shown separately.';
       board(list);
-      const u = stats.routing_origins && stats.routing_origins.units;
-      if (u) $('origins-line').textContent = 'Work this week, in units: ' + S.n0(u.public_routed) + ' public-routed (the only kind compared with the vote) · ' + S.n0(u.ballot_directed) + ' ballot-directed · ' + S.n0(u.self_picked) + ' self-picked.';
+      $('origins-line').textContent = stats.routed_note || '';
       donut(list);
       const real = S.renderReceipts($('receipts-host'), rec, { limit: 4 });
       $('rec-pill').textContent = real ? 'Live' : 'None yet';
     } catch (e) {
       S.errorNote($('flow-host'));
       const tb = $('board-body'); S.clear(tb);
-      const tr = S.el('tr'); const td = S.el('td', null, 'Couldn’t load the live numbers just now. Nothing is shown rather than a guess.'); td.colSpan = 8; tr.appendChild(td); tb.appendChild(tr);
+      const tr = S.el('tr'); const td = S.el('td', null, 'Couldn’t load the live numbers just now. Nothing is shown rather than a guess.'); td.colSpan = 7; tr.appendChild(td); tb.appendChild(tr);
       $('board-count').textContent = 'Live numbers unavailable';
       S.renderReceipts($('receipts-host'), { receipts: [] }, { limit: 4 });
     }

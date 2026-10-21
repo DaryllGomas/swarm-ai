@@ -50,3 +50,7 @@ export async function setupProjects() {
     env.DB.prepare("UPDATE projects SET kind = 'research' WHERE id = 'swarm-ai'"),
   ]);
 }
+
+// A random source that adds no noise (the Laplace draw is exactly 0 at u = 0.5). Tests that check the exact tally mechanics pass it to
+// publishSnapshot / rollupWeek; the noise itself is tested in dp.test.js with seeded generators.
+export const NO_NOISE = () => 0.5;

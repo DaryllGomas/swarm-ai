@@ -86,7 +86,6 @@
       const m = META.find((x) => x.id === l.id) || Object.assign({ id: l.id, name: l.name, focus: l.summary, icon: KIND_ICON[l.kind] || 'file' }, FALLBACK[extra++ % FALLBACK.length]);
       return Object.assign({}, m, {
         voted: l.allocation.share, provisional: !!l.allocation.provisional,
-        routed: l.routed_share, routedUnits: l.routed_units,
         accepted: l.accepted_units, open: l.open_tasks, live: l,
       });
     });
@@ -319,9 +318,9 @@
     const c = 'M' + A.x.toFixed(1) + ',' + A.y.toFixed(1) + ' Q' + m.x.toFixed(1) + ',' + m.y.toFixed(1) + ' ' + B.x.toFixed(1) + ',' + B.y.toFixed(1);
     return { d, c, A, B };
   }
-  // Label lines for a node or list row: the allocation share (provisional until voting opens) and the real routed share.
+  // Label lines for a node or list row: the allocation share (provisional until voting opens) and the units accepted this week. There is no live routed figure.
   function shareText(p) { return pct(p.voted) + ' share' + (p.provisional ? ' (provisional)' : ''); }
-  function routedText(p) { return pct(p.routed) + ' routed · ' + n0(p.routedUnits) + (p.routedUnits === 1 ? ' unit' : ' units'); }
+  function acceptedText(p) { return n0(p.accepted) + (p.accepted === 1 ? ' unit' : ' units') + ' accepted this week'; }
 
   function flow(host, list, opts) {
     opts = opts || {};
@@ -329,7 +328,7 @@
     const dy = opts.tall ? 10 : 0;
     clear(host);
     const s = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'flow', role: 'group' });
-    s.setAttribute('aria-label', 'The Flow: the Swarm AI core with a beam to each of ' + list.map((p) => p.name).join(', ') + '. Beam width is the routed share, the dotted ring is the voted share.');
+    s.setAttribute('aria-label', 'The Flow: the Swarm AI core with a beam to each of ' + list.map((p) => p.name).join(', ') + '. Beam width and the dotted ring are both the voted share.');
     const defs = svg('defs');
     const blur = (id, sd) => { const f = svg('filter', { id, x: '-30%', y: '-60%', width: '160%', height: '220%' }); f.appendChild(svg('feGaussianBlur', { stdDeviation: sd })); defs.appendChild(f); };
     blur('fb6', 7); blur('fb3', 3); blur('fb12', 14);
@@ -360,7 +359,7 @@
     let spare = 0;
     list.forEach((p, idx) => {
       const pos = Object.assign({}, POS[p.id] || SPARE_POS[spare++ % SPARE_POS.length]); pos.y += dy;
-      const hw = Math.min(5 + p.routed * 0.62, 27);
+      const hw = Math.min(5 + p.voted * 0.62, 27);
       const g = beamGeometry(pos, core, hw, 1.6, (pos.y < core.y ? 1 : -1) * (pos.x < core.x ? 1 : -1) * -12);
       const gid = 'bg' + idx;
       const lg = svg('linearGradient', { id: gid, gradientUnits: 'userSpaceOnUse', x1: g.A.x, y1: g.A.y, x2: g.B.x, y2: g.B.y });
@@ -377,7 +376,7 @@
       anim.push(a);
 
       // node
-      const share = shareText(p), routedLine = routedText(p);
+      const share = shareText(p), routedLine = acceptedText(p);
       const n = svg('g', { class: 'node', tabindex: '0', role: 'link', 'aria-label': p.name + ' (live): ' + share + ', ' + routedLine + ', ' + n0(p.open) + ' open tasks. Open the Flow.' });
       const nglow = svg('circle', { cx: pos.x, cy: pos.y, r: 36, fill: p.color, opacity: '0.22', filter: 'url(#fb6)' });
       n.appendChild(nglow);
@@ -436,7 +435,7 @@
   }
 
   // Streams of glowing particles travel out from the core along each beam, in the beam's own color. Stream density
-  // and speed follow the routed share. Now and then a brighter pulse returns from a node to the core (accepted work).
+  // and speed follow the voted share. Now and then a brighter pulse returns from a node to the core (accepted work).
   function runParticles(host, s, anim, flash, opts) {
     const lite = !!opts.lite, CAP = 60;
     const layer = svg('g', { class: 'particles', 'pointer-events': 'none' });
@@ -444,7 +443,7 @@
     let total = 0;
     anim.forEach((a) => {
       a.len = a.path.getTotalLength();
-      const share = Math.min(1, a.p.routed / 32);
+      const share = Math.min(1, a.p.voted / 32);
       let count = lite ? Math.round(1.5 + share * 3.5) : Math.round(3 + share * 9);
       count = Math.max(1, Math.min(count, Math.floor((CAP - total) / (anim.length - anim.indexOf(a)))));
       total += count;
@@ -554,7 +553,8 @@
     main.appendChild(el('strong', null, r.title)); main.appendChild(el('i', 'rc-bar'));
     li.appendChild(main);
     const who = el('div', 'rc-who');
-    who.appendChild(el('span', null, '@' + r.handle));
+    // r.name is "a contributor" unless the contributor chose handle credit; the server decides, so a past receipt follows a later change.
+    who.appendChild(el('span', null, r.name));
     if (r.author) who.appendChild(el('small', null, 'GitHub: @' + r.author));
     who.appendChild(el('small', null, 'Review: ' + r.by));
     li.appendChild(who);
@@ -577,10 +577,62 @@
       const first = (r.evidence.sources || []).find((u) => /^https:\/\//.test(u));
       const gh = r.github;
       host.appendChild(receiptRow(
-        { icon: gh ? 'github' : 'file', title: r.task.title, handle: r.handle, author: gh && gh.pr_author, by: r.reviewed_by, when: rel(r.reviewed_at) },
+        { icon: gh ? 'github' : 'file', title: r.task.title, name: r.handle ? '@' + r.handle : (r.credited_as || 'a contributor'), author: gh && gh.pr_author, by: r.reviewed_by, when: r.reviewed_at ? fmtDate(r.reviewed_at) : '' },
         [linkOrDisabled('task', r.evidence.task_url), linkOrDisabled(gh ? 'pull request' : 'evidence', gh ? gh.pr_url : first), ...(r.publication ? [linkOrDisabled('Published', r.publication.url)] : [])]));
     });
     return true;
+  }
+
+  // ---- privacy choices (voter sign-up on /vote, "Your Swarm" on /me). The sentences match CHOICE_TEXT in hub/src/privacy.js; a test keeps them in step.
+  const PRIVACY_CHOICES = [
+    { key: 'credit', title: 'How you are credited', options: [
+      { value: 'anonymous', label: 'Anonymous (default)', text: 'Your accepted work shows as "a contributor" on receipts, and your handle is not shown there.' },
+      { value: 'handle', label: 'Show my handle', text: 'Your handle is shown on your receipts, and switching back to anonymous hides it on receipts read from then on (copies someone already saved keep it).' }] },
+    { key: 'history', title: 'Your history', options: [
+      { value: 'private', label: 'Private (default)', text: 'Your own claims and submissions stay visible only to you on Your Swarm.' },
+      { value: 'weekly_purge', label: 'Delete weekly', text: 'Each week, after the totals are counted, your per-item detail is deleted and only anonymous totals remain.' }] },
+    { key: 'research', title: 'Research', options: [
+      { value: 'aggregate', label: 'Totals only (default)', text: 'Your work counts only in anonymous totals.' },
+      { value: 'share_pseudonymous', label: 'Share under a random ID', text: 'Your contribution history goes into an open research dataset under a random research ID, never your handle or account.' }] },
+  ];
+  // Three radio groups with one sentence each, and a link to the privacy page. get() returns the chosen values; set(values) selects them.
+  function privacyChoices(prefix, current, onChange) {
+    const root = el('div', 'privacy-choices');
+    const radios = {};
+    PRIVACY_CHOICES.forEach((c) => {
+      const fs = el('fieldset', 'choice'); fs.appendChild(el('legend', null, c.title));
+      radios[c.key] = [];
+      c.options.forEach((o) => {
+        const label = el('label', 'choice-opt');
+        const input = el('input'); input.type = 'radio'; input.name = prefix + '-' + c.key; input.value = o.value;
+        input.checked = (current && current[c.key] ? current[c.key] : c.options[0].value) === o.value;
+        if (onChange) input.addEventListener('change', () => onChange(c.key, o.value));
+        radios[c.key].push(input);
+        const text = el('span', 'choice-text'); text.appendChild(el('strong', null, o.label)); text.appendChild(el('small', null, o.text));
+        label.appendChild(input); label.appendChild(text); fs.appendChild(label);
+      });
+      root.appendChild(fs);
+    });
+    const more = el('p', 'quiet'); const a = el('a', null, 'What Swarm stores, what it cannot protect against, and how to protect yourself'); a.href = '/privacy'; more.appendChild(a); root.appendChild(more);
+    return {
+      root,
+      get() { return Object.fromEntries(PRIVACY_CHOICES.map((c) => [c.key, (radios[c.key].find((r) => r.checked) || radios[c.key][0]).value])); },
+      set(values) { PRIVACY_CHOICES.forEach((c) => radios[c.key].forEach((r) => { r.checked = values && values[c.key] === r.value; })); },
+    };
+  }
+
+  // The footer shows which commit is running, linked to it on GitHub, so a visitor can compare it with the open source code.
+  async function footerCommit() {
+    const note = document.querySelector('.foot-note');
+    if (!note) return;
+    const wrap = el('span', 'foot-commit'); wrap.appendChild(document.createTextNode(' Build reported by the operator: ')); wrap.title = 'The commit the operator says was deployed. Compare it with the public code; it is not proof of what runs.';
+    try {
+      const v = await getJson('/version');
+      if (typeof v.commit === 'string' && /^[0-9a-f]{40}$/.test(v.commit)) {
+        const a = el('a', null, v.commit.slice(0, 7)); a.href = 'https://github.com/DaryllGomas/swarm-ai/commit/' + v.commit; a.rel = 'noopener noreferrer'; wrap.appendChild(a);
+      } else wrap.appendChild(document.createTextNode('not recorded for this build'));
+    } catch (err) { return; }
+    note.appendChild(wrap);
   }
 
   function errorNote(host, msg) {
@@ -618,7 +670,7 @@
     if (reduce || barsSeen || !('IntersectionObserver' in window)) i.style.width = w + '%';
     else i.style.width = '0%';
   }
-  document.addEventListener('DOMContentLoaded', () => { wireStaticCopy(); initSearch(); initMotion(); });
+  document.addEventListener('DOMContentLoaded', () => { wireStaticCopy(); initSearch(); initMotion(); footerCommit(); });
 
-  window.Swarm = { SAY_LINE, shareText, routedText, showBanner, MCP_URL, el, svg, icon, clear, fmtDate, fmtShort, rel, n0, pct, getJson, renderStamp, buildConnect, flow, renderReceipts, errorNote, projects, META, reduce, copyText, revealBars, setBar };
+  window.Swarm = { SAY_LINE, shareText, acceptedText, showBanner, MCP_URL, el, svg, icon, clear, fmtDate, fmtShort, rel, n0, pct, getJson, renderStamp, buildConnect, flow, renderReceipts, privacyChoices, PRIVACY_CHOICES, errorNote, projects, META, reduce, copyText, revealBars, setBar };
 })();

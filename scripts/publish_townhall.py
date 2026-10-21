@@ -57,13 +57,17 @@ def solution(s):
         sections['Sources'] = ['\n'.join('- ' + u for u in sources)]
     title = re.sub(r'^Research a fix for:\s*', '', s['title'])
     title = f"Swarm research {s['id']}: {title}"[:116]
-    model = re.sub(r'[^\w .+/-]', '', s.get('model') or '')[:60].strip() or 'model not supplied'
+    # Public-safe projection: the self-reported model name and token figures are private to the contributor and the reviewer (a distinctive
+    # model string can fingerprint a contributor), so they never reach a public repository. Even if the receipt carried a model, it is ignored
+    # here. The credit label is the one the contributor chose: their handle only for handle credit, else the generic label.
+    handle = s.get('handle')
+    credit = handle if isinstance(handle, str) and re.fullmatch(r'[a-z0-9_-]{3,24}', handle) else ('removed contributor' if s.get('credited_as') == 'removed contributor' else 'a contributor')
     scale = os.environ.get('TOWNHALL_SCALE', '')
     if scale not in {'individual', 'community', 'business', 'state', 'federal'}:
         raise ValueError('Set TOWNHALL_SCALE to individual, community, business, state or federal after reviewing the submission.')
     front = {
         'title': json.dumps(title, ensure_ascii=False), 'problem': problem, 'type': 'idea', 'status': 'proposed',
-        'scale': scale, 'submitted_by': s['handle'], 'written_with': f'ai-agent ({model})',
+        'scale': scale, 'submitted_by': credit, 'written_with': 'ai-agent',
         'date': datetime.date.today().isoformat(),
     }
     text = '---\n' + '\n'.join(f'{k}: {v}' for k, v in front.items()) + '\n---\n\n# ' + title + '\n\n'

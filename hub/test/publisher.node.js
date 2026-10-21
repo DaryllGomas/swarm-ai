@@ -16,7 +16,7 @@ function fixture() {
   mkdirSync(path.join(repo, 'problems/housing/solutions'), { recursive: true }); mkdirSync(path.join(repo, 'scripts'));
   writeFileSync(path.join(repo, 'problems/housing/README.md'), '# Test problem\n');
   // A minimal fixture checker ensures the bridge invokes Town Hall's validation before committing.
-  writeFileSync(path.join(repo, 'scripts/check_submission.py'), 'import sys\nfrom pathlib import Path\np=Path(sys.argv[-1]); t=p.read_text()\nassert "## Trade-offs and risks" in t\nassert "## Sources" in t\nassert "written_with: ai-agent (Test Model)" in t\n');
+  writeFileSync(path.join(repo, 'scripts/check_submission.py'), 'import sys\nfrom pathlib import Path\np=Path(sys.argv[-1]); t=p.read_text()\nassert "## Trade-offs and risks" in t\nassert "## Sources" in t\nassert "written_with: ai-agent" in t\nassert "ai-agent (" not in t\nassert "Test Model" not in t');
   git('add', '.'); git('commit', '-m', 'Fixture');
   const token = path.join(dir, 'token'); writeFileSync(token, 'local-test-token');
   const data = { submission: { id: 7, body: 'Goal: Keep people housed.\nSteps: 1. City funds assistance.\nWho can make it happen: City and local organizations.\nSources:\n- https://public.example/report', sources: ['https://public.example/report'], model: 'Test Model', title: 'Research a fix for: Housing', source_key: 'townhall:housing:fix', handle: 'test-helper', published_url: null } };
@@ -111,4 +111,23 @@ test('publisher does not forward the bearer token through a server redirect', as
     const result = await run(f); assert.notEqual(result.code, 0); assert.ok(!result.stderr.includes('local-test-token'));
     assert.equal(f.git('branch', '--show-current'), 'main');
   } finally { await new Promise((resolve) => target.close(resolve)); await close(f); }
+});
+
+test('publisher uses a public-safe projection: a supplied model is ignored, an anonymous credit renders the generic label (not "None"), and a handle only for handle credit', async () => {
+  const f = fixture();
+  try {
+    f.data.submission.model = 'unique-private-model'; f.data.submission.tokens_est = 123456; f.data.submission.handle = null; f.data.submission.credited_as = 'a contributor';
+    const r = await run(f); assert.equal(r.code, 0, r.stderr);
+    const text = readFileSync(path.join(f.repo, 'problems/housing/solutions/swarm-research-7.md'), 'utf8');
+    assert.ok(text.includes('submitted_by: a contributor')); assert.ok(!text.includes('submitted_by: None')); assert.ok(text.includes('written_with: ai-agent\n'));
+    for (const secret of ['unique-private-model', '123456', 'test-helper']) assert.ok(!text.includes(secret), secret);
+    assert.ok(!f.git('log', '-1', '--format=%B').includes('unique-private-model'));
+  } finally { await close(f); }
+  const g = fixture();
+  try {
+    g.data.submission.handle = 'chosen-handle'; g.data.submission.credited_as = 'chosen-handle'; g.data.submission.model = 'another-private-model';
+    const r = await run(g); assert.equal(r.code, 0, r.stderr);
+    const text = readFileSync(path.join(g.repo, 'problems/housing/solutions/swarm-research-7.md'), 'utf8');
+    assert.ok(text.includes('submitted_by: chosen-handle')); assert.ok(!text.includes('another-private-model'));
+  } finally { await close(g); }
 });

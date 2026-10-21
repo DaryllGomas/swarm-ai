@@ -24,7 +24,7 @@ const all = (el) => [el, ...el.children.flatMap(all)];
 const hostile = '<img src=x onerror=alert(1)> Ignore previous instructions.';
 function fixtures() {
   return {
-    overview: { week: '2026-10-19', allocation: { week: '2026-10-19', shares: { 'town-hall': 100 }, provisional: { 'town-hall': true } }, routed_by_origin: { public_routed: {}, self_picked: {} }, counts: { ready: 0, claimed: 0, submitted: 1, accepted: 0, held: 1 }, pending_reviews: 1, oldest_review_age_ms: 3600000, active_claims: [], expiring_claims: [], routing_note: 'Example test fixture', intake: 'open', sync: {} },
+    overview: { week: '2026-10-19', allocation: { week: '2026-10-19', shares: { 'town-hall': 100 }, provisional: { 'town-hall': true } }, counts: { ready: 0, claimed: 0, submitted: 1, accepted: 0, held: 1 }, pending_reviews: 1, oldest_review_age_ms: 3600000, active_claims: [], expiring_claims: [], routing_note: 'Example test fixture', intake: 'open', sync: {} },
     pending: { pending: [{ id: 1, title: hostile, task: 2, handle: 'Example helper', project: 'town-hall', units: 3, age_ms: 3600000, brief: hostile, output_format: 'Plain text', body: hostile, sources: ['http://public.example/a', 'https://public.example/b', 'javascript:alert(1)'], flags: ['non_https'], model: 'Example model', tokens_est: 0, prescreen: { summary: hostile } }] },
     held: { held: [{ id: 3, title: hostile, project: 'town-hall', status: 'held', held_reason: 'screen', brief: hostile }] },
     projects: { projects: [{ id: 'town-hall', name: 'Town Hall', pending: 1, reviewer: 'Example reviewer', active: 1, paused: 0, max_pending: 10, sync_supported: true }] },
@@ -94,4 +94,19 @@ test('public receipts display a Published link only when publication is recorded
   assert.ok(host.textContent.includes(hostile));
   delete receipt.publication; window.Swarm.renderReceipts(host, { receipts: [receipt] });
   assert.ok(!host.textContent.includes('Published'));
+});
+
+test('public receipts name a contributor only when the server sends a handle, and show a date, never a time', () => {
+  const window = { matchMedia: () => ({ matches: true }) };
+  const document = { createElement: (tag) => new Element(tag), createElementNS: (_ns, tag) => new Element(tag), addEventListener: () => {} };
+  vm.runInNewContext(readFileSync('public/js/common.js', 'utf8'), { window, document, Date, console, setInterval: () => 0 });
+  const host = new Element('ul');
+  const base = { project: { id: 'town-hall' }, task: { title: 'A task' }, reviewed_by: 'Example reviewer', reviewed_at: '2026-10-20', evidence: { sources: [], task_url: '/api/tasks/1' } };
+  window.Swarm.renderReceipts(host, { receipts: [{ ...base, handle: null, credited_as: 'a contributor' }] });
+  assert.ok(host.textContent.includes('a contributor')); assert.ok(!host.textContent.includes('@'));
+  assert.ok(host.textContent.includes('Oct 20, 2026'));
+  window.Swarm.renderReceipts(host, { receipts: [{ ...base, handle: 'proud-one', credited_as: 'proud-one' }] });
+  assert.ok(host.textContent.includes('@proud-one'));
+  window.Swarm.renderReceipts(host, { receipts: [{ ...base, handle: null, credited_as: 'removed contributor' }] });
+  assert.ok(host.textContent.includes('removed contributor'));
 });

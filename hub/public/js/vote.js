@@ -2,7 +2,7 @@
   'use strict';
   const S = window.Swarm, $ = (id) => document.getElementById(id);
   const colors = ['#f2605f', '#a56cf5', '#4aa8ff', '#5fd08a', '#f5c542'];
-  let projects = [], rows = [], token = '', widget, saving = false;
+  let projects = [], rows = [], token = '', widget, saving = false, signupChoices = null;
   const encode = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const decode = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
   const message = (text) => { $('vote-message').textContent = text; };
@@ -69,25 +69,23 @@
   }
   function allocation(host, data) {
     S.clear(host);
-    host.appendChild(S.el('p', 'quiet', 'Week of ' + data.week + ' · ' + data.voter_count + ' eligible ballots' + (data.projected ? ' · Projected' : '')));
-    if (data.provisional) host.appendChild(S.el('p', 'prov-note', 'Provisional fallback: no eligible ballot result. Carrying the previous allocation.'));
+    host.appendChild(S.el('p', 'quiet', 'Week of ' + data.week + ' · ' + (data.source === 'ballots' ? data.voter_count + ' eligible ballots' : 'no new result this week')));
+    if (data.noise) host.appendChild(S.el('p', 'quiet', 'Random noise was added to this split, so these figures are close to, but not exactly, the votes. This is not a formal differential-privacy guarantee.'));
+    if (data.legacy_exact) host.appendChild(S.el('p', 'prov-note', data.legacy_exact.note));
+    if (data.provisional) host.appendChild(S.el('p', 'prov-note', 'Provisional fallback. ' + (data.reason || 'No new result was published.')));
     Object.entries(data.shares).forEach(([id, points]) => {
       const row = S.el('p', 'allocation-line'); row.appendChild(S.el('span', null, projects.find((p) => p.id === id)?.name || id));
       row.appendChild(S.el('strong', null, (points / 100).toFixed(2) + '%')); host.appendChild(row);
     });
   }
   async function loadPublic() {
-    const [current, next, audit] = await Promise.all([api('/api/vote/current'), api('/api/vote/next'), api('/api/vote/audit')]);
-    allocation($('current-allocation'), current); allocation($('next-allocation'), next);
+    const [current, audit] = await Promise.all([api('/api/vote/current'), api('/api/vote/audit')]);
+    allocation($('current-allocation'), current);
     const host = $('vote-audit'); S.clear(host);
-    host.appendChild(S.el('p', null, audit.eligible_voter_count + ' eligible accounts this week. An eligible account may have no valid ballot.'));
-    host.appendChild(S.el('h3', null, 'Ballots saved per day · last 30 days'));
     host.appendChild(S.el('p', 'quiet', audit.note));
-    const days = S.el('div', 'audit-days');
-    audit.ballots_per_day.forEach((d) => days.appendChild(S.el('p', 'allocation-line', d.day + ' · ' + d.ballots)));
-    host.appendChild(days); host.appendChild(S.el('h3', null, 'Published snapshots'));
+    host.appendChild(S.el('h3', null, 'Published snapshots'));
     if (!audit.snapshot_history.length) host.appendChild(S.el('p', 'quiet', 'No weekly snapshot has been published yet.'));
-    audit.snapshot_history.forEach((s) => host.appendChild(S.el('p', 'allocation-line', s.week + ' · ' + s.voter_count + ' ballots · ' + (s.source === 'fallback' ? 'Provisional fallback' : 'Ballots') + ' · ' + new Date(s.published_at).toISOString())));
+    audit.snapshot_history.forEach((s) => host.appendChild(S.el('p', 'allocation-line', s.week + ' · ' + (s.source === 'fallback' ? 'no new result (previous split carried forward)' : s.voter_count + ' ballots' + (s.exact_legacy ? ' · exact, published before noise' : '')) + ' · ' + new Date(s.published_at).toISOString())));
   }
   function humanCheck(siteKey) {
     if (!siteKey) { message('Registration is not configured yet. Existing voters can sign in.'); return; }
@@ -123,7 +121,7 @@
         response.authenticatorData = encode(credential.response.authenticatorData); response.signature = encode(credential.response.signature);
         response.userHandle = credential.response.userHandle ? encode(credential.response.userHandle) : null;
       }
-      await api('/api/account/' + kind + '/verify', 'POST', { id: credential.id, rawId: encode(credential.rawId), type: credential.type, response });
+      await api('/api/account/' + kind + '/verify', 'POST', { id: credential.id, rawId: encode(credential.rawId), type: credential.type, response, ...(kind === 'register' && signupChoices ? { privacy: signupChoices.get() } : {}) });
       await loadAccount(); message('Signed in. Set your 100 points below.');
     } catch (err) { message(err.name === 'NotAllowedError' ? 'Passkey request cancelled or timed out. You can try again.' : err.message); }
     finally {
@@ -163,6 +161,8 @@
     try {
       const config = await api('/api/vote/config'); projects = config.projects;
       const me = await loadAccount(); await loadPublic(); message('');
+      signupChoices = S.privacyChoices('signup', {});
+      $('signup-choices').appendChild(signupChoices.root);
       if (!me.signed_in) humanCheck(config.site_key);
     } catch (err) { message('Voting could not load: ' + err.message); }
   })();

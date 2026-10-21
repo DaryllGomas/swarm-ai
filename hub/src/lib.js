@@ -71,11 +71,58 @@ export function networkOf(ip) {
   return full.slice(0, 4).map((x) => (x || '0').toLowerCase().replace(/^0+(?=.)/, '')).join(':') + '::/64';
 }
 
-// sha256 of salt, day and network: rotates daily, used only for rate limits and the pairing and claim caps.
-// daysAgo = 1 gives yesterday's hash, so a cap still sees claims made just before UTC midnight.
+// ---------------------------------------------------------------- forward-secure network hashing
+//
+// A network (the caller's IPv4 address, or an IPv6 /64) is never stored. What is stored is HMAC-SHA256(day key, network): the
+// day key is 32 random bytes, created on first use for each UTC day and kept in D1 (network_keys). The hourly job deletes keys
+// older than a whole UTC day plus two days (so a key lives up to about three days) and sets the network hashes it made to NULL once
+// the ROW is more than two days old (the hourly job adds up to an hour of delay). While a key exists, anyone who can read the database
+// can compute the code of a candidate address and match it to rows (that is what the key is for). Once a day's key is gone from the live
+// database, nobody can work out which network a stored code came from, or even tell that two old rows came from the same one. A copy
+// of the key taken earlier (a database export, D1 Time Travel, memory) is outside this.
+export const NETWORK_KEY_KEEP_DAYS = 2;
+const KEY_CACHE_MS = 5 * 60 * 1000;
+const keyCache = new Map(); // day -> { key: CryptoKey, at }. Isolate memory only; a non-extractable key.
+
+export const utcDay = (ms = Date.now()) => new Date(ms).toISOString().slice(0, 10);
+export function resetNetworkKeyCache() { keyCache.clear(); }
+
+const toHex = (bytes) => [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, '0')).join('');
+const fromHex = (h) => Uint8Array.from(h.match(/../g) || [], (x) => parseInt(x, 16));
+
+// The HMAC key of one UTC day: created on first use. Two requests that race to create it both INSERT OR IGNORE, and then both
+// SELECT, so every caller ends up with the one key that won.
+export async function networkKey(env, day) {
+  const hit = keyCache.get(day);
+  if (hit && Date.now() - hit.at < KEY_CACHE_MS) return hit.key;
+  await env.DB.prepare('INSERT OR IGNORE INTO network_keys (day, key) VALUES (?1, ?2)').bind(day, toHex(crypto.getRandomValues(new Uint8Array(32)))).run();
+  const row = await env.DB.prepare('SELECT key FROM network_keys WHERE day = ?1').bind(day).first();
+  const key = await crypto.subtle.importKey('raw', fromHex(row.key), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const oldest = utcDay(Date.now() - NETWORK_KEY_KEEP_DAYS * 86400000);
+  for (const d of keyCache.keys()) if (d < oldest) keyCache.delete(d); // a day that is past its keep window is forgotten, not kept in memory
+  keyCache.set(day, { key, at: Date.now() });
+  return key;
+}
+
+// The network hash of this request for today (daysAgo = 0) or yesterday (1): used for rate limits and the pairing, account and
+// active-claim caps. daysAgo = 1 lets a cap still see claims made just before UTC midnight.
 export async function ipHashFor(env, req, daysAgo = 0) {
-  const day = new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10);
+  const day = utcDay(Date.now() - daysAgo * 86400000);
+  const sig = await crypto.subtle.sign('HMAC', await networkKey(env, day), new TextEncoder().encode(networkOf(req.headers.get('CF-Connecting-IP') || '')));
+  return toHex(sig);
+}
+
+// The hash this code used before day keys (sha256 of HASH_SALT, day and network). Rows written before migration 0010 carry it, so
+// the caps also look for it; the hourly job nulls those rows two days after the switch, and this can then be deleted.
+export function legacyIpHashFor(env, req, daysAgo = 0) {
+  const day = utcDay(Date.now() - daysAgo * 86400000);
   return sha256(`${env.HASH_SALT}|ip|${day}|${networkOf(req.headers.get('CF-Connecting-IP') || '')}`);
+}
+
+// Everything a cap must count for this request's network: today's and yesterday's hash, and the same two in the old format.
+export async function capHashes(env, req) {
+  const [today, yesterday, legacyToday, legacyYesterday] = await Promise.all([ipHashFor(env, req), ipHashFor(env, req, 1), legacyIpHashFor(env, req), legacyIpHashFor(env, req, 1)]);
+  return { today, yesterday, legacyToday, legacyYesterday };
 }
 
 // Burst limit per network (Cloudflare rate limiting binding); allows everything if the binding is missing (local dev).
@@ -101,6 +148,8 @@ export function weekStartMs(ms = Date.now()) {
 }
 export const weekOf = (ms = Date.now()) => new Date(weekStartMs(ms)).toISOString().slice(0, 10);
 export const iso = (ms) => (ms == null ? null : new Date(ms).toISOString());
+// The UTC day only (YYYY-MM-DD): public pages show when something happened to the day, never the minute.
+export const isoDay = (ms) => (ms == null ? null : new Date(ms).toISOString().slice(0, 10));
 
 export function byteLength(s) {
   return new TextEncoder().encode(s).length;

@@ -421,8 +421,9 @@ describe('merge needs a reviewer, closed = rejected', () => {
     expect((await tasks()).find((x) => x.id === t.id).status).toBe('accepted');
     const rec = await (await send('/api/receipts')).json();
     const r = rec.receipts.find((x) => x.id === id);
-    expect(r.handle).toBe(u.handle);
-    expect(r.github).toEqual({ repo: REPO, pr_number: pr, pr_author: 'octo-dev', pr_url: prUrl(pr) });
+    // Credit is anonymous by default: no handle, no PR author login (GitHub itself still shows the author), just the link.
+    expect(r.handle).toBeNull(); expect(r.credited_as).toBe('a contributor');
+    expect(r.github).toEqual({ repo: REPO, pr_number: pr, pr_author: null, pr_url: prUrl(pr) });
     expect(r.reviewed_by).not.toMatch(/GitHub merge/);
   });
 

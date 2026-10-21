@@ -12,7 +12,8 @@ For the plan and the architecture, see [`../docs/PLAN.md`](../docs/PLAN.md) and
 - `src/worker.js`: routing, public API, `/setup`, `/llms.txt` and cron. `src/admin.js`: bearer admin API and shared transactional review.
 - `src/access.js`: Access JWT verification. `src/ops.js`: private operator APIs. `src/prescreen.js`: advisory Workers AI annotations.
 - `src/mcp.js`: the MCP tools. `src/core.js`: stats, claims, allocation, task intake. `src/lib.js`: helpers.
-- `src/webauthn.js`, `src/accounts.js`, `src/voting.js`: passkey accounts (hand-written WebAuthn on WebCrypto), sessions, ballots, the weekly snapshot and `/api/vote/*`.
+- `src/privacy.js`, `src/rollup.js`, `src/pii.js`, `src/trust.js`: privacy and trust (the three choices and credit, the k-anonymity rule, network-hash erasure, delete account and remove handle; the weekly rollup and purge; the personal-details check; `/version`, `security.txt` and the transparency date). See [`../docs/DATA-POLICY.md`](../docs/DATA-POLICY.md).
+- `src/webauthn.js`, `src/accounts.js`, `src/voting.js`: passkey accounts (hand-written WebAuthn on WebCrypto), sessions, ballots, the weekly snapshot and `/api/vote/*`. `src/dp.js`: the Laplace noise the weekly figures are released with.
 - `src/steering.js`, `src/me.js`, `src/identity.js`: Phase 4. Linking a contributor to a voter account (link codes), the ballot that steers `next_task`, the weekly summary, `/api/me`, and contributor creation.
 - `src/oauth.js`, `src/oauth-scopes.js`: MCP sign-in (OAuth 2.1 + PKCE) on `@cloudflare/workers-oauth-provider`, the `/authorize` page, and the `read`/`work`/`submit` scopes.
 - `src/sync.js`: Town Hall task sync. `src/github.js`: the GitHub connector (issues to tasks, pull-request checks, merges wait for a reviewer, webhook, project registration). `src/screen.js`: screening of project text. `src/links.js`: submission link
@@ -70,10 +71,10 @@ Locally, set `RP_ORIGIN=http://localhost:8787` so the issuer matches.
 
 ## Deploy (maintainer only)
     scripts/deploy.sh
-The script refuses to run with uncommitted changes or from any branch but `main`. Then it runs `npm test`,
-`wrangler d1 migrations apply swarm-ai --remote` and `wrangler deploy`. With arguments it runs wrangler with the deploy
-token instead and skips those checks, for example `scripts/deploy.sh secret put ADMIN_TOKEN` (secrets are `ADMIN_TOKEN`
-and `HASH_SALT`). The token comes from `$CLOUDFLARE_API_TOKEN`, or else the operator's local config. The script never
+The script refuses to run with any uncommitted change, a detached HEAD, any branch but `main`, a non-canonical `origin`, or a commit that is not the
+exact tip of a freshly fetched `origin/main`. Then it runs `npm ci`, `npm test`,
+`wrangler d1 migrations apply swarm-ai --remote` and `wrangler deploy`. With arguments it runs only an allowlist of maintenance commands that deploy
+no code, for example `scripts/deploy.sh secret put ADMIN_TOKEN` (secrets are `ADMIN_TOKEN` and `HASH_SALT`); `deploy`, `rollback` and `--var GIT_COMMIT` are refused. `/version` shows the commit the operator reported, which is a claim, not proof. The token comes from `$CLOUDFLARE_API_TOKEN`, or else the operator's local config. The script never
 runs `wrangler login`.
 
 ## The INTAKE lever
@@ -123,8 +124,8 @@ updated, everything from outside goes through `src/screen.js`:
 Claims last 3 hours. At most 2 active claims per contributor, and at most 4 across all handles on one network
 (enforced in the same conditional `INSERT` as the per-contributor cap; the network hash rotates daily, and the cap
 also counts yesterday's hash so midnight UTC is no loophole). 5 pairings per network per day, 20 submissions per
-contributor per day, 30 sources per submission. Routed units (public-routed only) count each (task, contributor) once per week and exclude
-released or expired claims; ballot-directed and self-picked units are counted the same way, apart. Failed link codes: 5 an hour per contributor and 20 per network; codes last 10 minutes. `next_task` is a weighted-deficit scheduler (at most 10 pending reviews per project).
+contributor per day, 30 sources per submission. Routed units count each (task, contributor) once per week and exclude
+released or expired claims. The scheduler counts public-routed, ballot-directed and self-picked units apart, internally; nothing public or in the operator console shows that split, and the weekly public check adds every route together. Failed link codes: 5 an hour per contributor and 20 per network; codes last 10 minutes. `next_task` is a weighted-deficit scheduler (at most 10 pending reviews per project).
 Allocation is provisional until a weekly ballot snapshot is published. Contributor keys are stored only as salted hashes, never echoed in an
 error and never written to events or logs. Tools prefer the `Authorization` header; the `contributor_key` argument
 is a fallback because arguments end up in chat logs.

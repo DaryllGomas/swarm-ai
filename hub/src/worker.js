@@ -4,13 +4,16 @@ import { handleAccount } from './accounts.js';
 import { handleMe } from './me.js';
 import { handleAuthorize, oauthEnabled, providerFor } from './oauth.js';
 import { handleVoting, publishSnapshot } from './voting.js';
-import { expireClaims, weekStats } from './core.js';
+import { expireClaims, publicStatus, publicStatusFilter, weekStats } from './core.js';
 import { adminActivateProject, adminRegisterGithub, handleGithubWebhook } from './github.js';
 import { handleMcp } from './mcp.js';
 import { UNTRUSTED, syncIfStale, syncTasks } from './sync.js';
-import { SECURITY_HEADERS, clean, ipHashFor, isAdmin, iso, json, underRateLimit } from './lib.js';
+import { SECURITY_HEADERS, clean, ipHashFor, isAdmin, iso, isoDay, json, underRateLimit } from './lib.js';
 import { adminHeld, adminPending, adminReview, adminSubmission, adminPublished } from './admin.js';
 import { handleOps } from './ops.js';
+import { creditedAs, forgetNetworks, publicHandle, purgeOAuthState } from './privacy.js';
+import { analytics, runWeeklyMaintenance } from './rollup.js';
+import { securityTxt, transparencyJson, transparencyPage, versionInfo } from './trust.js';
 import { normalizeClient, setupGuide } from './setup.js';
 
 // Requests the OAuth provider owns: discovery metadata, registration, the token endpoint, /authorize (through its default
@@ -44,7 +47,11 @@ export default {
   // Hourly: free up expired claims and pull fresh tasks from Town Hall.
   async scheduled(_event, env, ctx) {
     ctx.waitUntil((async () => {
+      // First, and on its own: forgetting must not wait on, or be skipped by, anything else the job does.
+      try { await forgetNetworks(env); } catch (err) { console.error('forgetNetworks failed:', String(err?.message || err).slice(0, 300)); }
+      try { await purgeOAuthState(env); } catch (err) { console.error('oauth purge failed:', String(err?.message || err).slice(0, 300)); }
       await publishSnapshot(env);
+      try { await runWeeklyMaintenance(env); } catch (err) { console.error('weekly maintenance failed:', String(err?.message || err).slice(0, 300)); }
       const now = Date.now();
       await env.DB.batch([
         env.DB.prepare('DELETE FROM sessions WHERE expires <= ?1').bind(now),
@@ -66,12 +73,22 @@ async function app(req, env, ctx) {
     if (url.pathname === '/mcp') return await handleMcp(req, env, ctx);
     if (url.pathname === '/authorize') return await handleAuthorize(req, env);
     if (url.pathname === '/setup' || url.pathname === '/llms.txt') return setupText(req, url);
+    if (url.pathname === '/version') return plain(req, () => json(versionInfo(env), 200, { 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' }));
+    if (url.pathname === '/.well-known/security.txt') return plain(req, () => new Response(securityTxt(), { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=3600', 'Access-Control-Allow-Origin': '*', ...SECURITY_HEADERS } }));
+    if (url.pathname === '/transparency' || url.pathname === '/transparency.html') return await transparencyPage(req, env, url);
     if (url.pathname.startsWith('/api/')) return await api(req, env, ctx, url);
   } catch (err) {
     console.error(err);
     return json({ error: 'Something went wrong. Try again in a moment.' }, 500);
   }
   return env.ASSETS.fetch(req);
+}
+
+// GET and HEAD only, for the few small public routes the Worker answers itself.
+function plain(req, make) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return json({ error: 'Use GET.' }, 405, { Allow: 'GET, HEAD' });
+  const res = make();
+  return req.method === 'HEAD' ? new Response(null, { status: res.status, headers: res.headers }) : res;
 }
 
 // The plain-text set-up guide for AI agents. /llms.txt is the same text; ?client=claude-code (and friends) tailors it.
@@ -113,6 +130,8 @@ async function api(req, env, ctx, url) {
     return json({ ...(await weekStats(env)), intake: paused ? 'paused' : 'open', paused, paused_note: paused ? 'Swarm is paused for maintenance. New pairings, claims and submissions are off; everything else still works.' : null }, 200, { 'Cache-Control': 'public, max-age=30' });
   }
   if (path === '/api/receipts') return receipts(env, url);
+  if (path === '/api/analytics') return analytics(env, url);
+  if (path === '/api/transparency') return json(transparencyJson(), 200, { 'Cache-Control': 'public, max-age=300' });
   if (path === '/api/tasks') return tasks(env, ctx, url);
   const m = path.match(/^\/api\/tasks\/(\d{1,9})$/);
   if (m) return oneTask(env, Number(m[1]));
@@ -124,27 +143,31 @@ async function api(req, env, ctx, url) {
 async function receipts(env, url) {
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '10', 10) || 10, 1), 50);
   const { results } = await env.DB.prepare(
-    `SELECT s.id, s.task, t.title, t.units, t.kind, t.project, p.name AS project_name, p.repo, c.handle, s.reviewed_by, s.reviewed_at,
-            s.sources, s.model, s.tokens_est, s.pr_number, s.pr_author, s.published_url, s.published_at
+    `SELECT s.id, s.task, t.title, t.units, t.kind, t.project, p.name AS project_name, p.repo, c.handle, c.credit, c.removed, s.reviewed_by, s.reviewed_at,
+            s.sources, s.pr_number, s.pr_author, s.published_url, s.published_at
      FROM submissions s JOIN tasks t ON t.id = s.task JOIN projects p ON p.id = t.project JOIN contributors c ON c.id = s.contributor
      WHERE s.status = 'accepted' ORDER BY s.reviewed_at DESC, s.id DESC LIMIT ?1`
   ).bind(limit).all();
   return json({
     updated: new Date().toISOString(),
-    note: 'Accepted means a project reviewer accepted it. Model and token figures are self-reported by the contributor\'s agent.',
+    note: 'Accepted means a project reviewer accepted it. A contributor is named only if they chose to be credited by their handle; a later change applies to receipts read from then on, not to copies already saved. Dates are the UTC day; no times, models or token figures are published, but watching this list over time still tells you roughly when work was accepted. A pull request\'s author, and the sources and publication links, are public and can identify a person whatever the credit setting.',
     notice: UNTRUSTED,
     receipts: results.map((r) => ({
       id: r.id,
       task: { id: r.task, title: r.title, kind: r.kind, units: r.units },
       project: { id: r.project, name: r.project_name },
-      handle: r.handle,
+      // Computed at read time: "a contributor" unless this contributor chose to be credited by their handle, and "removed contributor"
+      // once their account was deleted. Switching to anonymous hides the handle in every receipt read from then on; it cannot recall a
+      // response someone already saved or an archive made while the handle was shown.
+      credited_as: creditedAs(r),
+      handle: publicHandle(r),
       reviewed_by: r.reviewed_by,
-      reviewed_at: iso(r.reviewed_at),
-      publication: r.published_url ? { status: 'published', url: r.published_url, published_at: iso(r.published_at) } : null,
-      self_reported: { model: r.model, tokens_est: r.tokens_est },
+      reviewed_at: isoDay(r.reviewed_at),
+      publication: r.published_url ? { status: 'published', url: r.published_url, published_at: isoDay(r.published_at) } : null,
       evidence: { task_url: `/api/tasks/${r.task}`, sources: JSON.parse(r.sources) },
-      // A merged pull request: credits the GitHub account that wrote it, beside the Swarm handle. The two need not match.
-      ...(r.pr_number ? { github: { repo: r.repo, pr_number: r.pr_number, pr_author: r.pr_author, pr_url: `https://github.com/${r.repo}/pull/${r.pr_number}` } } : {}),
+      // A merged pull request: the link is always shown. GitHub itself shows who wrote it, and we cannot change that; Swarm repeats the
+      // login only for a contributor who chose handle credit.
+      ...(r.pr_number ? { github: { repo: r.repo, pr_number: r.pr_number, pr_author: publicHandle(r) ? r.pr_author : null, pr_url: `https://github.com/${r.repo}/pull/${r.pr_number}` } } : {}),
     })),
   }, 200, { 'Cache-Control': 'public, max-age=30' });
 }
@@ -155,11 +178,12 @@ async function tasks(env, ctx, url) {
   const project = clean(url.searchParams.get('project') || '', 60) || null;
   const status = url.searchParams.get('status') || null;
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 1), 200);
+  const wanted = status === null ? null : publicStatusFilter(status);
   const { results } = await env.DB.prepare(
     `SELECT id, project, parent, kind, title, units, status, created FROM tasks
-     WHERE status != 'held' AND held_reason IS NULL AND (?1 IS NULL OR project = ?1) AND (?2 IS NULL OR status = ?2) ORDER BY created, id LIMIT ?3`
-  ).bind(project, status, limit).all();
-  return json({ updated: new Date().toISOString(), notice: UNTRUSTED, tasks: results.map((t) => ({ ...t, created: iso(t.created) })) });
+     WHERE status != 'held' AND held_reason IS NULL AND (?1 IS NULL OR project = ?1) AND (?2 IS NULL OR status IN (SELECT value FROM json_each(?2))) ORDER BY created, id LIMIT ?3`
+  ).bind(project, wanted === null ? null : JSON.stringify(wanted), limit).all();
+  return json({ updated: new Date().toISOString(), notice: UNTRUSTED, tasks: results.map((t) => ({ ...t, status: publicStatus(t.status), created: iso(t.created) })) });
 }
 
 async function oneTask(env, id) {
@@ -169,5 +193,5 @@ async function oneTask(env, id) {
   const { held_reason: _unused, ...pub } = t;
   // A closed task is history: title and status only, no brief.
   if (t.status === 'closed') { delete pub.brief; delete pub.output_format; }
-  return json({ ...pub, created: iso(t.created), notice: UNTRUSTED, ...(t.status === 'closed' ? { note: 'This task is closed.' } : {}) });
+  return json({ ...pub, status: publicStatus(t.status), created: iso(t.created), notice: UNTRUSTED, ...(t.status === 'closed' ? { note: 'This task is closed.' } : {}) });
 }

@@ -53,10 +53,9 @@
     const metrics = el('div', null, 'ops-grid');
     Object.entries(o.counts).forEach(([label, n]) => { const m = el('div', null, 'ops-metric'); m.append(el('strong', n), el('span', label)); metrics.append(m); });
     host.append(metrics, el('p', `${o.pending_reviews} pending reviews · Oldest: ${age(o.oldest_review_age_ms)} · ${o.active_claims.length} active claims · ${o.expiring_claims.length} expire within 1 hour`));
-    const ids = new Set([...Object.keys(o.allocation.shares), ...Object.keys(o.routed_by_origin.public_routed), ...Object.keys(o.routed_by_origin.self_picked), ...Object.keys(o.routed_by_origin.ballot_directed || {})]);
-    host.append(table(['Project', `Allocation (published ${o.allocation.week})`, 'Public routed units', 'Ballot-directed units', 'Self-picked units'], [...ids].map((id) => [id, `${o.allocation.shares[id] ?? 0}%${o.allocation.provisional[id] ? ' · provisional' : ''}`, o.routed_by_origin.public_routed[id] || 0, (o.routed_by_origin.ballot_directed || {})[id] || 0, o.routed_by_origin.self_picked[id] || 0])));
+    host.append(table(['Project', `Allocation (published ${o.allocation.week})`], Object.keys(o.allocation.shares).map((id) => [id, `${o.allocation.shares[id] ?? 0}%${o.allocation.provisional[id] ? ' · provisional' : ''}`])));
     host.append(el('p', o.routing_note, 'quiet'), el('p', `Last sync: ${date(o.sync.last_sync)}`), el('p', `Last sync error: ${o.sync.last_sync_error || 'none'}`, 'ops-text'));
-    if (o.active_claims.length) host.append(table(['Claim', 'Task', 'Contributor', 'Project', 'Expires'], o.active_claims.map((c) => [c.id, c.task, c.handle, c.project, `${date(c.expires_at)}${c.expiring ? ' · expiring' : ''}`])));
+    if (o.active_claims.length) host.append(table(['Claim', 'Task', 'Project', 'Expires'], o.active_claims.map((c) => [c.id, c.task, c.project, `${date(c.expires_at)}${c.expiring ? ' · expiring' : ''}`])));
   }
   function source(url) {
     try {
@@ -79,7 +78,7 @@
         card.append(el('p', `Pull request #${s.pr_number} by ${s.pr_author} · ${s.pr_state}${s.pr_mentions_issue === null || s.pr_mentions_issue === undefined ? '' : s.pr_mentions_issue ? ' · its text names the issue (a hint only)' : ' · its text does NOT name the issue'}`, 'quiet'));
       }
       const links = el('ul'); s.sources.forEach((u) => { const li = el('li'); li.append(source(u)); links.append(li); });
-      card.append(el('h4', 'Sources'), links, el('p', `Link flags: ${s.flags.join(', ') || 'none'}`), el('p', `Self-reported model: ${s.model || 'not supplied'} · Token estimate: ${s.tokens_est ?? 'not supplied'}`, 'quiet'), el('h4', 'AI pre-screen · advisory'), el('pre', s.prescreen ? JSON.stringify(s.prescreen, null, 2) : 'Waiting for pre-screen. Refresh to check.'));
+      card.append(el('h4', 'Sources'), links, el('p', `Flags (links, personal details): ${s.flags.join(', ') || 'none'}`), el('p', `Self-reported model: ${s.model || 'not supplied'} · Token estimate: ${s.tokens_est ?? 'not supplied'}`, 'quiet'), el('h4', 'AI pre-screen · advisory'), el('pre', s.prescreen ? JSON.stringify(s.prescreen, null, 2) : 'Waiting for pre-screen. Refresh to check.'));
       const reason = el('textarea'); reason.setAttribute('maxlength', '500'); reason.setAttribute('required', ''); reason.value = notes.get(s.id) || '';
       reason.addEventListener('input', () => notes.set(s.id, reason.value));
       const label = el('label', 'Review reason (required)'); label.append(reason); card.append(label);
@@ -124,10 +123,10 @@
     const signals = $('signal-data'); clear(signals);
     const s = data.signals;
     const rows = [
-      ['Pairings near cap · last 24h · cap 5 per network', ['Network-day hash', 'Pairings'], s.pairings_near_cap.map((r) => [r.network_day, r.pairings])],
+      ['Pairings near cap · last 24h · cap 5 per network', ['Pairings from one network today (no network is shown)'], s.pairings_near_cap.map((r) => [r.pairings])],
       ['Claim churn · last 24h', ['Contributor', 'Claims', 'Releases', 'Expiries'], s.claim_churn_24h.map((r) => [r.handle, r.claims, r.releases, r.expires])],
       ['Rejected ratio · all reviewed work', ['Contributor', 'Reviewed', 'Rejected', 'Ratio'], s.rejected_ratios_all_time.map((r) => [r.handle, r.reviewed, r.rejected, `${Math.round(r.rejected_ratio * 100)}%`])],
-      ['Link-flagged submissions · latest 100', ['Submission', 'Contributor', 'Status', 'Flags'], s.link_flagged.map((r) => [r.id, r.handle, r.status, r.flags.join(', ')])],
+      ['Flagged submissions (links, personal details) · latest 100', ['Submission', 'Contributor', 'Status', 'Flags'], s.link_flagged.map((r) => [r.id, r.handle, r.status, r.flags.join(', ')])],
     ];
     rows.forEach(([title, headers, values]) => { signals.append(el('h3', title)); signals.append(values.length ? table(headers, values) : el('p', 'No signals.', 'quiet')); });
     const revokeHost = $('revoke-data'); clear(revokeHost);

@@ -1,7 +1,8 @@
 // Phase 4: routing origins, ballot steering, fallback, and the public comparison staying honest.
 import { beforeEach, describe, expect, it } from 'vitest';
 import { env } from 'cloudflare:workers';
-import { weekStats } from '../src/core.js';
+import { STANDING, unitsByProject, weekStats } from '../src/core.js';
+import { weekOf } from '../src/lib.js';
 import { pickByDeficit } from '../src/steering.js';
 import { BODY, SOURCE, addTask, newUser, resetDb, send } from './helpers.js';
 import { linkedUser, mePost, publicAllocation, saveBallot, setupProjects, voter } from './voter.js';
@@ -13,6 +14,8 @@ beforeEach(async () => {
 });
 
 const origins = async () => (await env.DB.prepare('SELECT routing_origin AS o, routed FROM claims ORDER BY id').all()).results;
+// The scheduler's own public-routed count per project (internal: no public surface shows it).
+const internalRouted = async () => unitsByProject(env, weekOf(), 1, STANDING);
 const stats = async () => Object.fromEntries((await weekStats(env)).projects.map((p) => [p.id, p]));
 async function fill(project, n, units = 1) { for (let i = 0; i < n; i++) await addTask({ project, units }); }
 // One full cycle: ask for work, hand it in. Returns the claimed task.
@@ -36,8 +39,9 @@ describe('routing origins on claims', () => {
     expect(b.data.claim.routing_origin).toBe('self_picked');
     expect(b.data.counted_as).toMatch(/self-picked/);
     expect(await origins()).toEqual([{ o: 'public_routed', routed: 1 }, { o: 'self_picked', routed: 0 }]);
+    // The claim EVENT (what the operator console and the audit read) carries no route at all; the origin lives only in claims.
     const claimed = await env.DB.prepare("SELECT detail FROM events WHERE type = 'task_claimed' ORDER BY id").all();
-    expect(claimed.results.map((r) => JSON.parse(r.detail).origin)).toEqual(['public_routed', 'self_picked']);
+    expect(claimed.results.map((r) => Object.keys(JSON.parse(r.detail)))).toEqual([['claim'], ['claim']]);
   });
 
   it('my_work lists each active claim with its routing origin', async () => {
@@ -83,7 +87,7 @@ describe('steering by a ballot', () => {
     const r = await u.call('next_task');
     expect(r.data.task.project).toBe('swarm-ai');
     expect(r.data.why).toMatch(/Your ballot steers this/);
-    expect(r.data.counted_as).toMatch(/never moves the public allocation/);
+    expect(r.data.counted_as).toMatch(/do not show which way a task was routed/);
   });
 
   it('counts only this contributor\'s own ballot-directed units, not other contributors\'', async () => {
@@ -115,9 +119,8 @@ describe('fallback', () => {
     expect(r.data.task.project).toBe('town-hall');
     expect(r.data.claim.routing_origin).toBe('public_routed');
     expect(r.data.steering.fell_back_to_public).toBe(true);
-    expect(r.data.steering.note).toMatch(/recorded as public-routed/);
-    expect((await stats())['town-hall'].routed_units).toBe(1); // honest: the public comparison sees it
-    expect((await stats())['town-hall'].ballot_directed_units).toBe(0);
+    expect(r.data.steering.note).toMatch(/recorded as public-routed/); // said to the caller only
+    expect((await internalRouted())['town-hall']).toBe(1); // the scheduler counts it as public-routed
   });
 
   it('with fallback off, says there is no eligible work in your projects and routes nothing', async () => {
@@ -163,21 +166,16 @@ describe('the public comparison stays honest', () => {
     // Two unlinked contributors take public work first.
     const p1 = await newUser(), p2 = await newUser();
     for (const p of [p1, p2]) { await cycle(p); await cycle(p); }
-    const before = await stats();
+    const before = await internalRouted();
     const big = await linkedUser(await voter({ allocations: { 'town-hall': 100 } }));
     for (let i = 0; i < 18; i++) await cycle(big);
-    const after = await stats();
-    for (const id of ['town-hall', 'swarm-ai']) {
-      expect(after[id].routed_units, id).toBe(before[id].routed_units);
-      expect(after[id].routed_share, id).toBe(before[id].routed_share);
-    }
-    expect(after['town-hall'].ballot_directed_units).toBe(18);
-    expect(after['swarm-ai'].ballot_directed_units).toBe(0);
-    expect(after['town-hall'].self_directed_units).toBe(0);
+    const after = await internalRouted();
+    expect(after).toEqual(before); // the scheduler's public-routed count is not moved by personal work
+    // No routed, ballot-directed or self-picked figure is public live at all (see the origin-blindness test).
+    const pub = await stats();
+    for (const id of ['town-hall', 'swarm-ai']) expect(Object.keys(pub[id]).filter((k) => /routed|directed|self|claimed/.test(k)), id).toEqual([]);
     const s = await (await send('/api/stats')).json();
-    expect(s.routing_origins.units.ballot_directed).toBe(18);
-    expect(s.routing_origins.units.public_routed).toBe(before['town-hall'].routed_units + before['swarm-ai'].routed_units);
-    expect(s.routing_origins.units.self_picked).toBe(0);
+    expect(s.routing_origins).toBeUndefined();
   });
 
   it('unlinked contributors, and linked ones with no ballot, follow the public split', async () => {
@@ -199,16 +197,15 @@ describe('the public comparison stays honest', () => {
     expect((await u.call('next_task')).data.claim.routing_origin).toBe('public_routed');
   });
 
-  it('self-picked and ballot-directed units are shown apart in /api/stats and never added to routed', async () => {
+  it('self-picked and ballot-directed units are not in /api/stats at all and never added to routed', async () => {
     await fill('town-hall', 6);
     const u = await linkedUser(await voter({ allocations: { 'town-hall': 100 } }));
     await u.call('next_task');
     const t = await addTask({ project: 'town-hall', units: 3 });
     await u.call('claim_task', { id: t });
     const th = (await (await send('/api/stats')).json()).projects.find((p) => p.id === 'town-hall');
-    expect(th.routed_units).toBe(0);
-    expect(th.ballot_directed_units).toBe(1);
-    expect(th.self_directed_units).toBe(3);
+    expect((await internalRouted())['town-hall'] || 0).toBe(0);
+    expect(Object.keys(th).filter((k) => /routed|directed|self|claimed/.test(k))).toEqual([]);
   });
 
   it('a ballot saved later changes the steering without relinking', async () => {
