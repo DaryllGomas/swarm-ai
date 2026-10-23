@@ -300,7 +300,7 @@ describe('finding 6: an unpublished write-up is kept only until it is published 
 
   it(`never longer than ${UNPUBLISHED_BODY_DAYS} days after review, published or not`, async () => {
     const { c } = await purgeUser();
-    const w = await pastWork({ contributor: c, weeksAgo: 1 });                      // reviewed about 6.9 days ago
+    const w = await pastWork({ contributor: c, weeksAgo: 1, reviewedAgoMs: 7 * DAY }); // reviewed exactly 7 days ago, whatever today is
     await runWeeklyMaintenance(env);
     expect((await body(w.sub)).body).toBe(BODY);
     await runWeeklyMaintenance(env, Date.now() + 20 * DAY);                          // still inside 30 days of the review
