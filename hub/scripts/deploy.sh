@@ -95,8 +95,20 @@ fi
 # (count 0). A non-zero count means ballot-based results were published before; read docs/RUNBOOK.md ("Before the first deploy that includes
 # migrations 0011 and 0012") before going on. If the check cannot run, nothing is migrated or deployed.
 echo "Preflight (read-only): weekly vote snapshots built from ballots on the live database:"
-npx wrangler d1 execute swarm-ai --remote --command "SELECT COUNT(*) AS ballot_snapshots FROM vote_snapshots WHERE source = 'ballots'" \
-  || { echo "Refusing to deploy: the read-only preflight on vote_snapshots could not run." >&2; exit 1; }
+# vote_snapshots is created by migration 0007, so a fresh database (or one still before 0007) has no such table yet: that is established by
+# asking sqlite_master first, and then there is nothing to count. Any other failure, or an answer that is not a well-formed result, stops the deploy.
+tables=$(npx wrangler d1 execute swarm-ai --remote --json --command "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'vote_snapshots'") \
+  || { echo "Refusing to deploy: the read-only preflight could not check whether vote_snapshots exists." >&2; exit 1; }
+case "$tables" in
+  *'"results"'*) ;;
+  *) echo "Refusing to deploy: the read-only preflight got an unreadable answer when checking for vote_snapshots." >&2; exit 1 ;;
+esac
+case "$tables" in
+  *'"name": "vote_snapshots"'*|*'"name":"vote_snapshots"'*)
+    npx wrangler d1 execute swarm-ai --remote --command "SELECT COUNT(*) AS ballot_snapshots FROM vote_snapshots WHERE source = 'ballots'" \
+      || { echo "Refusing to deploy: the read-only preflight on vote_snapshots could not run." >&2; exit 1; } ;;
+  *) echo "No vote_snapshots table yet (a fresh database, or one before migration 0007): no ballot-based snapshots exist, nothing to check." ;;
+esac
 # 0001 is idempotent, so the first run on the live DB (which has no d1_migrations record) is harmless.
 npx wrangler d1 migrations apply swarm-ai --remote
 # GET /version reports these (as the operator-stamped revision, not proof), and the site footer links the commit on GitHub.
