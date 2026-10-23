@@ -37,3 +37,11 @@
 .ops .quiet { color: var(--text-2); }
 .ops .ops-age { color: #8a3915; font-weight: 600; }
 @media (max-width: 600px) { .ops-title { align-items: start; flex-direction: column; } .ops-header { gap: 8px; } .ops-card { padding: 14px; } }
+
+/* Review decisions: big, unmistakable buttons (the first live review couldn't find a small outlined Accept). */
+.ops-actions .ops-accept, .ops-actions .ops-reject { min-height: 46px; padding: 10px 28px; font: 600 1rem var(--sans); border-radius: 999px; cursor: pointer; }
+.ops-actions .ops-accept { background: #1f7a4d; border: 2px solid #1f7a4d; color: #fff; }
+.ops-actions .ops-accept:hover, .ops-actions .ops-accept:focus-visible { background: #17603c; border-color: #17603c; }
+.ops-actions .ops-reject { background: #fff; border: 2px solid #b3261e; color: #b3261e; }
+.ops-actions .ops-reject:hover, .ops-actions .ops-reject:focus-visible { background: #b3261e; color: #fff; }
+.ops-actions .ops-accept:disabled, .ops-actions .ops-reject:disabled { opacity: .6; cursor: progress; }
