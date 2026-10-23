@@ -86,7 +86,7 @@
       ['accept', 'reject'].forEach((decision) => controls.append(button(decision === 'accept' ? 'Accept' : 'Reject', async () => {
         if (!reason.value.trim()) { reason.reportValidity(); reason.focus(); throw new Error('Enter a review reason.'); }
         await action('review', { id: s.id, decision, note: reason.value }); notes.delete(s.id);
-      }, 'btn btn-outline-dark btn-sm')));
+      }, decision === 'accept' ? 'btn ops-accept' : 'btn ops-reject')));
       card.append(controls); host.append(card);
     });
   }
