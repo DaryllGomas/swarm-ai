@@ -124,17 +124,48 @@ function issueTask(project, issue) {
   };
 }
 
+const CLOSE_AFTER_MS = 30 * 60 * 1000; // an issue must be missing on two successful syncs, at least this far apart
+const CLOSE_CAP_MIN = 3; // one sync closing more than this many tasks AND more than half the open ones closes none
+
+async function warn(env, project, out, message) {
+  out.errors.push(`${project.repo}: warning: ${message}`);
+  await env.DB.batch([eventStmt(env, { type: 'github_sync_warning', actor: 'sync', detail: { project: project.id, repo: project.repo, warning: message } })]);
+}
+
 async function syncIssues(env, project, out) {
   const list = await gh(env, `/repos/${project.repo}/issues?labels=swarm&state=open&per_page=${MAX_ISSUES}`);
   if (!Array.isArray(list)) throw new Error(`GitHub sent an unexpected issue list for ${project.repo}`);
   const issues = list.filter((i) => i && Number.isInteger(i.number) && i.number > 0 && !i.pull_request && typeof i.title === 'string' && i.title && hasLabel(i.labels, 'swarm'));
   const tasks = issues.map((i) => issueTask(project, i));
+  const like = `gh:${project.repo_id}:%`;
+
+  // Reopen: an issue that is open and labelled `swarm` again brings back a task that THIS SYNC closed. A task closed by anyone
+  // else, or one that was ever handed in, stays closed. It returns to ready, or held if the screen holds its current text.
+  const closedRows = (await env.DB.prepare(
+    `SELECT t.id, t.source_key FROM tasks t WHERE t.project = ?1 AND t.status = 'closed' AND t.source_key LIKE ?2
+       AND (SELECT e.actor FROM events e WHERE e.type = 'task_closed' AND e.task = t.id ORDER BY e.id DESC LIMIT 1) = 'sync'
+       AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = t.id AND s.status IN ('pending', 'accepted'))`
+  ).bind(project.id, like).all()).results;
+  const closedByKey = new Map(closedRows.map((r) => [r.source_key, r.id]));
+  for (const t of tasks) {
+    const id = closedByKey.get(t.source_key);
+    if (!id) continue;
+    const reason = t.status === 'held' ? t.held_reason || 'screen' : null;
+    const res = await env.DB.batch([
+      env.DB.prepare("UPDATE tasks SET status = ?2, held_reason = ?3, title = ?4, brief = ?5, output_format = ?6, missing_since = NULL WHERE id = ?1 AND status = 'closed'")
+        .bind(id, t.status, reason, t.title, t.brief, t.output_format),
+      env.DB.prepare("INSERT INTO events (ts, type, task, actor, detail) SELECT ?2, 'task_reopened', ?1, 'sync', ?3 WHERE changes() > 0")
+        .bind(id, Date.now(), JSON.stringify({ reason: 'issue is open and labelled swarm again on GitHub', status: t.status })),
+    ]);
+    if (res[0].meta.changes) out.reopened++;
+  }
+
   out.created += await addTasksBulk(env, tasks);
 
   // A size label that changed after the task was created never changes its units: units are the budget the work was routed
   // against. The disagreement is written once to the audit log for the maintainer to revise on purpose.
   const stmts = [];
-  const existing = await env.DB.prepare('SELECT id, units, source_key FROM tasks WHERE project = ?1 AND source_key LIKE ?2').bind(project.id, `gh:${project.repo_id}:%`).all();
+  const existing = await env.DB.prepare('SELECT id, units, source_key FROM tasks WHERE project = ?1 AND source_key LIKE ?2').bind(project.id, like).all();
   const byKey = new Map(existing.results.map((t) => [t.source_key, t]));
   for (const t of tasks) {
     const row = byKey.get(t.source_key);
@@ -147,23 +178,45 @@ async function syncIssues(env, project, out) {
   }
   if (stmts.length) await env.DB.batch(stmts);
 
-  // An issue that is closed (or no longer labelled `swarm`) closes its ready or held task. A claimed task finishes normally,
-  // and a held task keeps its held_reason when it is closed, so its text stays withheld for good. A full page may be cut off,
-  // so nothing is closed then.
+  // An issue that is closed (or no longer labelled `swarm`) closes its ready or held task, but never on one answer alone:
+  //   * a full page may be cut off, so nothing is closed then;
+  //   * an EMPTY list while the project has open tasks is treated as a bad answer: nothing is closed, a warning is recorded;
+  //   * the first sync that misses an issue only marks its task (missing_since); a later sync at least 30 minutes after that
+  //     closes it, and any sync that lists the issue clears the mark;
+  //   * if one sync would close more than half the open tasks (and more than 3), it closes none and records a warning.
+  // A claimed task finishes normally, and a held task keeps its held_reason when closed, so its text stays withheld for good.
   if (list.length < MAX_ISSUES) {
-    const open = new Set(issues.map((i) => i.number));
-    const { results } = await env.DB.prepare("SELECT id, source_key FROM tasks WHERE project = ?1 AND status IN ('ready','held') AND source_key LIKE ?2").bind(project.id, `gh:${project.repo_id}:%`).all();
-    for (const t of results) {
-      const n = Number(t.source_key.split(':')[2]);
-      if (open.has(n)) continue;
-      const res = await env.DB.batch([
-        env.DB.prepare("UPDATE tasks SET status = 'closed' WHERE id = ?1 AND status IN ('ready','held')").bind(t.id),
-        env.DB.prepare(
-          `INSERT INTO events (ts, type, task, actor, detail) SELECT ?2, 'task_closed', id, 'sync', ?3 FROM tasks
-           WHERE id = ?1 AND status = 'closed' AND NOT EXISTS (SELECT 1 FROM events e WHERE e.type = 'task_closed' AND e.task = ?1)`
-        ).bind(t.id, Date.now(), JSON.stringify({ reason: 'issue closed, or no longer labelled swarm, on GitHub' })),
-      ]);
-      if (res[0].meta.changes) out.closed++;
+    const { results } = await env.DB.prepare("SELECT id, source_key, missing_since FROM tasks WHERE project = ?1 AND status IN ('ready','held') AND source_key LIKE ?2").bind(project.id, like).all();
+    if (issues.length === 0 && results.length > 0) {
+      await warn(env, project, out, `GitHub listed no open swarm issues but ${results.length} tasks are open; nothing was closed`);
+    } else {
+      const open = new Set(issues.map((i) => i.number));
+      const now = Date.now();
+      const clear = [];
+      const toMark = [];
+      const toClose = [];
+      for (const t of results) {
+        if (open.has(Number(t.source_key.split(':')[2]))) { if (t.missing_since !== null) clear.push(t.id); continue; }
+        if (t.missing_since === null) toMark.push(t.id);
+        else if (now - t.missing_since >= CLOSE_AFTER_MS) toClose.push(t);
+      }
+      const marks = [
+        ...clear.map((id) => env.DB.prepare('UPDATE tasks SET missing_since = NULL WHERE id = ?1').bind(id)),
+        ...toMark.map((id) => env.DB.prepare('UPDATE tasks SET missing_since = ?2 WHERE id = ?1 AND missing_since IS NULL').bind(id, now)),
+      ];
+      if (marks.length) await env.DB.batch(marks);
+      if (toClose.length > CLOSE_CAP_MIN && toClose.length * 2 > results.length) {
+        await warn(env, project, out, `one sync would have closed ${toClose.length} of ${results.length} open tasks; nothing was closed`);
+      } else {
+        for (const t of toClose) {
+          const res = await env.DB.batch([
+            env.DB.prepare("UPDATE tasks SET status = 'closed' WHERE id = ?1 AND status IN ('ready','held')").bind(t.id),
+            env.DB.prepare("INSERT INTO events (ts, type, task, actor, detail) SELECT ?2, 'task_closed', ?1, 'sync', ?3 WHERE changes() > 0")
+              .bind(t.id, Date.now(), JSON.stringify({ reason: 'issue closed, or no longer labelled swarm, on GitHub' })),
+          ]);
+          if (res[0].meta.changes) out.closed++;
+        }
+      }
     }
   }
   out.issues += issues.length;
@@ -238,7 +291,7 @@ async function checkPrs(env, project, out, { number = null } = {}) {
 // Sync every active GitHub project (or one: projectId, or repoId from a webhook). The caller holds the sync lock. It never
 // throws: failures are returned and recorded in meta (`github_last_error`), so the Town Hall sync is never affected.
 export async function syncGithub(env, { projectId = null, repoId = null, issues = true, prs = true, prNumber = null } = {}) {
-  const out = { projects: 0, issues: 0, created: 0, closed: 0, held: 0, merged: 0, rejected: 0, errors: [] };
+  const out = { projects: 0, issues: 0, created: 0, closed: 0, reopened: 0, held: 0, merged: 0, rejected: 0, errors: [] };
   try {
     const until = Number((await meta(env, 'github_backoff_until')) || 0);
     if (until > Date.now()) return { ...out, skipped: 'rate-limited', until: new Date(until).toISOString() };

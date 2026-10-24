@@ -114,7 +114,11 @@ to work.
 - **Label an issue to make it a task.** Add the label `swarm`, and one size label: `swarm:1` (small), `swarm:3`
   (the default) or `swarm:8` (large). Only people with triage rights on the repository can label, so labelling is the
   approval. Create the labels once in the repository. The next sync (hourly, or `review.sh sync`) creates the task.
-  Closing the issue, or removing `swarm`, closes the task (unless someone has claimed it).
+  Closing the issue, or removing `swarm`, closes the task (unless someone has claimed it), but only after the issue is
+  missing on two syncs at least 30 minutes apart. An empty list, or one sync that would close more than half the open
+  tasks (and more than 3), closes nothing and sets `github_last_error` (event `github_sync_warning`): check GitHub
+  before assuming the issues are really gone. Reopen an issue (or relabel it `swarm`) and the next sync reopens the task
+  it had closed (event `task_reopened`).
 - **Changing a size later does not change the task.** The task keeps its units; a `task_size_label_changed` event records
   the disagreement. Units are what work was routed against, so they change only on purpose.
 - **A task shows up held?** The issue text tripped the screen. See "Held tasks": fix the issue text; the next sync releases it.
