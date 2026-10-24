@@ -52,5 +52,5 @@ test('the transparency date is a constant in one place', () => {
 test('migration files are numbered in order', () => {
   const names = readdirSync(new URL('../migrations/', import.meta.url)).sort();
   names.forEach((n, i) => assert.ok(n.startsWith(String(i + 1).padStart(4, '0') + '_'), n));
-  assert.equal(names.at(-1), '0015_task_missing_since.sql');
+  assert.equal(names.at(-1), '0016_suspend_scope.sql');
 });

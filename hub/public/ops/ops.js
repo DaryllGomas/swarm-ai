@@ -143,11 +143,55 @@
       return action('revoke', { contributor_id: id });
     }));
   }
+  const suspendDraft = { account: '', contributor: '', contributorId: '', reason: '' };
+  function renderSuspensions(data, audit) {
+    const host = $('suspension-data'); clear(host);
+    if (!data.suspensions.length) host.append(el('p', 'No suspensions in force.', 'quiet'));
+    else {
+      const rows = data.suspensions.map((r) => {
+        const reason = el('input'); reason.setAttribute('type', 'text'); reason.setAttribute('maxlength', '300'); reason.setAttribute('aria-label', `Reason for lifting suspension ${r.ref}`);
+        const lift = button('Unsuspend', async () => {
+          if (reason.value.trim().length < 5) { reason.focus(); throw new Error('Enter a reason for lifting the suspension.'); }
+          await action('unsuspend', { ref: r.ref, reason: reason.value });
+        });
+        const cell = el('div'); cell.append(reason, lift);
+        return [r.ref, r.scope === 'all' ? 'Voting and AI work' : 'Voting only', date(r.since), el('pre', r.reason || ''), cell];
+      });
+      host.append(table(['Handle', 'Stopped', 'Since', 'Reason (written by an operator)', 'Lift'], rows));
+    }
+    const form = $('suspend-form'); clear(form);
+    const account = el('input'); account.setAttribute('type', 'text'); account.setAttribute('minlength', '8'); account.setAttribute('maxlength', '64'); account.setAttribute('autocomplete', 'off'); account.value = suspendDraft.account;
+    account.addEventListener('input', () => { suspendDraft.account = account.value; });
+    const accountLabel = el('label', 'Short account id (at least 8 characters)'); accountLabel.append(account);
+    const people = new Map([...audit.signals.claim_churn_24h, ...audit.signals.rejected_ratios_all_time, ...audit.signals.link_flagged].map((r) => [r.contributor_id, r.handle]));
+    const select = el('select'); const empty = el('option', 'Or choose a contributor: suspend their owner'); empty.value = ''; select.append(empty);
+    people.forEach((handle, id) => { const opt = el('option', `${handle} (#${id})`); opt.value = id; select.append(opt); });
+    select.value = suspendDraft.contributor; select.addEventListener('change', () => { suspendDraft.contributor = select.value; });
+    const selectLabel = el('label', 'Contributor'); selectLabel.append(select);
+    const idInput = el('input'); idInput.setAttribute('type', 'number'); idInput.setAttribute('min', '1'); idInput.value = suspendDraft.contributorId;
+    idInput.addEventListener('input', () => { suspendDraft.contributorId = idInput.value; });
+    const idLabel = el('label', 'Or contributor ID from an event'); idLabel.append(idInput);
+    const reason = el('textarea'); reason.setAttribute('maxlength', '300'); reason.setAttribute('required', ''); reason.value = suspendDraft.reason;
+    reason.addEventListener('input', () => { suspendDraft.reason = reason.value; });
+    const reasonLabel = el('label', 'Reason (required, no personal details)'); reasonLabel.append(reason);
+    const run = async (scope) => {
+      const body = { scope, reason: reason.value };
+      const contributor = Number(idInput.value || select.value);
+      if (account.value.trim()) body.account = account.value.trim(); else if (Number.isSafeInteger(contributor) && contributor > 0) body.contributor_id = contributor;
+      else throw new Error('Enter a short account id, or choose a contributor.');
+      if (reason.value.trim().length < 5) { reason.reportValidity(); reason.focus(); throw new Error('Enter a reason.'); }
+      await action('suspend', body);
+      Object.assign(suspendDraft, { account: '', contributor: '', contributorId: '', reason: '' });
+    };
+    const controls = el('div', null, 'ops-actions');
+    controls.append(button('Suspend voting and AI work', () => run('all'), 'btn btn-sm'), button('Suspend voting only', () => run('vote')));
+    form.append(accountLabel, selectLabel, idLabel, reasonLabel, controls);
+  }
   async function load() {
     $('refresh').disabled = true;
     try {
-      const [overview, pending, held, projects, audit] = await Promise.all(['overview', 'pending', 'held', 'projects', 'audit'].map((p) => api(p)));
-      renderOverview(overview); renderReviews(pending); renderHeld(held); renderProjects(projects); renderAudit(audit);
+      const [overview, pending, held, projects, audit, susp] = await Promise.all(['overview', 'pending', 'held', 'projects', 'audit', 'suspensions'].map((p) => api(p)));
+      renderOverview(overview); renderReviews(pending); renderHeld(held); renderProjects(projects); renderAudit(audit); renderSuspensions(susp, audit);
       $('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
     } finally { $('refresh').disabled = false; }
   }

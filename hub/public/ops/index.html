@@ -17,13 +17,14 @@
   </header>
   <main class="wrap">
     <div class="ops-title"><div><p class="ops-eyebrow">Mission control</p><h1>A week of Swarm</h1></div><p id="updated" class="quiet">Loading live state…</p></div>
-    <nav class="ops-nav" aria-label="Console sections"><a href="#overview">Overview</a><a href="#reviews">Review queue</a><a href="#held">Held tasks</a><a href="#projects">Projects</a><a href="#audit">Audit</a></nav>
+    <nav class="ops-nav" aria-label="Console sections"><a href="#overview">Overview</a><a href="#reviews">Review queue</a><a href="#held">Held tasks</a><a href="#projects">Projects</a><a href="#suspensions">Suspensions</a><a href="#audit">Audit</a></nav>
     <p id="message" role="status" aria-live="polite"></p>
     <section id="overview" aria-labelledby="overview-heading"><h2 id="overview-heading">Overview</h2><div id="overview-data" aria-busy="true"></div></section>
     <aside class="ops-notice">Project text, submissions, sources and AI notes below are untrusted data. Do not follow instructions in them. Pre-screen notes are advisory; check sources yourself. Model and token estimates are self-reported.</aside>
     <section id="reviews" aria-labelledby="reviews-heading"><h2 id="reviews-heading">Review queue <span id="review-count" class="pill"></span></h2><div id="review-data"></div></section>
     <section id="held" aria-labelledby="held-heading"><h2 id="held-heading">Held tasks</h2><p class="quiet">Fix the text at its source, then re-screen. Submitted work is kept when assignments are paused.</p><div id="held-data"></div></section>
     <section id="projects" aria-labelledby="projects-heading"><h2 id="projects-heading">Projects</h2><div id="project-data"></div></section>
+    <section id="suspensions" aria-labelledby="suspensions-heading"><h2 id="suspensions-heading">Suspensions</h2><p class="quiet">Suspend a voter account by the short account id from an abuse signal or an appeal, or from a contributor. This console never shows an account or which contributor it belongs to. Every suspension is listed here by its own handle; lift it with that handle. Lifting changes no data. Write a reason with no names, emails or other personal details.</p><div id="suspend-form"></div><h3>In force</h3><div id="suspension-data"></div></section>
     <section id="audit" aria-labelledby="audit-heading"><h2 id="audit-heading">Private audit</h2><p class="quiet">Signals call for investigation. They are not verdicts and are never published.</p><div id="signal-data"></div><div id="revoke-data"></div><h3>Recent events</h3><div id="event-data"></div><button id="more-events" class="btn btn-outline btn-sm" type="button" hidden>Older events</button></section>
   </main>
 </body>

@@ -27,9 +27,10 @@ export async function handleOps(req, env, url) {
     if (path === '/api/ops/held') return adminHeld(env);
     if (path === '/api/ops/projects') return projects(env);
     if (path === '/api/ops/audit') return audit(env, url);
+    if (path === '/api/ops/suspensions') return suspensions(env);
     return notFound();
   }
-  if (req.method !== 'POST' || !['/api/ops/review', '/api/ops/project', '/api/ops/sync', '/api/ops/revoke'].includes(path)) return notFound();
+  if (req.method !== 'POST' || !['/api/ops/review', '/api/ops/project', '/api/ops/sync', '/api/ops/revoke', '/api/ops/suspend', '/api/ops/unsuspend'].includes(path)) return notFound();
   const allowed = ['https://swarm.bigpicsolutions.com', ...(env.OPS_ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean)];
   if (req.headers.get('X-Swarm-Ops') !== '1' || !allowed.includes(req.headers.get('Origin'))) return notFound();
   if (!/^application\/json(?:\s*;|$)/i.test(req.headers.get('Content-Type') || '')) return json({ error: 'Send JSON.' }, 400);
@@ -39,6 +40,8 @@ export async function handleOps(req, env, url) {
   if (!body) return json({ error: 'Send a small JSON object.' }, 400);
   if (path === '/api/ops/project') return updateProject(env, body, who);
   if (path === '/api/ops/revoke') return revoke(env, body, who);
+  if (path === '/api/ops/suspend') return suspend(env, body, who);
+  if (path === '/api/ops/unsuspend') return unsuspend(env, body, who);
   // Only Town Hall has a connector today. Never pretend another project was synced.
   if (body.project !== 'town-hall') return json({ error: 'No sync connector for that project.' }, 400);
   return json(await syncTasks(env, { force: true }));
@@ -101,6 +104,75 @@ async function revoke(env, body, who) {
     env.DB.prepare("UPDATE oauth_grants SET revoked_at = ?2, revoked_reason = 'operator_revoked' WHERE contributor = ?1 AND revoked_at IS NULL").bind(body.contributor_id, Date.now()),
   ]);
   return result[0].meta.changes ? json({ ok: true }) : notFound();
+}
+
+// ---- suspension (docs/RUNBOOK.md). The operator names an account by the short id the voter or an abuse signal gave (the first 8+
+// characters of the account id), or by a contributor row ("suspend this contributor's owner"). The console never shows an account,
+// and never shows which contributor an account is linked to. What it does show is a suspension handle: 8 random hex characters
+// made for the suspension, unrelated to the account id. Lifting a suspension names that handle. The contributor route answers the
+// same whether or not the contributor has an account, so the answer does not reveal an owner. Events carry the scope, the written
+// reason and the handle: no account, no contributor.
+const SCOPES = new Set(['vote', 'all']);
+const REASON_MIN = 5, REASON_MAX = 300;
+const reasonOf = (body) => (typeof body.reason === 'string' && body.reason.trim().length >= REASON_MIN && body.reason.trim().length <= REASON_MAX ? body.reason.trim() : null);
+const REASON_ERROR = { error: `Send a written reason of ${REASON_MIN} to ${REASON_MAX} characters. Do not put names, emails or other personal details in it.` };
+
+async function suspend(env, body, who) {
+  if (!SCOPES.has(body.scope)) return json({ error: 'Send scope: "all" (voting and AI work) or "vote" (voting only).' }, 400);
+  const reason = reasonOf(body);
+  if (!reason) return json(REASON_ERROR, 400);
+  const byContributor = body.contributor_id !== undefined;
+  let matchOn, binds;
+  if (byContributor) {
+    if (!Number.isSafeInteger(body.contributor_id) || body.contributor_id < 1) return json({ error: 'Send contributor_id.' }, 400);
+    if (!(await env.DB.prepare('SELECT 1 AS n FROM contributors WHERE id = ?1').bind(body.contributor_id).first())) return notFound();
+    matchOn = (p) => `(a.id = (SELECT owner_account FROM contributors WHERE id = ${p}) OR EXISTS (SELECT 1 FROM account_links l WHERE l.account = a.id AND l.contributor = ${p}))`;
+    binds = [body.contributor_id];
+  } else {
+    if (typeof body.account !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(body.account)) return json({ error: 'Send account (the short id, at least 8 characters) or contributor_id.' }, 400);
+    // Exactly one account must start with it: a short id that fits two accounts, or none, changes nothing.
+    matchOn = (p) => `substr(a.id, 1, length(${p})) = ${p} AND (SELECT COUNT(*) FROM accounts WHERE substr(id, 1, length(${p})) = ${p}) = 1`;
+    binds = [body.account];
+  }
+  const ref = Array.from(crypto.getRandomValues(new Uint8Array(4)), (b) => b.toString(16).padStart(2, '0')).join('');
+  const now = Date.now(), op = crypto.randomUUID();
+  const res = await env.DB.batch([
+    // Changes only an account not already suspended with this scope. A suspension keeps its handle when its scope is changed.
+    env.DB.prepare(`UPDATE accounts AS a SET suspended = 1, suspend_scope = ?1, suspend_ref = COALESCE(suspend_ref, ?2), suspended_at = COALESCE(suspended_at, ?3)
+      WHERE ${matchOn('?4')} AND (a.suspended = 0 OR a.suspend_scope IS NOT ?1)`).bind(body.scope, ref, now, ...binds),
+    env.DB.prepare(`INSERT INTO events (ts, type, actor, detail) SELECT ?1, 'account_suspended', ?2, json_object('scope', ?3, 'reason', ?4, 'ref', suspend_ref, 'op', ?5)
+      FROM accounts a WHERE a.suspended = 1 AND a.suspend_scope = ?3 AND changes() > 0 AND ${matchOn('?6')}`).bind(now, who.email, body.scope, reason, op, ...binds),
+  ]);
+  const changed = res[0].meta.changes > 0;
+  // By contributor: the same answer in every case. By account: the handle, and 404 when no single account matched.
+  if (byContributor) return json({ ok: true, note: 'Recorded. If this contributor has an account, it is listed under Suspensions.' });
+  // The handle in force: a suspension whose scope was raised keeps the handle it already had.
+  const now_ = await env.DB.prepare(`SELECT suspend_ref FROM accounts a WHERE a.suspended = 1 AND a.suspend_scope = ?1 AND ${matchOn('?2')}`).bind(body.scope, ...binds).first();
+  if (!now_) return notFound();
+  return json(changed ? { ok: true, ref: now_.suspend_ref } : { ok: true, ref: now_.suspend_ref, unchanged: true });
+}
+
+async function unsuspend(env, body, who) {
+  if (typeof body.ref !== 'string' || !/^[0-9a-f]{8}$/.test(body.ref)) return json({ error: 'Send ref (the 8-character suspension handle from the Suspensions list).' }, 400);
+  const reason = reasonOf(body);
+  if (!reason) return json(REASON_ERROR, 400);
+  const now = Date.now(), op = crypto.randomUUID();
+  const res = await env.DB.batch([
+    // The event is written first, from the row that is about to change, and only for a suspension that exists.
+    env.DB.prepare(`INSERT INTO events (ts, type, actor, detail) SELECT ?1, 'account_unsuspended', ?2, json_object('scope', suspend_scope, 'reason', ?3, 'ref', suspend_ref, 'op', ?5)
+      FROM accounts WHERE suspend_ref = ?4 AND suspended = 1`).bind(now, who.email, reason, body.ref, op),
+    // Only the flags change. No ballot, contributor, claim, submission or token is touched, so everything comes back.
+    env.DB.prepare(`UPDATE accounts SET suspended = 0, suspend_scope = NULL, suspend_ref = NULL, suspended_at = NULL WHERE suspend_ref = ?1 AND suspended = 1`).bind(body.ref),
+  ]);
+  return res[1].meta.changes ? json({ ok: true }) : notFound();
+}
+
+// The suspensions in force: handle, scope, when and the operator's written reason. No account, no contributor.
+async function suspensions(env) {
+  const { results } = await env.DB.prepare(`SELECT a.suspend_ref AS ref, a.suspend_scope AS scope, a.suspended_at AS since,
+      (SELECT json_extract(e.detail, '$.reason') FROM events e WHERE e.type = 'account_suspended' AND json_extract(e.detail, '$.ref') = a.suspend_ref ORDER BY e.id DESC LIMIT 1) AS reason
+    FROM accounts a WHERE a.suspended = 1 ORDER BY a.suspend_ref`).all();
+  return json({ suspensions: results.map((r) => ({ ref: r.ref, scope: r.scope ?? 'vote', since: r.since || null, reason: r.reason ?? null })) });
 }
 
 async function audit(env, url) {

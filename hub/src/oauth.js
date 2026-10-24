@@ -7,6 +7,7 @@
 // The access token's grant names { contributor }; its scopes are read, work and submit, enforced per tool in mcp.js.
 //
 // Existing bearer `swk_` keys are not OAuth tokens: mcp.js never sends them here.
+import { workSuspended } from './suspension.js';
 import { privateJson, session, writeGuard } from './accounts.js';
 import { IdentityError, MAX_PAIRS_PER_NETWORK_PER_DAY, checkHandle, createContributor } from './identity.js';
 import { CONSENT_TTL_MS, CODE_TTL_MS, MAX_LIVE_CONSENTS, SHAPE, getClient, random, secretHash } from './oauth-core.js';
@@ -202,6 +203,7 @@ async function decide(req, env) {
       `INSERT INTO oauth_grants (id, client, contributor, scope, resource, created)
        SELECT ?1, client, ?2, ?3, resource, ?4 FROM oauth_consents WHERE hash = ?5 AND consumer = ?6
          AND EXISTS (SELECT 1 FROM contributors c WHERE c.id = ?2 AND c.removed = 0)
+         AND NOT ${workSuspended('?2')}
          AND (?7 IS NULL OR (EXISTS (SELECT 1 FROM accounts a WHERE a.id = ?7 AND a.suspended = 0)
                              AND EXISTS (SELECT 1 FROM contributors c WHERE c.id = ?2 AND c.owner_account = ?7)))`
     ).bind(grantId, contributor.id, granted.join(' '), t, consentHash, marker, account?.id ?? null),

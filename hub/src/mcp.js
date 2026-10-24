@@ -6,6 +6,7 @@ import {
 import { IdentityError, createContributor, keyHash } from './identity.js';
 import { SCOPES, SCOPE_FOR_TOOL, oauthChallenge, oauthEnabled } from './oauth-scopes.js';
 import { resolveAccessToken } from './oauth-core.js';
+import { WORK_SUSPENDED_MESSAGE, WORK_TOOLS, workSuspended } from './suspension.js';
 import { pickByDeficit, recapLines, redeemLinkCode, steeringFor, weekSummary, linkOfContributor } from './steering.js';
 import { PrError, checkPrSubmission } from './github.js';
 import { syncIfStale, UNTRUSTED } from './sync.js';
@@ -296,6 +297,8 @@ export async function handleMcp(req, env, ctx) {
               return rpcError(id, -32003, msg, 403, { 'WWW-Authenticate': oauthChallenge(env, { error: 'insufficient_scope', scope: ['read', need] }) });
             }
             c.who = await authenticate(c);
+            // Read from the same statement that loaded the contributor (and from the token check): work tools are refused while the account is suspended from work.
+            if (WORK_TOOLS.has(name) && (c.who.work_suspended || oauth?.work_suspended)) throw new ToolError(WORK_SUSPENDED_MESSAGE);
           }
           if (name !== 'how_to_help' && name !== 'setup_guide' && name !== 'pair') {
             await syncIfStale(env, ctx);
@@ -328,7 +331,7 @@ async function authenticate({ env, req, args, oauth }) {
   if (oauth) {
     // Checked again here, in the same statement that loads the contributor: a revoke that landed since the token was resolved stops this call.
     const who = await env.DB.prepare(
-      `SELECT id, handle, credit FROM contributors WHERE id = ?1 AND removed = 0
+      `SELECT id, handle, credit, ${workSuspended('contributors.id')} AS work_suspended FROM contributors WHERE id = ?1 AND removed = 0
        AND EXISTS (SELECT 1 FROM oauth_grants WHERE id = ?2 AND revoked_at IS NULL)`
     ).bind(oauth.contributor, oauth.grant).first();
     if (!who) throw new GrantRevoked('This connection was revoked or no longer matches a contributor. Sign in again.');
@@ -343,7 +346,7 @@ async function authenticate({ env, req, args, oauth }) {
     const none = !m && (typeof args.contributor_key !== 'string' || !args.contributor_key.trim());
     throw new (none ? AuthRequired : ToolError)('This tool needs a contributor key (or a connection that signed in with OAuth). Call `pair` once to get a handle and key, then send it as an `Authorization: Bearer <key>` header in your client config (preferred: arguments end up in chat logs), or pass it as the `contributor_key` argument if your client cannot set headers.');
   }
-  const who = await env.DB.prepare('SELECT id, handle, credit FROM contributors WHERE key_hash = ?1 AND removed = 0').bind(await keyHash(env, key)).first();
+  const who = await env.DB.prepare(`SELECT id, handle, credit, ${workSuspended('contributors.id')} AS work_suspended FROM contributors WHERE key_hash = ?1 AND removed = 0`).bind(await keyHash(env, key)).first();
   if (!who) throw new ToolError('That contributor key was not recognized. Call `pair` to get a new one.');
   return who;
 }
@@ -482,6 +485,7 @@ async function claim(c, who, taskId, origin) {
          SELECT t.id, ?2, ?3, ?4, ?5, ?6, ?7, ?9, ?10 FROM tasks t JOIN projects p ON p.id = t.project
          WHERE t.id = ?1 AND t.status = 'ready' AND t.held_reason IS NULL AND p.active = 1 AND p.paused = 0 AND p.reviewer != ''
            AND EXISTS (SELECT 1 FROM contributors u WHERE u.id = ?2 AND u.removed = 0)
+           AND NOT ${workSuspended('?2')}
            AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = t.id AND (s.contributor = ?2 OR s.status IN ('pending','accepted')))
            AND NOT EXISTS (SELECT 1 FROM claims k WHERE k.task = t.id AND k.outcome IS NULL)
            AND (SELECT COUNT(*) FROM submissions s JOIN tasks t2 ON t2.id = s.task WHERE t2.project = t.project AND s.status = 'pending') < p.max_pending
@@ -504,6 +508,7 @@ async function claim(c, who, taskId, origin) {
   if (!res[0].meta.changes) {
     // Not claimed: say why, from the current state. A repeat that raced its own first call finds its claim here.
     if (!(await env.DB.prepare('SELECT 1 AS n FROM contributors WHERE id = ?1 AND removed = 0').bind(who.id).first())) throw new ToolError('This contributor was removed, so it cannot claim work. Pair a new one.');
+    if (await env.DB.prepare(`SELECT 1 AS n WHERE ${workSuspended('?1')}`).bind(who.id).first()) throw new ToolError(WORK_SUSPENDED_MESSAGE);
     task = await readClaimTask(env, who, taskId);
     const again = await myOutstandingClaim(env, who, taskId, Date.now());
     if (again) return { task, claim: { id: again.id, routed: !!again.routed, routing_origin: again.routing_origin, expires_at: iso(again.expires_at) } };
@@ -756,6 +761,7 @@ async function submitWork({ env, args, who, ctx }) {
          SELECT c.task, c.contributor, c.id, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15 FROM claims c JOIN tasks t ON t.id = c.task
          WHERE c.id = ?3 AND c.task = ?1 AND c.contributor = ?2 AND c.outcome IS NULL AND c.expires_at > ?9
            AND EXISTS (SELECT 1 FROM contributors u WHERE u.id = c.contributor AND u.removed = 0)
+           AND NOT ${workSuspended('c.contributor')}
            AND t.status = 'claimed' AND t.held_reason IS NULL
            AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.task = c.task AND s.status IN ('pending','accepted'))
            AND (SELECT COUNT(*) FROM submissions d WHERE d.contributor = c.contributor AND d.created >= ?9 - 86400000) < ${MAX_SUBMISSIONS_PER_CONTRIBUTOR_PER_DAY}`
@@ -800,6 +806,7 @@ async function submitRefusal(env, who, taskId, { body, sources, flags, pii = [] 
     throw new ToolError(`You already have a ${live.status} submission (${live.id}) for this task.`);
   }
   if (!(await env.DB.prepare('SELECT 1 AS n FROM contributors WHERE id = ?1 AND removed = 0').bind(who.id).first())) throw new ToolError('This contributor was removed, so it cannot hand in work.');
+  if (await env.DB.prepare(`SELECT 1 AS n WHERE ${workSuspended('?1')}`).bind(who.id).first()) throw new ToolError(WORK_SUSPENDED_MESSAGE);
   const day = await env.DB.prepare('SELECT COUNT(*) AS n FROM submissions WHERE contributor = ?1 AND created >= ?2').bind(who.id, Date.now() - 86400000).first();
   if (day.n >= MAX_SUBMISSIONS_PER_CONTRIBUTOR_PER_DAY) throw new ToolError('Daily submission limit reached. Try again tomorrow.');
   const other = await env.DB.prepare("SELECT id FROM submissions WHERE task = ?1 AND status IN ('pending','accepted')").bind(taskId).first();
