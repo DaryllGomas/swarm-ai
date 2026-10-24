@@ -42,8 +42,10 @@ export async function createContributor(env, req, ipHash, handle, ownerAccount =
       const res = await env.DB.prepare(
         `INSERT INTO contributors (handle, key_hash, created, pair_ip, owner_account)
          SELECT ?1, ?2, ?3, ?4, ?7
-         WHERE (SELECT COUNT(*) FROM contributors WHERE pair_ip IN (?4, ?6, ?8, ?9) AND created >= ?5) < ${MAX_PAIRS_PER_NETWORK_PER_DAY}`
+         WHERE (?7 IS NULL OR EXISTS (SELECT 1 FROM accounts WHERE id = ?7 AND suspended = 0))
+           AND (SELECT COUNT(*) FROM contributors WHERE pair_ip IN (?4, ?6, ?8, ?9) AND created >= ?5) < ${MAX_PAIRS_PER_NETWORK_PER_DAY}`
       ).bind(h, hash, now, ipHash, now - 86400000, net.yesterday, ownerAccount, net.legacyToday, net.legacyYesterday).run();
+      if (!res.meta.changes && ownerAccount && !(await env.DB.prepare('SELECT 1 AS n FROM accounts WHERE id = ?1 AND suspended = 0').bind(ownerAccount).first())) throw new IdentityError('That account is no longer available.');
       if (!res.meta.changes) throw new IdentityError('Too many pairings from this network today. Try again tomorrow.');
       await eventStmt(env, { type: 'contributor_paired', contributor: res.meta.last_row_id, actor: 'system' }).run();
       return { id: res.meta.last_row_id, handle: h, key };

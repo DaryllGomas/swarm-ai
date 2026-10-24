@@ -59,7 +59,7 @@ async function open(env, oldRaw, oldHash, blob) {
     const bytes = unb64(blob);
     const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes.slice(0, 12), additionalData: enc(oldHash) }, await retryKey(env, oldRaw), bytes.slice(12));
     const p = JSON.parse(new TextDecoder().decode(pt));
-    return SHAPE.access.test(p.a) && SHAPE.refresh.test(p.r) ? p : null;
+    return SHAPE.access.test(p.a) && SHAPE.refresh.test(p.r) && typeof p.s === 'string' ? p : null;
   } catch { return null; }
 }
 
@@ -222,8 +222,8 @@ async function codeGrant(env, client, p, now) {
     env.DB.prepare(`UPDATE oauth_codes SET used = 1, consumer = ?2 WHERE hash = ?1 AND used = 0 AND expires > ?3 AND ${grantLive('oauth_codes.grant_id')}`).bind(codeHash, marker, now),
     env.DB.prepare(`INSERT INTO oauth_tokens (hash, grant_id, family, kind, created, expires) SELECT ?2, grant_id, ?3, 'refresh', ?4, ?5 FROM oauth_codes WHERE hash = ?1 AND consumer = ?6`)
       .bind(codeHash, refreshHash, family, now, now + REFRESH_TTL_MS, marker),
-    env.DB.prepare(`INSERT INTO oauth_tokens (hash, grant_id, family, kind, created, expires) SELECT ?2, grant_id, ?3, 'access', ?4, ?5 FROM oauth_codes WHERE hash = ?1 AND consumer = ?6`)
-      .bind(codeHash, accessHash, family, now, now + ACCESS_TTL_MS, marker),
+    env.DB.prepare(`INSERT INTO oauth_tokens (hash, grant_id, family, kind, created, expires, scope) SELECT ?2, grant_id, ?3, 'access', ?4, ?5, ?7 FROM oauth_codes WHERE hash = ?1 AND consumer = ?6`)
+      .bind(codeHash, accessHash, family, now, now + ACCESS_TTL_MS, marker, row.scope),
   ]);
   if (res[0].meta.changes !== 1) {
     // Lost the race, or the code expired or the grant was revoked in between. If somebody else spent it, this is a second use.
@@ -240,16 +240,23 @@ async function refreshGrant(env, client, p, now) {
   const row = await readRefresh(env, oldHash);
   if (!row || row.client !== client.id || row.kind !== 'refresh') return invalidGrant();
   if (row.revoked_at || row.grant_revoked) return invalidGrant();
+  // RFC 8707: a resource this server does not serve is refused outright, before anything is rotated or replayed.
+  if (p.resource !== undefined && p.resource !== row.resource) return oauthError('invalid_target', 'resource does not match this connection.');
+  // RFC 6749 section 6: the scope of a refreshed access token is the request, which can only be a subset of the grant. Omitted means the
+  // whole grant. The grant stays the ceiling for later refreshes; only this access token (and a retry of it) is narrowed.
+  const granted = row.scope.split(' ');
+  let scope = row.scope;
   if (p.scope !== undefined) {
     const asked = p.scope.split(/\s+/).filter(Boolean);
-    if (asked.some((s) => !row.scope.split(' ').includes(s))) return oauthError('invalid_scope', 'That is more than this connection was allowed.');
+    if (asked.length === 0 || asked.some((s) => !granted.includes(s))) return oauthError('invalid_scope', 'That is more than this connection was allowed.');
+    scope = granted.filter((s) => asked.includes(s)).join(' ');
   }
-  if (row.rotated_at !== null) return replayed(env, row, p.refresh_token, oldHash, now);
+  if (row.rotated_at !== null) return replayed(env, row, p.refresh_token, oldHash, now, scope);
   if (row.expires <= now) return invalidGrant();
 
   const access = random('swa_'), refresh = random('swr_');
   const [accessHash, refreshHash] = [await secretHash(env, 'token', access), await secretHash(env, 'token', refresh)];
-  const blob = await seal(env, p.refresh_token, oldHash, { a: access, r: refresh });
+  const blob = await seal(env, p.refresh_token, oldHash, { a: access, r: refresh, s: scope });
   const res = await env.DB.batch([
     // The rotation. Wins only if the token is still unrotated and unrevoked AND its grant is live right now, inside this statement:
     // a revoke that landed after the read above makes this match nothing, so the refresh fails.
@@ -262,22 +269,22 @@ async function refreshGrant(env, client, p, now) {
     // Only the request that won the rotation owns this successor hash, so only it inserts tokens.
     env.DB.prepare(`INSERT INTO oauth_tokens (hash, grant_id, family, kind, created, expires) SELECT ?2, grant_id, family, 'refresh', ?3, ?4 FROM oauth_tokens WHERE hash = ?1 AND successor = ?2`)
       .bind(oldHash, refreshHash, now, now + REFRESH_TTL_MS),
-    env.DB.prepare(`INSERT INTO oauth_tokens (hash, grant_id, family, kind, created, expires) SELECT ?2, grant_id, family, 'access', ?3, ?4 FROM oauth_tokens WHERE hash = ?1 AND successor = ?5`)
-      .bind(oldHash, accessHash, now, now + ACCESS_TTL_MS, refreshHash),
+    env.DB.prepare(`INSERT INTO oauth_tokens (hash, grant_id, family, kind, created, expires, scope) SELECT ?2, grant_id, family, 'access', ?3, ?4, ?6 FROM oauth_tokens WHERE hash = ?1 AND successor = ?5`)
+      .bind(oldHash, accessHash, now, now + ACCESS_TTL_MS, refreshHash, scope),
     // The token before this one can no longer be retried: drop its stored replacement.
     env.DB.prepare('UPDATE oauth_tokens SET retry_blob = NULL WHERE successor = ?1 AND retry_blob IS NOT NULL AND EXISTS (SELECT 1 FROM oauth_tokens WHERE hash = ?1 AND successor = ?2)').bind(oldHash, refreshHash),
   ]);
   if (res[0].meta.changes !== 1) {
     // Lost to a concurrent rotation, a revoke, or expiry. Look again to tell which.
     const now2 = await readRefresh(env, oldHash);
-    if (now2 && !now2.revoked_at && !now2.grant_revoked && now2.rotated_at !== null) return replayed(env, now2, p.refresh_token, oldHash, now);
+    if (now2 && !now2.revoked_at && !now2.grant_revoked && now2.rotated_at !== null) return replayed(env, now2, p.refresh_token, oldHash, now, scope);
     return invalidGrant();
   }
-  return oauthJson(tokenBody(access, refresh, row.scope, ACCESS_TTL_MS));
+  return oauthJson(tokenBody(access, refresh, scope, ACCESS_TTL_MS));
 }
 
 const readRefresh = (env, hash) => env.DB.prepare(
-  `SELECT t.kind, t.grant_id, t.family, t.expires, t.rotated_at, t.successor, t.retry_blob, t.revoked_at, g.client, g.scope, g.revoked_at AS grant_revoked
+  `SELECT t.kind, t.grant_id, t.family, t.expires, t.rotated_at, t.successor, t.retry_blob, t.revoked_at, g.client, g.scope, g.resource, g.revoked_at AS grant_revoked
    FROM oauth_tokens t JOIN oauth_grants g ON g.id = t.grant_id WHERE t.hash = ?1`
 ).bind(hash).first();
 
@@ -285,14 +292,18 @@ const readRefresh = (env, hash) => env.DB.prepare(
 //  (a) the client lost our response and is retrying: only within 30 seconds of the rotation, and only while the replacement has not been
 //      used itself. Then it gets the SAME replacement tokens again (decrypted from the stored blob), never a second pair, so no branch exists;
 //  (b) anything else is a copied token being replayed: the whole family and the grant are revoked, and the caller gets invalid_grant.
-async function replayed(env, row, raw, oldHash, now) {
+async function replayed(env, row, raw, oldHash, now, scope) {
   if (row.retry_blob && row.successor && now - row.rotated_at <= RETRY_GRACE_MS) {
     const next = await env.DB.prepare(
       `SELECT t.rotated_at, t.revoked_at, g.revoked_at AS grant_revoked FROM oauth_tokens t JOIN oauth_grants g ON g.id = t.grant_id WHERE t.hash = ?1`
     ).bind(row.successor).first();
     if (next && next.rotated_at === null && !next.revoked_at && !next.grant_revoked) {
       const same = await open(env, raw, oldHash, row.retry_blob);
-      if (same) return oauthJson(tokenBody(same.a, same.r, row.scope, row.rotated_at + ACCESS_TTL_MS - now));
+      if (same) {
+        // The cached pair is only for the request it was made for: a retry asking for a different scope never gets it (nor is it a theft).
+        if (same.s !== scope) return oauthError('invalid_scope', 'A retry must ask for the same scope as the refresh it repeats.');
+        return oauthJson(tokenBody(same.a, same.r, same.s, row.rotated_at + ACCESS_TTL_MS - now));
+      }
     }
   }
   await env.DB.batch([
@@ -325,7 +336,7 @@ export async function revokeEndpoint(req, env, now = Date.now()) {
 export async function resolveAccessToken(env, raw, now = Date.now()) {
   if (typeof raw !== 'string' || !SHAPE.access.test(raw)) return null;
   const row = await env.DB.prepare(
-    `SELECT g.id AS grant_id, g.contributor, g.scope, g.client
+    `SELECT g.id AS grant_id, g.contributor, COALESCE(t.scope, g.scope) AS scope, g.client
      FROM oauth_tokens t JOIN oauth_grants g ON g.id = t.grant_id JOIN contributors c ON c.id = g.contributor
      WHERE t.hash = ?1 AND t.kind = 'access' AND t.revoked_at IS NULL AND t.expires > ?2
        AND g.revoked_at IS NULL AND g.resource = ?3 AND c.removed = 0`

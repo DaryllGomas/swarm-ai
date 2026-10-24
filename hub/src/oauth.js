@@ -101,7 +101,11 @@ async function showConsent(req, env) {
   if (q.get('code_challenge_method') !== 'S256') return fail('invalid_request', 'PKCE code_challenge_method must be S256.');
   const resources = q.getAll('resource');
   if (resources.length > 1 || (resources.length === 1 && resources[0] !== resourceUrl(env))) return fail('invalid_target', 'resource must be this server\'s MCP endpoint.');
-  const asked = [...new Set((q.get('scope') || '').split(/\s+/).filter((s) => SCOPES.includes(s)))];
+  // An absent scope offers everything; a scope that is present must name only supported scopes. It is never filtered down to
+  // nothing and then widened to the default (Codex review 8, finding 4).
+  const rawScope = q.get('scope');
+  const asked = rawScope === null ? [] : [...new Set(rawScope.split(/\s+/).filter(Boolean))];
+  if (rawScope !== null && (asked.length === 0 || asked.some((s) => !SCOPES.includes(s)))) return fail('invalid_scope', 'scope must name only: read, work, submit.');
 
   const handle = random('swh_'), secret = cookieOf(req) || random('', 32), now = Date.now();
   // One conditional INSERT: an open-page cap, so consent pages cannot be used to fill the database.
@@ -184,7 +188,11 @@ async function decide(req, env) {
       if (err instanceof IdentityError) return privateJson({ error: err.message }, 409);
       throw err;
     }
-    if (account) { await linkDirect(env, account.id, contributor.id, 'oauth'); await syncCredit(env, account.id); }
+    if (account) {
+      // A failed link means the account is gone or suspended: stop, rather than finishing the connection for nobody.
+      if (!(await linkDirect(env, account.id, contributor.id, 'oauth'))) return privateJson({ error: 'Your account is no longer available. Start the connection again.' }, 409);
+      await syncCredit(env, account.id);
+    }
   }
   // The grant and its code are created from the STORED transaction (client, redirect URI, challenge), never from the form, and only
   // for the request that spent it.
@@ -192,13 +200,18 @@ async function decide(req, env) {
   const res = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO oauth_grants (id, client, contributor, scope, resource, created)
-       SELECT ?1, client, ?2, ?3, resource, ?4 FROM oauth_consents WHERE hash = ?5 AND consumer = ?6`
-    ).bind(grantId, contributor.id, granted.join(' '), t, consentHash, marker),
+       SELECT ?1, client, ?2, ?3, resource, ?4 FROM oauth_consents WHERE hash = ?5 AND consumer = ?6
+         AND EXISTS (SELECT 1 FROM contributors c WHERE c.id = ?2 AND c.removed = 0)
+         AND (?7 IS NULL OR (EXISTS (SELECT 1 FROM accounts a WHERE a.id = ?7 AND a.suspended = 0)
+                             AND EXISTS (SELECT 1 FROM contributors c WHERE c.id = ?2 AND c.owner_account = ?7)))`
+    ).bind(grantId, contributor.id, granted.join(' '), t, consentHash, marker, account?.id ?? null),
     env.DB.prepare(
       `INSERT INTO oauth_codes (hash, grant_id, redirect_uri, challenge, expires)
-       SELECT ?1, ?2, redirect_uri, challenge, ?3 FROM oauth_consents WHERE hash = ?4 AND consumer = ?5`
+       SELECT ?1, ?2, redirect_uri, challenge, ?3 FROM oauth_consents WHERE hash = ?4 AND consumer = ?5
+         AND EXISTS (SELECT 1 FROM oauth_grants WHERE id = ?2)`
     ).bind(await secretHash(env, 'code', code), grantId, t + CODE_TTL_MS, consentHash, marker),
   ]);
-  if (res[0].meta.changes !== 1 || res[1].meta.changes !== 1) return privateJson({ error: 'Could not finish the connection. Start it again.' }, 500);
+  // Both statements ran in one transaction, so a refusal (the account or contributor went away mid-consent) leaves nothing behind.
+  if (res[0].meta.changes !== 1 || res[1].meta.changes !== 1) return privateJson({ error: 'Could not finish the connection. Your account may have changed; start it again.' }, 409);
   return respond(backToApp(txn.redirect_uri, { code, state: txn.state }));
 }

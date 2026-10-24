@@ -595,7 +595,7 @@ describe('refresh tokens: rotation and reuse detection', () => {
     expect((await refreshWith({ client: { client_id: 'unknown-client-id' } }, c.refresh)).res.status).toBe(401);
   });
 
-  it('never widens the scope: a wider scope is refused, a narrower one is ignored, and the grant is the only source of scope', async () => {
+  it('never widens the scope: a wider scope is refused, and omitting scope returns the grant's scope (narrowing: Codex review 8, finding 2)', async () => {
     const c = await connect({ grant: ['read', 'work'] });
     const wider = await o('/oauth/token', form({ grant_type: 'refresh_token', refresh_token: c.refresh, client_id: c.client.client_id, scope: 'read work submit' }));
     expect((await wider.json()).error).toBe('invalid_scope');
@@ -882,5 +882,169 @@ describe('the code', () => {
     }
     const pkg = JSON.parse((await import('../package.json?raw')).default);
     expect(JSON.stringify(pkg)).not.toMatch(/oauth-provider/);
+  });
+});
+
+// ---------------------------------------------------------------- Codex review 8 (own OAuth server)
+
+describe('Codex review 8, finding 1: account deletion or suspension during consent', () => {
+  const approve = (consent, v, over) => o('/authorize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: ORIGIN, 'X-Swarm': '1', 'CF-Connecting-IP': nextIp(), Cookie: [consent.cookie, v.cookie].join('; ') },
+    body: JSON.stringify({ consent: consent.data.consent, decision: 'approve', mode: 'passkey', scope: ['read', 'work', 'submit'], chosen_handle: 'after-delete' }),
+  }, over);
+  const start = async () => {
+    const { data: client } = await registerClient();
+    const { challenge } = await pkce();
+    return openConsent(client, { challenge });
+  };
+  const nothingIssued = async () => {
+    expect(await count('oauth_grants')).toBe(0);
+    expect(await count('oauth_codes')).toBe(0);
+    expect(await count('oauth_tokens')).toBe(0);
+    expect(await count('contributors WHERE removed = 0')).toBe(0);
+  };
+  const race = async (v, parkOn, whileParked, { existing = false } = {}) => {
+    const consent = await start();
+    const g = gate();
+    const db = wrapDb(env.DB, {
+      afterRead: async (sql, method, r) => { if (/owner_account = \?1 ORDER BY/.test(sql) && (existing ? !!r : !r)) await g.hit(); },
+      beforeRun: async (sql) => { if (parkOn?.test(sql)) await g.hit(); },
+    });
+    const parked = approve(consent, v, { DB: db });
+    await g.reached;
+    await whileParked();
+    g.open();
+    return parked;
+  };
+
+  it('deleted before the first contributor is created: nothing is created or issued', async () => {
+    const { deleteAccount } = await import('../src/privacy.js');
+    const v = await voter({ allocations: null });
+    const res = await race(v, null, async () => { expect((await deleteAccount(env, v.id)).deleted).toBe(true); });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    await nothingIssued();
+  });
+
+  it('deleted between creating the contributor and the grant: no grant, no code', async () => {
+    const { deleteAccount } = await import('../src/privacy.js');
+    const v = await voter({ allocations: null });
+    const consent = await start();
+    const g = gate();
+    const db = wrapDb(env.DB, { beforeRun: async (sql) => { if (/INSERT INTO events/.test(sql)) await g.hit(); } });
+    const parked = approve(consent, v, { DB: db });
+    await g.reached; // the contributor row exists now
+    expect((await deleteAccount(env, v.id)).deleted).toBe(true);
+    g.open();
+    expect((await parked).status).toBeGreaterThanOrEqual(400);
+    await nothingIssued();
+  });
+
+  it('suspended before the first contributor is created: nothing is created or issued', async () => {
+    const v = await voter({ allocations: null });
+    const res = await race(v, null, async () => { await env.DB.prepare('UPDATE accounts SET suspended = 1 WHERE id = ?1').bind(v.id).run(); });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    await nothingIssued();
+  });
+
+  it('an existing contributor: deleted or suspended while the consent is open, no grant is issued', async () => {
+    const { deleteAccount } = await import('../src/privacy.js');
+    const first = await voter({ allocations: null });
+    await connect({ mode: 'passkey', cookie: first.cookie, chosen_handle: 'already-owned' });
+    for (const t of ['oauth_tokens', 'oauth_codes', 'oauth_grants']) await env.DB.prepare(`DELETE FROM ${t}`).run();
+    const res = await race(first, null, async () => { expect((await deleteAccount(env, first.id)).deleted).toBe(true); }, { existing: true });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(await count('oauth_grants')).toBe(0);
+    expect(await count('oauth_codes')).toBe(0);
+
+    const second = await voter({ allocations: null });
+    await connect({ mode: 'passkey', cookie: second.cookie, chosen_handle: 'second-owned' });
+    const before = await count('oauth_grants');
+    const res2 = await race(second, null, async () => { await env.DB.prepare('UPDATE accounts SET suspended = 1 WHERE id = ?1').bind(second.id).run(); }, { existing: true });
+    expect(res2.status).toBeGreaterThanOrEqual(400);
+    expect(await count('oauth_grants')).toBe(before);
+  });
+});
+
+describe('Codex review 8, finding 2: refresh downscoping', () => {
+  const refreshScope = async (c, refresh, extra = {}) => {
+    const res = await o('/oauth/token', form({ grant_type: 'refresh_token', refresh_token: refresh, client_id: c.client.client_id, ...extra }));
+    return { res, data: await res.json() };
+  };
+
+  it('a refresh asking for read gets a token with exactly read, enforced at MCP; the grant stays the ceiling', async () => {
+    const c = await connect();
+    const r = await refreshScope(c, c.refresh, { scope: 'read' });
+    expect(r.res.status).toBe(200);
+    expect(r.data.scope).toBe('read');
+    expect((await mcpTool(r.data.access_token, 'my_work')).res.status).toBe(200);
+    expect((await mcpTool(r.data.access_token, 'next_task')).res.status).toBe(403);
+    expect((await mcpTool(r.data.access_token, 'submit_work', { task_id: 1, body: BODY, sources: [SOURCE] })).res.status).toBe(403);
+    expect((await mcpTool(r.data.access_token, 'link_account', { code: 'SWARM-ABCD-2345' })).res.status).toBe(403); // ownership-changing
+    const full = await refreshScope(c, r.data.refresh_token); // the next refresh may ask for the whole grant again
+    expect(full.data.scope).toBe('read work submit');
+    expect((await mcpTool(full.data.access_token, 'next_task')).res.status).not.toBe(403);
+    const sub = await refreshScope(c, full.data.refresh_token, { scope: 'work read' });
+    expect(sub.data.scope).toBe('read work'); // in the grant's order
+  });
+
+  it('more than the grant, nothing, or an unknown name fails with invalid_scope', async () => {
+    const c = await connect({ grant: ['read', 'work'] });
+    for (const scope of ['read work submit', 'submit', 'read bogus', '', ' ']) {
+      const r = await refreshScope(c, c.refresh, { scope });
+      expect(r.data.error, JSON.stringify(scope)).toBe('invalid_scope');
+    }
+    expect((await refreshScope(c, c.refresh, { scope: 'read' })).res.status).toBe(200); // none of that spent the token
+  });
+
+  it('a retry returns the cached pair only for the same scope, and its response and token carry that scope', async () => {
+    const c = await connect();
+    const r1 = await refreshScope(c, c.refresh, { scope: 'read' });
+    const same = await refreshScope(c, c.refresh, { scope: 'read' });
+    expect(same.res.status).toBe(200);
+    expect(same.data.access_token).toBe(r1.data.access_token);
+    expect(same.data.scope).toBe('read');
+    for (const extra of [{}, { scope: 'read work' }]) {
+      const wider = await refreshScope(c, c.refresh, extra);
+      expect(wider.data.error).toBe('invalid_scope');
+      expect(wider.data.access_token).toBeUndefined();
+    }
+    expect((await grantOf()).revoked_at).toBeNull(); // a wrong-scope retry is refused, not treated as theft
+    expect((await mcpTool(r1.data.access_token, 'next_task')).res.status).toBe(403);
+  });
+});
+
+describe('Codex review 8, finding 3: refresh and resource', () => {
+  it('a foreign resource is invalid_target, before anything rotates, on a fresh refresh and on a retry', async () => {
+    const c = await connect();
+    const bad = await o('/oauth/token', form({ grant_type: 'refresh_token', refresh_token: c.refresh, client_id: c.client.client_id, resource: 'https://other.example/mcp' }));
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).error).toBe('invalid_target');
+    expect(await count('oauth_tokens WHERE rotated_at IS NOT NULL')).toBe(0);
+    const ok = await o('/oauth/token', form({ grant_type: 'refresh_token', refresh_token: c.refresh, client_id: c.client.client_id, resource: `${ORIGIN}/mcp` }));
+    expect(ok.status).toBe(200);
+    const retry = await o('/oauth/token', form({ grant_type: 'refresh_token', refresh_token: c.refresh, client_id: c.client.client_id, resource: 'https://other.example/mcp' }));
+    expect((await retry.json()).error).toBe('invalid_target');
+    expect((await grantOf()).revoked_at).toBeNull();
+    expect((await refreshWith(c, c.refresh)).res.status).toBe(200); // the same-pair retry still works without resource
+  });
+});
+
+describe('Codex review 8, finding 4: unknown authorization scope', () => {
+  it('is invalid_scope back at the client, never the full default; absent scope still offers everything', async () => {
+    const { data: client } = await registerClient();
+    const { challenge } = await pkce();
+    for (const scope of ['totally-unknown', 'read bogus', '', '   ']) {
+      const res = await o(authorizeUrl(client, { challenge, scope }), { redirect: 'manual', headers: { 'CF-Connecting-IP': nextIp() } });
+      expect(res.status, JSON.stringify(scope)).toBe(302);
+      const to = new URL(res.headers.get('Location'));
+      expect(to.searchParams.get('error')).toBe('invalid_scope');
+      expect(to.searchParams.get('state')).toBe('st4te');
+    }
+    expect(await count('oauth_consents')).toBe(0);
+    const none = await openConsent(client, { challenge, scope: null });
+    expect(none.data.scopes.every((s) => s.requested)).toBe(true);
+    const some = await openConsent(client, { challenge, scope: 'read work' });
+    expect(some.data.scopes.filter((s) => s.requested).map((s) => s.id)).toEqual(['read', 'work']);
   });
 });

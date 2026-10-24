@@ -62,6 +62,7 @@ CREATE TABLE oauth_tokens (
   kind       TEXT NOT NULL CHECK (kind IN ('access', 'refresh')),
   created    INTEGER NOT NULL,
   expires    INTEGER NOT NULL,
+  scope      TEXT,                          -- an access token's own scope: the grant's, or a subset a refresh asked for; NULL = the grant's
   revoked_at INTEGER,
   rotated_at INTEGER,
   successor  TEXT,                          -- hash of the refresh token that replaced this one
