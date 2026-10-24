@@ -48,7 +48,7 @@ describe('discovery', () => {
     expect((await rpc('tools/list', {}, { over: OVER })).res.status).toBe(200);
   });
 
-  it('a wrong OAuth token is a 401 from the provider; a wrong contributor key is still a tool error', async () => {
+  it('a wrong OAuth token is a 401 with the challenge; a wrong contributor key is still a tool error', async () => {
     const bad = await mcp('not-a-real-token', 'tools/call', { name: 'my_work', arguments: {} });
     expect(bad.res.status).toBe(401);
     expect(bad.res.headers.get('WWW-Authenticate')).toMatch(/invalid_token/);
@@ -124,7 +124,7 @@ describe('the consent page', () => {
     const { data: client } = await registerClient({ client_name: name });
     const { challenge } = await pkce();
     const page = await openConsent(client, { challenge });
-    expect(page.data.client.name).toBe(name); // the data survives intact as JSON
+    expect(page.data.client.name).not.toMatch(/[<>]/); // the name is reduced to plain text when it is registered, and is data on the page either way
     expect(page.html).not.toContain('<img');
     expect(page.html.match(/<\/script>/g)).toHaveLength(2); // the data block and the page script, nothing injected
     expect(page.html).not.toContain(name);

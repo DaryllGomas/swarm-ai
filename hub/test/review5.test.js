@@ -7,7 +7,8 @@ import { accessFixture } from './access-helpers.js';
 import { gate, wrapDb } from './fault.js';
 import { weekOf, weekStartMs } from '../src/lib.js';
 import { closeClaimStmts, expireClaims } from '../src/core.js';
-import { PURGED_HANDLE, deleteAccount, purgeOAuthState, removeHandle } from '../src/privacy.js';
+import { PURGED_HANDLE, deleteAccount, removeHandle } from '../src/privacy.js';
+import { purgeOAuth } from '../src/oauth-core.js';
 import { rollupWeek, runRollup, runWeeklyMaintenance, UNPUBLISHED_BODY_DAYS } from '../src/rollup.js';
 import { NO_NOISE, linkedUser, mePost, publicAllocation, setupProjects, voter } from './voter.js';
 import { connect, mcpTool, o } from './oauth-helpers.js';
@@ -25,7 +26,7 @@ function seeded(seed) {
 beforeEach(async () => {
   await resetDb(); await setupProjects();
   await env.DB.batch([
-    env.DB.prepare('DELETE FROM weekly_project_stats'), env.DB.prepare('DELETE FROM rollup_weeks'), env.DB.prepare('DELETE FROM oauth_purge'),
+    env.DB.prepare('DELETE FROM weekly_project_stats'), env.DB.prepare('DELETE FROM rollup_weeks'),
     env.DB.prepare('DELETE FROM contributors WHERE handle = ?1').bind(PURGED_HANDLE),
   ]);
   await publicAllocation({ 'town-hall': 5000, 'swarm-ai': 5000 });
@@ -409,60 +410,55 @@ describe('finding 7: privacy writes are conditional at commit time', () => {
   });
 });
 
-// ---------------------------------------------------------------- finding 8: OAuth KV
-describe('finding 8: deleting an account deletes its OAuth grants and tokens', () => {
-  const kvKeys = async () => (await env.OAUTH_KV.list()).keys.map((k) => k.name);
+// ---------------------------------------------------------------- finding 8: OAuth state
+// Swarm's own OAuth server keeps every grant and token in D1, so the account deletion revokes them in the same batch (no KV, no queue).
+describe('finding 8: deleting an account revokes its OAuth grants and tokens in the same transaction', () => {
+  const grantsOf = (id) => all('SELECT id, revoked_at, revoked_reason FROM oauth_grants WHERE contributor = ?1', id);
 
-  it('the review probe: authorize with a passkey session, delete the account, and the grant, its tokens and the refresh token are gone', async () => {
+  it('the review probe: authorize with a passkey session, delete the account, and the access token, the refresh token and the grant are dead at once', async () => {
     const v = await voter({ allocations: { 'town-hall': 100 } });
     const c = await connect({ mode: 'passkey', cookie: v.cookie });
     expect(c.token, JSON.stringify(c.decision.data)).toBeTruthy();
     const contributor = (await mcpTool(c.token, 'my_work')).data.handle;
     const id = await cid(contributor);
-    expect((await kvKeys()).filter((k) => k.startsWith(`grant:c${id}:`) || k.startsWith(`token:c${id}:`)).length).toBeGreaterThan(1);
+    expect((await grantsOf(id))).toHaveLength(1);
+    expect((await grantsOf(id))[0].revoked_at).toBeNull();
     expect((await (await mePost('/api/me/delete', v, { confirm: 'delete my account' })).json()).deleted).toBe(true);
-    expect((await kvKeys()).filter((k) => k.startsWith(`grant:c${id}:`) || k.startsWith(`token:c${id}:`))).toEqual([]);
-    // The old refresh token mints nothing any more (it used to return 200 and new tokens).
+    expect((await grantsOf(id))[0]).toMatchObject({ revoked_reason: 'account_deleted' });
+    expect((await grantsOf(id))[0].revoked_at).toBeGreaterThan(0);
+    // The old refresh token mints nothing (the old library returned 200 and new tokens here).
     const res = await o('/oauth/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': '198.18.7.7' }, body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: c.refresh, client_id: c.client.client_id }) });
     expect(res.status).toBe(400);
-    expect((await mcpTool(c.token, 'my_work')).isError).toBe(true);
+    expect((await mcpTool(c.token, 'my_work')).res.status).toBe(401);
   });
 
-  it('deletes by exact prefix: another contributor whose id starts with the same digits keeps its grants', async () => {
-    const a = await newUser(), b = await newUser();
-    const [ia, ib] = [await cid(a.handle), await cid(b.handle)];
-    await env.DB.prepare('INSERT INTO oauth_purge(contributor, created) VALUES (?1, ?2)').bind(ia, Date.now()).run();
-    await env.OAUTH_KV.put(`grant:c${ia}:g1`, '{}'); await env.OAUTH_KV.put(`token:c${ia}:g1:t1`, '{}');
-    await env.OAUTH_KV.put(`grant:c${ia}0:g1`, '{}'); await env.OAUTH_KV.put(`grant:c${ib}:g1`, '{}'); await env.OAUTH_KV.put(`client:${ia}`, '{}');
-    await purgeOAuthState(env);
-    const left = await kvKeys();
-    expect(left).not.toContain(`grant:c${ia}:g1`); expect(left).not.toContain(`token:c${ia}:g1:t1`);
-    for (const k of [`grant:c${ia}0:g1`, `grant:c${ib}:g1`, `client:${ia}`]) expect(left, k).toContain(k);
+  it('revokes only that account\'s contributors: another contributor\'s connection keeps working', async () => {
+    const v = await voter({ allocations: null });
+    const mine = await connect({ mode: 'passkey', cookie: v.cookie });
+    const other = await connect();
+    await deleteAccount(env, v.id);
+    expect((await mcpTool(mine.token, 'my_work')).res.status).toBe(401);
+    expect((await mcpTool(other.token, 'my_work')).isError).toBe(false);
   });
 
-  it('is retried: a KV failure does not undo the deletion, the marker stays queued, and the hourly pass finishes it (and keeps sweeping for a day)', async () => {
-    const v = await voter({ allocations: null }), u = await linkedUser(v);
-    const id = await cid(u.handle);
-    await env.OAUTH_KV.put(`grant:c${id}:late`, '{}');
-    const failing = makeEnv({ OAUTH_KV: { list: async () => { throw new Error('kv down'); }, delete: async () => {}, put: async () => {} } });
-    const out = await deleteAccount(failing, v.id);
-    expect(out.deleted).toBe(true);                                             // the D1 deletion is authoritative and complete
-    expect(await one('SELECT contributor FROM oauth_purge WHERE contributor = ?1', id)).toEqual({ contributor: id });
-    expect(await kvKeys()).toContain(`grant:c${id}:late`);                      // still there: not claimed to be gone
-    await purgeOAuthState(env);                                                 // the next hourly run
-    expect(await kvKeys()).not.toContain(`grant:c${id}:late`);
-    expect(await one('SELECT contributor FROM oauth_purge WHERE contributor = ?1', id)).toBeTruthy(); // kept a day, to sweep a refresh that raced the deletion
-    await env.OAUTH_KV.put(`grant:c${id}:raced`, '{}');
-    await purgeOAuthState(env, Date.now() + 2 * DAY);
-    expect(await kvKeys()).not.toContain(`grant:c${id}:raced`);
-    expect(await one('SELECT contributor FROM oauth_purge WHERE contributor = ?1', id)).toBeNull();
+  it('the hourly job deletes the dead grants a week later, and nothing is queued or left in KV', async () => {
+    const v = await voter({ allocations: null });
+    const c = await connect({ mode: 'passkey', cookie: v.cookie });
+    const id = await cid((await mcpTool(c.token, 'my_work')).data.handle);
+    await deleteAccount(env, v.id);
+    await purgeOAuth(env);
+    expect(await grantsOf(id)).toHaveLength(1); // kept for a week, so a replayed token still answers invalid_grant
+    await purgeOAuth(env, Date.now() + 8 * DAY);
+    expect(await grantsOf(id)).toEqual([]);
+    expect((await one('SELECT COUNT(*) AS n FROM oauth_tokens')).n).toBe(0);
+    expect((await env.OAUTH_KV.list()).keys).toEqual([]); // the old namespace is not used at all
   });
 
-  it('the policy lists OAuth KV, its lifetimes, and says OAuth stays off until the blockers are closed', async () => {
+  it('the policy lists the OAuth tables and their lifetimes, and the privacy page says OAuth stays off until the review is done', async () => {
     const policy = (await import('../../docs/DATA-POLICY.md?raw')).default, privacy = (await import('../public/privacy-details.html?raw')).default;
-    expect(policy).toMatch(/OAUTH_KV/); expect(policy).toMatch(/30 days/); expect(policy).toMatch(/blocker/i);
+    expect(policy).toMatch(/oauth_grants/); expect(policy).toMatch(/30 days/); expect(policy).toMatch(/review/i);
     const page = privacy.replace(/<[^>]+>/g, ' ');
-    expect(page).toMatch(/Cloudflare KV, outside the main database/); expect(page).toMatch(/30 days for a refresh token/); expect(page).toMatch(/OAuth sign-in is switched off today/);
+    expect(page).toMatch(/main database/); expect(page).toMatch(/30 days for a refresh token/); expect(page).toMatch(/OAuth sign-in is switched off today/);
   });
 });
 
@@ -588,6 +584,6 @@ describe('the docs state the release design', () => {
     const policy = (await import('../../docs/DATA-POLICY.md?raw')).default, arch = (await import('../../docs/ARCHITECTURE.md?raw')).default, run = (await import('../../docs/RUNBOOK.md?raw')).default;
     for (const [name, text, res] of [['policy', policy, [/epsilon = 1/, /52/, /Laplace/, /crypto\.getRandomValues/, /not stored|Nothing exact is stored/, /Threat boundary/, /not a formal differential-privacy guarantee/, /Direct database access is outside this boundary/]],
       ['arch', arch, [/Laplace/, /No page, API response or operator console shows which way any task was routed/, /Direct database access is outside this boundary/, /claim, not proof/]],
-      ['runbook', run, [/Laplace noise/, /yearly privacy budget|52 over a year/, /allowlist/, /oauth_purge|OAUTH_KV/]]]) for (const re of res) expect(text, `${name} ${re}`).toMatch(re);
+      ['runbook', run, [/Laplace noise/, /yearly privacy budget|52 over a year/, /allowlist/, /oauth_grants|oauth_tokens/]]]) for (const re of res) expect(text, `${name} ${re}`).toMatch(re);
   });
 });

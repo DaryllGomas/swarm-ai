@@ -11,8 +11,6 @@ export function makeEnv(over = {}) {
   const e = Object.create(env);
   // defineProperty, not assignment: env may be a proxy whose set trap would write through to the shared env.
   for (const [k, v] of Object.entries({ LIMITER: undefined, AI: undefined, ...over })) Object.defineProperty(e, k, { value: v, enumerable: true });
-  // The OAuth provider stores its helpers here on the env it is given; keep that write on this copy.
-  Object.defineProperty(e, 'OAUTH_PROVIDER', { value: undefined, enumerable: true, writable: true });
   return e;
 }
 
@@ -55,6 +53,8 @@ export async function newUser({ handle, ip = nextIp(), over } = {}) {
 
 export async function resetDb() {
   await env.DB.batch([
+    env.DB.prepare('DELETE FROM oauth_tokens'), env.DB.prepare('DELETE FROM oauth_codes'), env.DB.prepare('DELETE FROM oauth_consents'),
+    env.DB.prepare('DELETE FROM oauth_grants'), env.DB.prepare('DELETE FROM oauth_clients'),
     env.DB.prepare('DELETE FROM account_links'),
     env.DB.prepare('DELETE FROM link_codes'),
     env.DB.prepare('DELETE FROM link_attempts'),

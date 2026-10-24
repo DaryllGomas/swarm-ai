@@ -2,7 +2,8 @@
 // Swarm never publishes into a project; submissions wait for a person to review them.
 import { handleAccount } from './accounts.js';
 import { handleMe } from './me.js';
-import { handleAuthorize, oauthEnabled, providerFor } from './oauth.js';
+import { handleAuthorize, oauthEnabled } from './oauth.js';
+import { handleOAuth, purgeOAuth } from './oauth-core.js';
 import { handleVoting, publishSnapshot } from './voting.js';
 import { expireClaims, publicStatus, publicStatusFilter, weekStats } from './core.js';
 import { adminActivateProject, adminRegisterGithub, handleGithubWebhook } from './github.js';
@@ -11,31 +12,20 @@ import { UNTRUSTED, syncIfStale, syncTasks } from './sync.js';
 import { SECURITY_HEADERS, clean, ipHashFor, isAdmin, iso, isoDay, json, underRateLimit } from './lib.js';
 import { adminHeld, adminPending, adminReview, adminSubmission, adminPublished } from './admin.js';
 import { handleOps } from './ops.js';
-import { creditedAs, forgetNetworks, publicHandle, purgeOAuthState } from './privacy.js';
+import { creditedAs, forgetNetworks, publicHandle } from './privacy.js';
 import { analytics, runWeeklyMaintenance } from './rollup.js';
 import { securityTxt, transparencyJson, transparencyPage, versionInfo } from './trust.js';
 import { normalizeClient, setupGuide } from './setup.js';
 
-// Requests the OAuth provider owns: discovery metadata, registration, the token endpoint, /authorize (through its default
-// handler) and /mcp when it carries an OAuth access token. A request with no Authorization header, or a Swarm contributor key
-// (swk_...), never goes through the provider, so public tools and existing keys work exactly as before.
-function isOAuthRoute(req, url) {
-  const p = url.pathname;
-  if (p === '/authorize' || p.startsWith('/oauth/') || p.startsWith('/.well-known/oauth-')) return true;
-  if (p === '/mcp' || p.startsWith('/mcp/')) return /^Bearer\s+(?!swk_)\S/i.test(req.headers.get('Authorization') || '');
-  return false;
-}
+// Discovery, registration, token and revocation endpoints. /authorize is served by `app` (handleAuthorize) and /mcp by handleMcp.
+const isOAuthPath = (p) => p.startsWith('/oauth/') || p.startsWith('/.well-known/oauth-');
 
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
-    if (oauthEnabled(env) && isOAuthRoute(req, url)) {
+    if (oauthEnabled(env) && isOAuthPath(url.pathname)) {
       try {
-        // Registration and token calls are open to the internet: one burst limit per network, like every other write.
-        // GET /authorize writes a consent transaction to KV, so it is limited too, before anything is written.
-        const limited = (url.pathname.startsWith('/oauth/') && req.method === 'POST') || (url.pathname === '/authorize' && req.method === 'GET');
-        if (limited && !(await underRateLimit(env, await ipHashFor(env, req)))) return json({ error: 'Slow down.' }, 429, { 'Cache-Control': 'no-store' });
-        return await providerFor(env, (r, e, c) => handleMcp(r, e, c), (r, e, c) => app(r, e, c)).fetch(req, env, ctx);
+        return await handleOAuth(req, env);
       } catch (err) {
         console.error(err);
         return json({ error: 'Something went wrong. Try again in a moment.' }, 500);
@@ -49,7 +39,7 @@ export default {
     ctx.waitUntil((async () => {
       // First, and on its own: forgetting must not wait on, or be skipped by, anything else the job does.
       try { await forgetNetworks(env); } catch (err) { console.error('forgetNetworks failed:', String(err?.message || err).slice(0, 300)); }
-      try { await purgeOAuthState(env); } catch (err) { console.error('oauth purge failed:', String(err?.message || err).slice(0, 300)); }
+      try { await purgeOAuth(env); } catch (err) { console.error('oauth purge failed:', String(err?.message || err).slice(0, 300)); }
       await publishSnapshot(env);
       try { await runWeeklyMaintenance(env); } catch (err) { console.error('weekly maintenance failed:', String(err?.message || err).slice(0, 300)); }
       const now = Date.now();

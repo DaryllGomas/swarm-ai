@@ -1,4 +1,4 @@
-// OAuth scope names, which MCP tool each one unlocks, and the MCP authorization challenge. Kept free of the OAuth library so
+// OAuth scope names, which MCP tool each one unlocks, and the MCP authorization challenge. Kept free of the OAuth server code so
 // mcp.js can use it. The scopes are checked on the server for every tool call (see handleMcp), whatever the client showed the user.
 import { rpOrigin } from './accounts.js';
 
@@ -15,8 +15,8 @@ export const SCOPE_TEXT = {
   submit: 'Hand in finished work under your handle (submit_work). A person reviews it; nothing is published automatically.',
 };
 
-// The OAuth provider is on unless OAUTH is set to "off" (a kill switch) or the KV namespace is not bound.
-export const oauthEnabled = (env) => env.OAUTH !== 'off' && !!env.OAUTH_KV;
+// MCP sign-in is on unless OAUTH is set to "off" (the kill switch).
+export const oauthEnabled = (env) => env.OAUTH !== 'off';
 
 export const resourceUrl = (env) => `${rpOrigin(env)}/mcp`;
 export const resourceMetadataUrl = (env) => `${rpOrigin(env)}/.well-known/oauth-protected-resource/mcp`;

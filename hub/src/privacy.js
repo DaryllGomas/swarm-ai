@@ -132,6 +132,7 @@ export async function forgetNetworks(env, now = Date.now()) {
     // Link attempts keep a network hash for an hour of budget; they are deleted well before two days (see the hourly job), and here regardless.
     env.DB.prepare('DELETE FROM link_attempts WHERE ts < ?1').bind(cutoff),
     env.DB.prepare('DELETE FROM network_keys WHERE day < ?1').bind(oldestDay),
+    env.DB.prepare('UPDATE oauth_clients SET network = NULL WHERE network IS NOT NULL AND created < ?1').bind(cutoff),
   ]);
   resetNetworkKeyCache();
   return { claims: res[0].meta.changes, contributors: res[1].meta.changes, accounts: res[2].meta.changes, keys: res[4].meta.changes };
@@ -164,12 +165,12 @@ export async function contributorsOfAccount(env, account) {
 // random ids that point at nobody. Past snapshots are immutable records of totals and are not touched. The contributors it owned become
 // "removed contributor": their handle becomes a random tombstone, their key stops working, their claims lose their network code, and
 // their accepted work stays credited to the project. Events are scrubbed of the handle, and the deletion is recorded with no detail.
-// Their OAuth grants and tokens (outside D1, in OAUTH_KV) are queued in oauth_purge and deleted right after, and again by the hourly
-// job. NOT erased: the content of their submissions and any pull request author name (see docs/DATA-POLICY.md).
+// Their OAuth grants are revoked in the same batch (first statement, before the contributor rows change), so every access and refresh
+// token dies at the same commit as the account; the hourly job deletes the rows later. NOT erased: the content of their submissions and any pull request author name (see docs/DATA-POLICY.md).
 const OWNED = '(owner_account = ?1 OR id IN (SELECT contributor FROM account_links WHERE account = ?1))';
 export async function deleteAccount(env, account, now = Date.now()) {
   const res = await env.DB.batch([
-    env.DB.prepare(`INSERT OR IGNORE INTO oauth_purge (contributor, created) SELECT id, ?2 FROM contributors WHERE ${OWNED}`).bind(account, now),
+    env.DB.prepare(`UPDATE oauth_grants SET revoked_at = ?2, revoked_reason = 'account_deleted' WHERE revoked_at IS NULL AND contributor IN (SELECT id FROM contributors WHERE ${OWNED})`).bind(account, now),
     env.DB.prepare(
       `UPDATE events SET detail = NULL, actor = CASE WHEN actor = (SELECT handle FROM contributors WHERE id = events.contributor) THEN NULL ELSE actor END
        WHERE contributor IN (SELECT id FROM contributors WHERE ${OWNED}) AND type != 'contributor_revoked'`
@@ -190,41 +191,7 @@ export async function deleteAccount(env, account, now = Date.now()) {
     env.DB.prepare("INSERT INTO events (ts, type, actor) SELECT ?1, 'account_deleted', 'system' WHERE changes() > 0").bind(now), // only if the DELETE above removed an account
   ]);
   const deleted = res.at(-2).meta.changes > 0;
-  if (deleted) { try { await purgeOAuthState(env, now); } catch (err) { console.error('oauth purge failed:', String(err?.message || err).slice(0, 200)); } }
   return { deleted, contributors: res[3].meta.changes };
-}
-
-// ---------------------------------------------------------------- OAuth state outside D1
-
-// Delete every key under a KV prefix. Returns true when the prefix is empty afterwards.
-async function deletePrefix(kv, prefix) {
-  let cursor;
-  for (let page = 0; page < 100; page++) {
-    const listed = await kv.list({ prefix, ...(cursor ? { cursor } : {}) });
-    await Promise.all(listed.keys.map((k) => kv.delete(k.name)));
-    if (listed.list_complete) return true;
-    cursor = listed.cursor;
-  }
-  return false;
-}
-
-// OAuth grants and tokens of removed contributors. The OAuth library keeps them in OAUTH_KV as grant:<userId>:<grantId> and
-// token:<userId>:<grantId>:<id> (userId is "c" + the contributor id); a grant is what lets a refresh token mint new access tokens.
-// The authoritative marker is the contributor row (removed = 1: every MCP call refuses it) and the oauth_purge row. This deletes the
-// KV records and is safe to repeat. The queue row stays for a day after a successful pass and the hourly job runs it again, so a
-// token refresh that raced the deletion is swept up too. Without an OAUTH_KV binding nothing can be done and the rows stay queued.
-export async function purgeOAuthState(env, now = Date.now()) {
-  if (!env.OAUTH_KV) return { purged: 0, pending: 0 };
-  const { results } = await env.DB.prepare('SELECT contributor, created FROM oauth_purge ORDER BY created LIMIT 200').all();
-  let purged = 0, pending = 0;
-  for (const r of results) {
-    let ok = false;
-    try { ok = (await deletePrefix(env.OAUTH_KV, `grant:c${r.contributor}:`)) && (await deletePrefix(env.OAUTH_KV, `token:c${r.contributor}:`)); } catch { ok = false; }
-    if (!ok) { pending++; continue; }
-    purged++;
-    if (r.created < now - 86400000) await env.DB.prepare('DELETE FROM oauth_purge WHERE contributor = ?1').bind(r.contributor).run();
-  }
-  return { purged, pending };
 }
 
 // Replace a contributor's handle with a random tombstone. The contributor keeps working with the same key; it is just no longer
