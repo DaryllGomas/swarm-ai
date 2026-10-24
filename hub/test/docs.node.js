@@ -51,9 +51,6 @@ test('the transparency date is a constant in one place', () => {
 
 test('migration files are numbered in order', () => {
   const names = readdirSync(new URL('../migrations/', import.meta.url)).sort();
-  // Numbers strictly increase from 0001. The one allowed gap is 0013, which belongs to another branch (0014_oauth.sql was numbered
-  // around it on purpose; Wrangler applies migrations in filename order, so a gap is harmless).
-  const nums = names.map((n) => Number(n.slice(0, 4)));
-  nums.forEach((n, i) => assert.ok(i === 0 ? n === 1 : n === nums[i - 1] + 1 || (nums[i - 1] === 12 && n === 14), names[i]));
+  names.forEach((n, i) => assert.ok(n.startsWith(String(i + 1).padStart(4, '0') + '_'), n));
   assert.equal(names.at(-1), '0014_oauth.sql');
 });
