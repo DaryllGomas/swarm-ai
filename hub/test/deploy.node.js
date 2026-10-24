@@ -24,7 +24,7 @@ function fixture() {
   git(work, 'checkout', '-q', '-B', 'main'); git(work, 'add', '-A'); git(work, 'commit', '-q', '-m', 'first'); git(work, 'push', '-q', 'origin', 'main');
   mkdirSync(bin);
   // The npm stub can dirty the tree during `npm test` when STUB_DIRTY_FILE is set (a test that changes the tree while it runs).
-  for (const cmd of ['npm', 'npx']) { writeFileSync(path.join(bin, cmd), `#!/bin/sh\necho "${cmd} $*" >> "${log}"\nif [ "$1" = test ] && [ -n "$STUB_DIRTY_FILE" ]; then echo x > "$STUB_DIRTY_FILE"; fi\nif [ -n "$STUB_FAIL_D1_EXECUTE" ] && [ "$2" = d1 ] && [ "$3" = execute ]; then exit 1; fi\n`); chmodSync(path.join(bin, cmd), 0o755); }
+  for (const cmd of ['npm', 'npx']) { writeFileSync(path.join(bin, cmd), `#!/bin/sh\necho "${cmd} $*" >> "${log}"\nif [ "$1" = test ] && [ -n "$STUB_DIRTY_FILE" ]; then echo x > "$STUB_DIRTY_FILE"; fi\nif [ -n "$STUB_FAIL_D1_EXECUTE" ] && [ "$2" = d1 ] && [ "$3" = execute ]; then exit 1; fi\nif [ "$2" = d1 ] && [ "$3" = execute ]; then case "$*" in *sqlite_master*) if [ -n "$STUB_GARBAGE_MASTER" ]; then echo oops; elif [ -n "$STUB_NO_VOTE_TABLE" ]; then echo '[{"results":[],"success":true}]'; else echo '[{"results":[{"name": "vote_snapshots"}],"success":true}]'; fi ;; *ballot_snapshots*) if [ -n "$STUB_FAIL_COUNT" ]; then exit 1; fi ;; esac; fi\n`); chmodSync(path.join(bin, cmd), 0o755); }
   const env = (extra = {}) => ({ ...process.env, ...GIT_ENV, PATH: `${bin}:${process.env.PATH}`, CLOUDFLARE_API_TOKEN: 'test-token-not-real', SWARM_DEPLOY_ALLOW_ORIGIN: origin, ...extra });
   const run = (extra = {}) => spawnSync('bash', [path.join(work, 'hub/scripts/deploy.sh')], { cwd: path.join(work, 'hub'), encoding: 'utf8', env: env(extra) });
   const pass = (args, extra = {}) => spawnSync('bash', [path.join(work, 'hub/scripts/deploy.sh'), ...args], { cwd: path.join(work, 'hub'), encoding: 'utf8', env: env({ SWARM_DEPLOY_ALLOW_ORIGIN: '', ...extra }) });
@@ -159,9 +159,28 @@ test('preflight: a read-only count of ballot-based snapshots runs and is printed
   f = fixture();
   try {
     const r = f.run({ STUB_FAIL_D1_EXECUTE: '1' });
-    assert.notEqual(r.status, 0); assert.match(r.stderr, /preflight .* could not run/);
+    assert.notEqual(r.status, 0); assert.match(r.stderr, /preflight.* could not (check|run)/);
     assert.equal(f.calls().includes('migrations apply'), false); assert.equal(f.calls().includes('wrangler deploy'), false);
   } finally { f.cleanup(); }
+});
+
+test('R7-5: on a database with no vote_snapshots table (fresh, or before migration 0007) the preflight is skipped and the migrations still run; real errors still stop the deploy', () => {
+  let f = fixture();
+  try {
+    const r = f.run({ STUB_NO_VOTE_TABLE: '1' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /No vote_snapshots table yet/);
+    assert.equal(f.calls().includes('ballot_snapshots'), false); // nothing queried the missing table
+    assert.match(f.calls(), /d1 migrations apply/); assert.match(f.calls(), /wrangler deploy/);
+  } finally { f.cleanup(); }
+  for (const extra of [{ STUB_GARBAGE_MASTER: '1' }, { STUB_FAIL_COUNT: '1' }, { STUB_FAIL_D1_EXECUTE: '1', STUB_NO_VOTE_TABLE: '1' }]) {
+    f = fixture();
+    try { // an unreadable answer, a failing count on an existing table, or a failing existence check is never read as "no table"
+      const r = f.run(extra);
+      assert.notEqual(r.status, 0, JSON.stringify(extra)); assert.match(r.stderr, /preflight/);
+      assert.equal(f.calls().includes('migrations apply'), false); assert.equal(f.calls().includes('wrangler deploy'), false);
+    } finally { f.cleanup(); }
+  }
 });
 
 test('H: secret bulk is not on the maintenance allowlist (file and stdin are not inspected), so it cannot set the stamped commit', () => {

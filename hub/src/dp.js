@@ -2,7 +2,7 @@
 //
 // What is released: once a week, after the week's ballots are fixed, the split of effort between projects. One ballot is 100 points
 // spread over the projects, so adding or removing one ballot changes the vector of per-project point totals by at most 100 points in
-// total. Laplace noise of scale 100 / EPSILON is added to every project's total, so one ballot cannot be read back from the split.
+// total. Laplace noise of scale 100 / EPSILON is added to every project's total, so the noise obscures one ballot in the split.
 //
 // What this is NOT: a formal differential-privacy guarantee for the whole release. Around the noised split sit deterministic rules
 // (a week needs at least 5 eligible ballots to publish a result at all, the voter count is shown as a coarse bucket, and a week with no
@@ -14,7 +14,8 @@
 // call; it is never written to the database, a log or a cache.
 //
 // Repeats: each weekly release uses epsilon = 1 for its noise. Under basic composition 52 weekly releases about the same unchanged
-// ballot add up to 52 in the worst case. No tighter figure is claimed. A voter whose ballot stays the same all year is therefore
+// ballot add up to 52 in the worst case. That is an illustration for the idealized add/remove mechanism, not a bound on the complete release
+// (replacing a ballot has sensitivity 200). No tighter figure is claimed. A voter whose ballot stays the same all year is therefore
 // protected much less over a year than in one week.
 
 export const EPSILON = 1;                 // per weekly release
