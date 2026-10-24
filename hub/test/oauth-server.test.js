@@ -595,7 +595,7 @@ describe('refresh tokens: rotation and reuse detection', () => {
     expect((await refreshWith({ client: { client_id: 'unknown-client-id' } }, c.refresh)).res.status).toBe(401);
   });
 
-  it('never widens the scope: a wider scope is refused, and omitting scope returns the grant's scope (narrowing: Codex review 8, finding 2)', async () => {
+  it('never widens the scope: a wider scope is refused, and omitting scope returns the full grant scope (narrowing: Codex review 8, finding 2)', async () => {
     const c = await connect({ grant: ['read', 'work'] });
     const wider = await o('/oauth/token', form({ grant_type: 'refresh_token', refresh_token: c.refresh, client_id: c.client.client_id, scope: 'read work submit' }));
     expect((await wider.json()).error).toBe('invalid_scope');
