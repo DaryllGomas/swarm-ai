@@ -35,7 +35,7 @@ INTAKE = "open"
 # GIT_COMMIT and BUILT_AT are not set here: scripts/deploy.sh injects them at deploy time (--var), and GET /version reports them.
 # MCP sign-in (OAuth) kill switch. "on" (default) or "off". Off: /authorize answers 503, the OAuth endpoints are not served, and
 # /mcp accepts only the existing contributor keys (swk_...). Public tools and bearer keys are unaffected either way.
-OAUTH = "off"
+OAUTH = "on"
 # Cloudflare Access for /ops and /api/ops (app "Swarm AI operator console"). The Worker verifies Access's JWT itself.
 ACCESS_TEAM_DOMAIN = "bigpicsolutions.cloudflareaccess.com"
 ACCESS_AUD = "d3f079ae0a2015ff77b79f30869524ecfe7510e98193b2522954e3a8a98b0db5"
