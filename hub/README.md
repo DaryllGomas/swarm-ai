@@ -15,7 +15,7 @@ For the plan and the architecture, see [`../docs/PLAN.md`](../docs/PLAN.md) and
 - `src/privacy.js`, `src/rollup.js`, `src/pii.js`, `src/trust.js`: privacy and trust (the three choices and credit, the k-anonymity rule, network-hash erasure, delete account and remove handle; the weekly rollup and purge; the personal-details check; `/version`, `security.txt` and the transparency date). See [`../docs/DATA-POLICY.md`](../docs/DATA-POLICY.md).
 - `src/webauthn.js`, `src/accounts.js`, `src/voting.js`: passkey accounts (hand-written WebAuthn on WebCrypto), sessions, ballots, the weekly snapshot and `/api/vote/*`. `src/dp.js`: the Laplace noise the weekly figures are released with.
 - `src/steering.js`, `src/me.js`, `src/identity.js`: Phase 4. Linking a contributor to a voter account (link codes), the ballot that steers `next_task`, the weekly summary, `/api/me`, and contributor creation.
-- `src/oauth.js`, `src/oauth-scopes.js`: MCP sign-in (OAuth 2.1 + PKCE) on `@cloudflare/workers-oauth-provider`, the `/authorize` page, and the `read`/`work`/`submit` scopes.
+- `src/oauth-core.js`, `src/oauth.js`, `src/oauth-scopes.js`: MCP sign-in (Swarm's own OAuth 2.1 server for MCP, on D1: registration, PKCE, codes, rotating refresh tokens with reuse detection, revocation; the `/authorize` page; the `read`/`work`/`submit` scopes).
 - `src/sync.js`: Town Hall task sync. `src/github.js`: the GitHub connector (issues to tasks, pull-request checks, merges wait for a reviewer, webhook, project registration). `src/screen.js`: screening of project text. `src/links.js`: submission link
   pre-screen. `src/setup.js`: the set-up guide text.
 - `public/`: plain HTML, CSS and JS with no build step and no framework. `_headers` holds the CSP (self plus Google
@@ -64,9 +64,9 @@ and tells their AI "Link my Swarm account with code ..."; the AI calls `link_acc
 deficit, over that contributor's own ballot-directed units this week). If none of the ballot's projects has eligible work it falls back to the public split and
 records `public_routed`, unless the voter turned the fallback off. `my_week` returns the weekly recap; Swarm stores no email.
 
-MCP sign-in: `/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server`, `/oauth/register` (dynamic registration), `/oauth/token`, and the `/authorize` page
-(continue as a pseudonymous handle, or sign in with your passkey and link in one step; then grant `read`, `work` and/or `submit`). Needs the `OAUTH_KV` namespace (bound in `wrangler.toml`).
-`OAUTH = "off"` is the kill switch. Contributor keys (`swk_...`) are not OAuth tokens and keep working unchanged. The one new dependency is `@cloudflare/workers-oauth-provider`, pinned to 1.2.3.
+MCP sign-in: `/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server`, `/oauth/register` (dynamic registration), `/oauth/token`, `/oauth/revoke`, and the `/authorize` page
+(continue as a pseudonymous handle, or sign in with your passkey and link in one step; then grant `read`, `work` and/or `submit`). All state is in D1 (migration 0014, `oauth_*` tables). The `OAUTH_KV` binding is no longer used and is safe to delete.
+`OAUTH = "off"` is the kill switch. Contributor keys (`swk_...`) are not OAuth tokens and keep working unchanged. There is no OAuth dependency.
 Locally, set `RP_ORIGIN=http://localhost:8787` so the issuer matches.
 
 ## Deploy (maintainer only)
