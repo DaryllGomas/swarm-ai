@@ -10,7 +10,7 @@
 import { workSuspended } from './suspension.js';
 import { privateJson, session, writeGuard } from './accounts.js';
 import { IdentityError, MAX_PAIRS_PER_NETWORK_PER_DAY, checkHandle, createContributor } from './identity.js';
-import { CONSENT_TTL_MS, CODE_TTL_MS, MAX_LIVE_CONSENTS, SHAPE, getClient, random, secretHash } from './oauth-core.js';
+import { CONSENT_TTL_MS, CODE_TTL_MS, MAX_LIVE_CONSENTS, SHAPE, getClient, random, secretHash, supersedeStmts } from './oauth-core.js';
 import { SCOPES, SCOPE_TEXT, oauthEnabled, resourceUrl } from './oauth-scopes.js';
 import { SECURITY_HEADERS, capHashes, ipHashFor, readJson, underRateLimit } from './lib.js';
 import { syncCredit } from './privacy.js';
@@ -120,6 +120,7 @@ async function showConsent(req, env) {
   try { const u = new URL(redirect); host = u.host; loopback = u.protocol === 'http:'; } catch { /* validated at registration */ }
   const data = {
     consent: handle,
+    expires_in_ms: CONSENT_TTL_MS,
     client: { name: client.name, domain: null, redirect_host: host, loopback },
     scopes: SCOPES.map((id) => ({ id, text: SCOPE_TEXT[id], requested: asked.length === 0 || asked.includes(id), required: id === 'read' })),
   };
@@ -212,6 +213,8 @@ async function decide(req, env) {
        SELECT ?1, ?2, redirect_uri, challenge, ?3 FROM oauth_consents WHERE hash = ?4 AND consumer = ?5
          AND EXISTS (SELECT 1 FROM oauth_grants WHERE id = ?2)`
     ).bind(await secretHash(env, 'code', code), grantId, t + CODE_TTL_MS, consentHash, marker),
+    // Same app, same contributor: the older live grants (and their tokens) are cancelled in this batch.
+    ...supersedeStmts(env, grantId, t),
   ]);
   // Both statements ran in one transaction, so a refusal (the account or contributor went away mid-consent) leaves nothing behind.
   if (res[0].meta.changes !== 1 || res[1].meta.changes !== 1) return privateJson({ error: 'Could not finish the connection. Your account may have changed; start it again.' }, 409);

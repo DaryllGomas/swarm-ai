@@ -7,6 +7,10 @@
   const encode = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const decode = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
   const say = (t) => { msg.textContent = t; };
+  // The page is a 10 minute transaction. The server says how long this one has (milliseconds from now); the page counts down on its own
+  // clock from the moment it loaded, so a wrong device clock cannot change it. The server stays the authority: it refuses an expired page.
+  const loadedAt = Date.now(), deadline = loadedAt + (Number(data.expires_in_ms) || 600000);
+  let expired = false;
   function el(tag, cls, text) { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
   async function api(path, method, body) {
     const res = await fetch(path, { method: method || 'GET', credentials: 'same-origin', headers: { Accept: 'application/json', ...(method && method !== 'GET' ? { 'Content-Type': 'application/json', 'X-Swarm': '1' } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
@@ -16,8 +20,8 @@
   }
   function go(url) {
     // The server built this URL from the client's registered redirect URI. Refuse anything that could run script.
-    if (!/^[a-z][a-z0-9+.-]*:/i.test(url) || /^(javascript|data|vbscript):/i.test(url)) { say('The app sent an address this page will not open. Nothing was connected.'); return; }
-    say('Connected. Going back to the app…'); window.location.assign(url);
+    if (typeof url !== 'string' || !/^[a-z][a-z0-9+.-]*:/i.test(url) || /^(javascript|data|vbscript):/i.test(url)) { fail('The app sent an address this page will not open. Nothing was connected.'); return; }
+    clearInterval(timer); say('Connected. Going back to the app…'); window.location.assign(url);
   }
 
   let signedIn = false, mode = 'handle';
@@ -59,8 +63,11 @@
   const perm = el('div', 'panel-card');
   perm.appendChild(el('h2', null, 'What may it do?'));
   data.scopes.forEach((s) => {
-    const row = el('label', 'scope'), box = el('input'); box.type = 'checkbox'; box.value = s.id; box.checked = s.requested || s.required; box.disabled = s.required;
+    // A scope the app did not ask for is shown but cannot be ticked: the server never grants more than was asked.
+    const unasked = !s.requested && !s.required;
+    const row = el('label', unasked ? 'scope off' : 'scope'), box = el('input'); box.type = 'checkbox'; box.value = s.id; box.checked = !unasked; box.disabled = s.required || unasked;
     const text = el('span'); text.appendChild(el('strong', null, s.id)); text.appendChild(el('small', null, s.text));
+    if (unasked) text.appendChild(el('small', 'unasked', 'Your app didn\'t ask for this yet. If it needs it later, it will ask and you\'ll see this page again.'));
     row.appendChild(box); row.appendChild(text); perm.appendChild(row); scopeBoxes.push(box);
   });
   perm.appendChild(el('p', 'quiet', 'Swarm checks these on every call, not just here. A person reviews everything your AI hands in; nothing is published automatically.'));
@@ -71,7 +78,34 @@
   const deny = el('button', 'btn btn-outline', 'Deny'); deny.type = 'button';
   actions.appendChild(allow); actions.appendChild(deny); root.appendChild(actions);
 
-  function refresh() { mode = rPass.checked ? 'passkey' : 'handle'; allow.disabled = mode === 'passkey' && !signedIn; }
+  // Always visible, right under the buttons: when the page expires, what that means, and any error from a click.
+  const clock = el('p', 'quiet expiry'), clockText = el('span'), announce = el('span', 'sr-only');
+  announce.setAttribute('role', 'status'); announce.setAttribute('aria-live', 'polite');
+  clock.appendChild(clockText); clock.appendChild(announce); root.appendChild(clock);
+  const problem = el('p', 'warn'); problem.setAttribute('role', 'alert'); problem.tabIndex = -1; problem.hidden = true; root.appendChild(problem);
+  // An error goes next to the buttons, and the person is taken to it (they may be far below the top of the page).
+  function fail(text) {
+    problem.textContent = text; problem.hidden = false;
+    try { problem.focus({ preventScroll: true }); problem.scrollIntoView({ block: 'center' }); } catch (e) { /* older browsers: the alert still reads out */ }
+  }
+  const GONE = 'This page has expired. Go back to your AI app and click Connect again.';
+  function expire() {
+    if (expired) return;
+    expired = true; allow.disabled = true; deny.disabled = true;
+    clockText.textContent = GONE; announce.textContent = 'This page has expired.';
+    fail(GONE);
+    clearInterval(timer);
+  }
+  let announcedMinute = false;
+  function tick() {
+    const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    if (left === 0) { expire(); return; }
+    clockText.textContent = 'This page expires in ' + Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') + '. If it does, start the connection again from your app.';
+    if (left <= 60 && !announcedMinute) { announcedMinute = true; announce.textContent = 'This page expires in 1 minute.'; }
+  }
+  const timer = setInterval(tick, 1000);
+
+  function refresh() { mode = rPass.checked ? 'passkey' : 'handle'; allow.disabled = expired || (mode === 'passkey' && !signedIn); }
   [rHandle, rPass].forEach((r) => r.addEventListener('change', refresh));
   async function account() {
     try {
@@ -94,10 +128,12 @@
       const response = { clientDataJSON: encode(credential.response.clientDataJSON), authenticatorData: encode(credential.response.authenticatorData), signature: encode(credential.response.signature), userHandle: credential.response.userHandle ? encode(credential.response.userHandle) : null };
       await api('/api/account/login/verify', 'POST', { id: credential.id, rawId: encode(credential.rawId), type: credential.type, response });
       say(''); rPass.checked = true; await account();
-    } catch (err) { say(err.name === 'NotAllowedError' ? 'Passkey request cancelled or timed out. You can try again.' : err.message); }
+    } catch (err) { say(''); passState.textContent = ' ' + (err.name === 'NotAllowedError' ? 'Passkey request cancelled or timed out. You can try again.' : err.message); }
     finally { loginBtn.disabled = false; }
   });
   async function decide(decision) {
+    if (Date.now() >= deadline) { expire(); return; } // a background tab can hold its timer back; check on the click as well
+    problem.hidden = true;
     allow.disabled = true; deny.disabled = true;
     try {
       const body = { consent: data.consent, decision };
@@ -107,9 +143,9 @@
       }
       const out = await api('/authorize', 'POST', body);
       go(out.redirect_to);
-    } catch (err) { say(err.message); deny.disabled = false; refresh(); }
+    } catch (err) { if (!expired) deny.disabled = false; refresh(); fail(err.message); }
   }
   allow.addEventListener('click', () => decide('approve'));
   deny.addEventListener('click', () => decide('deny'));
-  refresh(); account();
+  tick(); refresh(); account();
 })();

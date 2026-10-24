@@ -12,12 +12,25 @@ export async function handleMe(req, env, path) {
     if (req.method !== 'GET') return privateJson({ error: 'Use GET.' }, 405);
     return meView(req, env);
   }
-  if (!['/api/me/link-code', '/api/me/unlink', '/api/me/fallback', '/api/me/privacy', '/api/me/delete', '/api/me/remove-handle'].includes(path)) return privateJson({ error: 'not found' }, 404);
+  if (path === '/api/me/apps') {
+    if (req.method !== 'GET') return privateJson({ error: 'Use GET.' }, 405);
+    const a = await session(req, env);
+    if (!a) return privateJson({ signed_in: false, apps: [] });
+    return privateJson({ signed_in: true, apps: await connectedApps(env, a.id), note: APPS_NOTE });
+  }
+  if (!['/api/me/apps/disconnect', '/api/me/link-code', '/api/me/unlink', '/api/me/fallback', '/api/me/privacy', '/api/me/delete', '/api/me/remove-handle'].includes(path)) return privateJson({ error: 'not found' }, 404);
   if (req.method !== 'POST') return privateJson({ error: 'Use POST.' }, 405);
   const guard = await writeGuard(req, env); if (guard) return guard;
   const a = await session(req, env);
   if (!a) return privateJson({ error: 'Sign in first.' }, 401);
 
+  if (path === '/api/me/apps/disconnect') {
+    const b = await readJson(req, 512);
+    if (!b || typeof b.grant !== 'string' || !/^[A-Za-z0-9_-]{24}$/.test(b.grant)) return privateJson({ error: 'Send {"grant": "<id from the list>"}.' }, 400);
+    return (await disconnectApp(env, a.id, b.grant))
+      ? privateJson({ disconnected: true, apps: await connectedApps(env, a.id) })
+      : privateJson({ error: 'That connection was not found. It may already be disconnected.' }, 404);
+  }
   if (path === '/api/me/link-code') {
     const made = await createLinkCode(env, a.id);
     return privateJson({ ...made, note: 'Tell your AI: "Link my Swarm account with code ' + made.code + '". It works once and expires in 10 minutes. Creating a new code cancels this one.' });
@@ -50,6 +63,34 @@ export async function handleMe(req, env, path) {
   if (!body || typeof body.enabled !== 'boolean') return privateJson({ error: 'Send {"enabled": true} or {"enabled": false}.' }, 400);
   await env.DB.prepare('UPDATE accounts SET fallback = ?2 WHERE id = ?1 AND suspended = 0').bind(a.id, body.enabled ? 1 : 0).run();
   return privateJson({ fallback: body.enabled });
+}
+
+// ---- Connected apps (OAuth grants). Only this account's own: grants of contributors it owns or is linked to. Nothing about networks.
+const APPS_NOTE = 'Disconnecting in your AI app may not tell Swarm. Disconnect here to be sure.';
+const OWNED = '(owner_account = ?1 OR id IN (SELECT contributor FROM account_links WHERE account = ?1))';
+
+// A live grant has a refresh token that is unrotated, unrevoked and unexpired, and a contributor that has not been removed.
+// Every app that registers itself is unverified: Swarm has no way to check who published it. Swarm does not record when a token
+// was last used, so there is no "last used".
+async function connectedApps(env, account, now = Date.now()) {
+  const { results } = await env.DB.prepare(
+    `SELECT g.id, g.scope, g.created, cl.name, c.handle
+     FROM oauth_grants g JOIN oauth_clients cl ON cl.id = g.client JOIN contributors c ON c.id = g.contributor
+     WHERE g.revoked_at IS NULL AND c.removed = 0 AND g.contributor IN (SELECT id FROM contributors WHERE ${OWNED})
+       AND EXISTS (SELECT 1 FROM oauth_tokens t WHERE t.grant_id = g.id AND t.kind = 'refresh' AND t.rotated_at IS NULL AND t.revoked_at IS NULL AND t.expires > ?2)
+     ORDER BY g.created DESC LIMIT 50`
+  ).bind(account, now).all();
+  return results.map((r) => ({ id: r.id, name: r.name, verified: false, handle: r.handle, scopes: r.scope.split(' '), connected_at: new Date(r.created).toISOString() }));
+}
+
+// Revoke one grant and all its tokens in one batch. Ownership is checked inside the statements, at commit time.
+async function disconnectApp(env, account, grantId, now = Date.now()) {
+  const mine = `grant_id = ?2 AND grant_id IN (SELECT g.id FROM oauth_grants g WHERE g.id = ?2 AND g.contributor IN (SELECT id FROM contributors WHERE ${OWNED}))`;
+  const res = await env.DB.batch([
+    env.DB.prepare(`UPDATE oauth_tokens SET revoked_at = ?3, retry_blob = NULL WHERE revoked_at IS NULL AND ${mine}`).bind(account, grantId, now),
+    env.DB.prepare(`UPDATE oauth_grants SET revoked_at = ?3, revoked_reason = 'revoked' WHERE id = ?2 AND revoked_at IS NULL AND contributor IN (SELECT id FROM contributors WHERE ${OWNED})`).bind(account, grantId, now),
+  ]);
+  return res[1].meta.changes === 1;
 }
 
 async function meView(req, env) {

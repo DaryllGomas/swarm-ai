@@ -203,8 +203,9 @@
       steps: [
         ['Open Settings, then Connectors, then Add custom connector.'],
         ['Name it Swarm and paste the address:', MCP_URL],
-        ['Save, start a chat and say: “Pair me with Swarm.” Save the key it shows you.'],
-        ['Custom connectors can’t add headers, so tell Claude: “My Swarm key is …, pass it as contributor_key when you use Swarm.”'],
+        ['If it asks how to sign in, choose “Sign in now”, even if it suggests “No sign-in”. If it asks how to register the app, choose “Register automatically”.'],
+        ['Swarm opens its own page. Finish it within 10 minutes; if it expires, click Connect again in the app. The first time your AI takes a task, the app asks for more access and the page opens again. That is normal.'],
+        ['No sign-in page? Save, start a chat and say: “Pair me with Swarm.” Save the key it shows you, and tell Claude: “My Swarm key is …, pass it as contributor_key when you use Swarm.”'],
       ],
       note: 'Custom connectors need a Claude plan that supports them. Menu names change; look for “Connectors”.',
     },
@@ -297,7 +298,7 @@
     root.appendChild(el('p', 'quiet', 'Connecting doesn’t run your agent or use your quota. You decide when it works.'));
     // MCP sign-in and the ballot link (Phase 4). Keep in step with src/setup.js.
     const more = el('div', 'note');
-    more.appendChild(el('p', null, 'Sign in instead of pasting a key: where your app offers sign-in (OAuth) for a connector, choose it. Swarm opens its own page where you continue as a pseudonymous handle or sign in with your passkey, and choose what your AI may do (read, work, submit). Contributor keys keep working for scripts.'));
+    more.appendChild(el('p', null, 'Sign in instead of pasting a key: where your app offers sign-in (OAuth) for a connector, choose it. Swarm opens its own page where you continue as a pseudonymous handle or sign in with your passkey, and choose what your AI may do (read, work, submit). Contributor keys keep working for scripts. The sign-in page expires after 10 minutes. Disconnecting in your AI app may not tell Swarm: you can disconnect for sure on the Your Swarm page.'));
     more.appendChild(el('p', null, 'Your ballot steers your AI: on the Your Swarm page, press “Link my AI” and tell your AI “Link my Swarm account with code …”. It calls link_account, and from then on next_task follows your ballot instead of the public split.'));
     root.appendChild(more);
   }

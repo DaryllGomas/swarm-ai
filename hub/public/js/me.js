@@ -105,6 +105,28 @@
     }
   }
 
+  // Connected apps: the live sign-in grants of this account's own AIs, each with a Disconnect that cancels the grant and its tokens.
+  function apps(list) {
+    const ul = $('apps-body'); S.clear(ul);
+    if (!list.length) { ul.appendChild(S.el('li', null, 'No apps are connected with sign-in.')); return; }
+    list.forEach((g) => {
+      const li = S.el('li');
+      li.appendChild(S.el('strong', null, g.name));
+      li.appendChild(S.el('small', null, (g.verified ? 'Verified' : 'Unverified: this app registered itself, so Swarm cannot check who made it') + ' · for @' + g.handle));
+      li.appendChild(S.el('small', null, 'May: ' + g.scopes.join(', ') + ' · connected ' + S.fmtDate(g.connected_at)));
+      const b = S.el('button', 'btn btn-outline btn-sm', 'Disconnect'); b.type = 'button';
+      b.setAttribute('aria-label', 'Disconnect ' + g.name);
+      b.addEventListener('click', async () => {
+        b.disabled = true;
+        try { const r = await api('/api/me/apps/disconnect', 'POST', { grant: g.id }); apps(r.apps); message(g.name + ' is disconnected. It can no longer use Swarm until you connect it again.'); }
+        catch (err) { message(err.message); try { await loadApps(); } catch (e) { /* the message above stands */ } }
+      });
+      li.appendChild(b);
+      ul.appendChild(li);
+    });
+  }
+  async function loadApps() { const r = await api('/api/me/apps'); apps(r.apps || []); if (r.note) $('apps-note').textContent = r.note; }
+
   let choices = null;
   function privacy(me) {
     const host = $('privacy-host');
@@ -128,6 +150,7 @@
     if (!me.signed_in) return;
     $('me-account').textContent = 'Voter ' + me.account_id_short + '. Your account is a passkey; Swarm stores no email.';
     link(me); week(me); effort(me); receipts(me); privacy(me); ballot(me);
+    loadApps().catch(() => { S.clear($('apps-body')); $('apps-body').appendChild(S.el('li', null, 'Connected apps could not load. Reload the page to try again.')); });
   }
   async function load() { const me = await api('/api/me'); render(me); return me; }
 
