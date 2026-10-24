@@ -97,6 +97,8 @@ async function revoke(env, body, who) {
     env.DB.prepare('UPDATE contributors SET key_hash = ?2 WHERE id = ?1').bind(body.contributor_id, hash),
     env.DB.prepare(`INSERT INTO events (ts, type, contributor, actor) SELECT ?3, 'contributor_revoked', id, ?4
       FROM contributors WHERE id = ?1 AND key_hash = ?2`).bind(body.contributor_id, hash, Date.now(), who.email),
+    // The contributor's OAuth connections die in the same transaction: every token is only as good as its grant.
+    env.DB.prepare("UPDATE oauth_grants SET revoked_at = ?2, revoked_reason = 'operator_revoked' WHERE contributor = ?1 AND revoked_at IS NULL").bind(body.contributor_id, Date.now()),
   ]);
   return result[0].meta.changes ? json({ ok: true }) : notFound();
 }

@@ -16,7 +16,9 @@ database_name = "swarm-ai"
 database_id = "c678de31-f2dd-4329-b484-660a06caa864"
 migrations_dir = "migrations"
 
-# OAuth state (clients, grants, tokens; only hashes of secrets) for MCP sign-in. The namespace already exists.
+# UNUSED since migration 0014: MCP sign-in (OAuth) now keeps all its state in D1 (oauth_* tables). This binding is left in place only
+# because the namespace already exists; no code reads or writes it. Once the OAuth release is live, the binding and the namespace are
+# safe to delete (remove these three lines, then `wrangler kv namespace delete`).
 [[kv_namespaces]]
 binding = "OAUTH_KV"
 id = "cebbf26e68f844afb4470b5f828abe60"

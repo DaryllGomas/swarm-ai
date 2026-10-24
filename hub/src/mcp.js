@@ -5,6 +5,7 @@ import {
 } from './core.js';
 import { IdentityError, createContributor, keyHash } from './identity.js';
 import { SCOPES, SCOPE_FOR_TOOL, oauthChallenge, oauthEnabled } from './oauth-scopes.js';
+import { resolveAccessToken } from './oauth-core.js';
 import { pickByDeficit, recapLines, redeemLinkCode, steeringFor, weekSummary, linkOfContributor } from './steering.js';
 import { PrError, checkPrSubmission } from './github.js';
 import { syncIfStale, UNTRUSTED } from './sync.js';
@@ -65,6 +66,7 @@ class CapError extends ToolError {} // a claim cap was hit: retrying another tas
 // No credentials at all on a tool that needs them. With OAuth on, this is an HTTP 401 carrying the MCP authorization challenge,
 // so a client that can sign in starts doing so; a bad key stays a plain tool error.
 class AuthRequired extends ToolError {}
+class GrantRevoked extends ToolError {} // the OAuth grant was revoked after the request began: a 401, like any other dead token
 
 const KEY_PROP = { contributor_key: { type: 'string', maxLength: 64, description: 'Fallback only. Prefer an `Authorization: Bearer <key>` header in your client config: arguments end up in chat logs. Use this only if your client cannot set headers.' } };
 const READONLY = (title) => ({ title, readOnlyHint: true, openWorldHint: false });
@@ -238,6 +240,16 @@ export async function handleMcp(req, env, ctx) {
   if (!env.HASH_SALT) return rpcError(null, -32603, 'Server is not configured', 500);
   const ipHash = await ipHashFor(env, req);
   if (!(await underRateLimit(env, ipHash))) return rpcError(null, -32000, 'Slow down a little and try again in a minute.', 429);
+  // An OAuth access token (anything after Bearer that is not a swk_ contributor key) is checked before the message is even read: expired,
+  // revoked, unknown and wrong-audience tokens all get the same 401 and the challenge that starts sign-in again.
+  let oauth = null;
+  if (oauthEnabled(env)) {
+    const m = (req.headers.get('Authorization') || '').match(/^Bearer\s+(?!swk_)(\S+)\s*$/i);
+    if (m) {
+      oauth = await resolveAccessToken(env, m[1]);
+      if (!oauth) return json({ error: 'invalid_token', error_description: 'The access token is expired, revoked or not valid. Sign in again.' }, 401, { ...CORS, 'WWW-Authenticate': oauthChallenge(env, { error: 'invalid_token' }) });
+    }
+  }
   if (Number(req.headers.get('Content-Length') || 0) > MAX_MCP_BODY_BYTES) return rpcError(null, -32600, 'Request too large (64 KB limit)', 413);
   const { body: msg, tooLarge } = await readJsonResult(req, MAX_MCP_BODY_BYTES, true);
   if (tooLarge) return rpcError(null, -32600, 'Request too large (64 KB limit)', 413);
@@ -273,8 +285,7 @@ export async function handleMcp(req, env, ctx) {
         const invalid = validateArgs(SCHEMAS[name], args);
         if (invalid) return rpcError(id, -32602, `Invalid arguments for ${name}: ${invalid}`);
         try {
-          // An OAuth access token (verified by the provider before this runs) names a contributor and the scopes it was granted.
-          const oauth = ctx?.auth && Number.isInteger(ctx?.props?.contributor) ? { contributor: ctx.props.contributor, scope: [...(ctx.auth.scope || [])] } : null;
+          // `oauth` (resolved above) names the contributor, the scopes and the grant behind the access token.
           const c = { env, ctx, req, ipHash, args, oauth };
           if (env.INTAKE === 'paused' && INTAKE_TOOLS.has(name)) throw new ToolError(PAUSED_MESSAGE);
           if (!PUBLIC_TOOLS.has(name)) {
@@ -293,6 +304,7 @@ export async function handleMcp(req, env, ctx) {
           const result = await handler(c);
           return rpc(id, { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], structuredContent: result });
         } catch (err) {
+          if (err instanceof GrantRevoked) return rpcError(id, -32001, err.message, 401, { 'WWW-Authenticate': oauthChallenge(env, { error: 'invalid_token' }) });
           if (err instanceof AuthRequired && oauthEnabled(env)) return rpcError(id, -32001, err.message, 401, { 'WWW-Authenticate': oauthChallenge(env, { scope: ['read'] }) });
           if (!(err instanceof ToolError)) throw err;
           return rpc(id, { content: [{ type: 'text', text: err.message }], isError: true });
@@ -314,8 +326,12 @@ const rpcError = (id, code, message, status = 200, headers = {}) => json({ jsonr
 
 async function authenticate({ env, req, args, oauth }) {
   if (oauth) {
-    const who = await env.DB.prepare('SELECT id, handle, credit FROM contributors WHERE id = ?1 AND removed = 0').bind(oauth.contributor).first();
-    if (!who) throw new ToolError('This connection no longer matches a contributor. Reconnect Swarm.');
+    // Checked again here, in the same statement that loads the contributor: a revoke that landed since the token was resolved stops this call.
+    const who = await env.DB.prepare(
+      `SELECT id, handle, credit FROM contributors WHERE id = ?1 AND removed = 0
+       AND EXISTS (SELECT 1 FROM oauth_grants WHERE id = ?2 AND revoked_at IS NULL)`
+    ).bind(oauth.contributor, oauth.grant).first();
+    if (!who) throw new GrantRevoked('This connection was revoked or no longer matches a contributor. Sign in again.');
     // An operator's revoke replaces the key hash and records an event; a connection has no key to replace, so it checks the event.
     if (await env.DB.prepare("SELECT 1 AS n FROM events WHERE contributor = ?1 AND type = 'contributor_revoked' LIMIT 1").bind(who.id).first()) throw new ToolError('This contributor was revoked by an operator.');
     return who;

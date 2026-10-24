@@ -1,7 +1,7 @@
 // Regressions for Codex's fourth security review (2026-10-20): contributor ownership versus the steering link (finding 1),
 // atomic link-code attempt reservation (finding 5) and the network limit on GET /authorize (finding 6). Finding 4 (an unrelated
-// merged pull request) is in github.test.js. Findings 2 and 3 are inside @cloudflare/workers-oauth-provider and are recorded as
-// blockers for turning OAuth on in docs/PLAN.md.
+// merged pull request) is in github.test.js. Findings 2 and 3 were inside @cloudflare/workers-oauth-provider; they are fixed by Swarm's own OAuth
+// server and tested in oauth-server.test.js.
 import { beforeEach, describe, expect, it } from 'vitest';
 import { env } from 'cloudflare:workers';
 import { BODY, SOURCE, addTask, newUser, nextIp, resetDb } from './helpers.js';
@@ -173,8 +173,8 @@ describe('finding 5: link-code attempts are reserved atomically', () => {
   });
 });
 
-describe('finding 6: GET /authorize is network rate limited before any KV write', () => {
-  const kvKeys = async () => (await env.OAUTH_KV.list()).keys.length;
+describe('finding 6: GET /authorize is network rate limited before any write', () => {
+  const kvKeys = async () => (await env.DB.prepare('SELECT COUNT(*) AS n FROM oauth_consents').first()).n;
 
   it('returns 429 and writes nothing when the limiter refuses', async () => {
     const { data: client } = await registerClient();
