@@ -163,14 +163,14 @@ describe('operator writes', () => {
   });
   it('requires exact Origin and CSRF header on every mutation; accepts configured local origins', async () => {
     const a = await accessFixture();
-    for (const path of ['review', 'sync', 'project', 'revoke']) {
+    for (const path of ['review', 'sync', 'project', 'revoke', 'suspend', 'unsuspend']) {
       for (const headers of [{ Origin: '' }, { Origin: 'https://evil.example' }, { Origin: 'null' }, { Origin: 'https://swarm.bigpicsolutions.com.evil.example' }, { 'X-Swarm-Ops': '' }]) expect((await a.post(path, {}, {}, headers)).status).toBe(404);
     }
     expect((await a.post('project', { id: 'town-hall', paused: false, max_pending: 5 }, { OPS_ALLOWED_ORIGINS: 'http://localhost:8787' }, { Origin: 'http://localhost:8787' })).status).toBe(200);
   });
   it('bounds every write body and rejects malformed JSON/content types', async () => {
     const a = await accessFixture();
-    for (const path of ['review', 'sync', 'project', 'revoke']) {
+    for (const path of ['review', 'sync', 'project', 'revoke', 'suspend', 'unsuspend']) {
       expect((await a.post(path, { text: 'x'.repeat(5000) })).status).toBe(413);
       expect((await a.post(path, [], {})).status).toBe(400);
       expect((await a.post(path, {}, {}, { 'Content-Type': 'text/plain' })).status).toBe(400);

@@ -29,6 +29,7 @@ function fixtures() {
     held: { held: [{ id: 3, title: hostile, project: 'town-hall', status: 'held', held_reason: 'screen', brief: hostile }] },
     projects: { projects: [{ id: 'town-hall', name: 'Town Hall', pending: 1, reviewer: 'Example reviewer', active: 1, paused: 0, max_pending: 10, sync_supported: true }] },
     audit: { events: [{ id: 8, ts: 1, type: 'example-event', contributor: 5, detail: hostile }], next_before: 8, signals: { pairings_near_cap: [], claim_churn_24h: [{ contributor_id: 5, handle: 'Example helper', claims: 1, releases: 0, expires: 0 }], rejected_ratios_all_time: [], link_flagged: [] } },
+    suspensions: { suspensions: [{ ref: 'abcd1234', scope: 'all', since: 5, reason: hostile }] },
   };
 }
 async function page() {
@@ -109,4 +110,30 @@ test('public receipts name a contributor only when the server sends a handle, an
   assert.ok(host.textContent.includes('@proud-one'));
   window.Swarm.renderReceipts(host, { receipts: [{ ...base, handle: null, credited_as: 'removed contributor' }] });
   assert.ok(host.textContent.includes('removed contributor'));
+});
+
+test('console suspends by account id or contributor with the chosen scope, requires a reason, lists suspensions by handle and lifts them', async () => {
+  const p = await page();
+  const buttons = all(p.nodes['suspend-form']).filter((n) => n.tag === 'button');
+  assert.deepEqual(buttons.map((b) => b.textContent), ['Suspend voting and AI work', 'Suspend voting only']);
+  assert.match(buttons[0].attrs.class, /^btn btn-sm$/); // primary
+  const [account, select, idInput, reason] = ['input', 'select', 'input', 'textarea'].map((t, i) => all(p.nodes['suspend-form']).filter((n) => n.tag === t)[t === 'input' && i === 2 ? 1 : 0]);
+  const before = p.calls.length;
+  await buttons[0].click(); // nothing typed: refused locally, nothing sent
+  assert.equal(p.calls.length, before);
+  account.value = 'abcdefgh1234'; account.listeners.input(); await buttons[0].click();
+  assert.equal(p.calls.length, before); // no reason: nothing sent
+  reason.value = 'Repeated abuse signals'; reason.listeners.input();
+  await p.nodes['suspend-form'].children.length; await all(p.nodes['suspend-form']).filter((n) => n.tag === 'button')[1].click();
+  const post = p.calls.find((c) => c.url === '/api/ops/suspend');
+  assert.deepEqual(JSON.parse(post.opts.body), { scope: 'vote', reason: 'Repeated abuse signals', account: 'abcdefgh1234' });
+  assert.equal(post.opts.headers['X-Swarm-Ops'], '1');
+  // The list shows the handle, the scope and the written reason as text, never an account.
+  const text = p.nodes['suspension-data'].textContent;
+  assert.ok(text.includes('abcd1234') && text.includes('Voting and AI work') && text.includes(hostile));
+  const lift = all(p.nodes['suspension-data']).find((n) => n.tag === 'button' && n.textContent === 'Unsuspend');
+  const input = all(p.nodes['suspension-data']).find((n) => n.tag === 'input');
+  const n = p.calls.length; await lift.click(); assert.equal(p.calls.length, n); // reason required
+  input.value = 'Appeal upheld'; await lift.click();
+  assert.deepEqual(JSON.parse(p.calls.find((c) => c.url === '/api/ops/unsuspend').opts.body), { ref: 'abcd1234', reason: 'Appeal upheld' });
 });

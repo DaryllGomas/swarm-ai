@@ -10,6 +10,7 @@
 //   - revocation is `oauth_grants.revoked_at`, and a token is only valid while its grant is (checked in the same SQL that issues it
 //     and in the same SQL that resolves it), so a request that started before a revoke can never produce a usable token after it.
 // Secrets are never stored: codes and tokens are kept as salted SHA-256 hashes (they are 256-bit random values, so no slow hash is needed).
+import { workSuspended } from './suspension.js';
 import { privateJson, rpOrigin } from './accounts.js';
 import { b64url } from './identity.js';
 import { SCOPES, resourceUrl } from './oauth-scopes.js';
@@ -182,7 +183,7 @@ export function revokeGrantStmts(env, grantId, reason, now = Date.now()) {
 const revokeGrant = (env, grantId, reason, now) => env.DB.batch(revokeGrantStmts(env, grantId, reason, now));
 
 // The grant is live: not revoked, and its contributor not removed. Used inside the statements that issue tokens.
-const GRANT_LIVE = `EXISTS (SELECT 1 FROM oauth_grants g JOIN contributors c ON c.id = g.contributor WHERE g.id = %GRANT% AND g.revoked_at IS NULL AND c.removed = 0)`;
+const GRANT_LIVE = `EXISTS (SELECT 1 FROM oauth_grants g JOIN contributors c ON c.id = g.contributor WHERE g.id = %GRANT% AND g.revoked_at IS NULL AND c.removed = 0 AND NOT ${workSuspended('c.id')})`;
 const grantLive = (col) => GRANT_LIVE.replace('%GRANT%', col);
 
 const tokenBody = (access, refresh, scope, expiresIn) => ({ access_token: access, token_type: 'bearer', expires_in: Math.max(1, Math.floor(expiresIn / 1000)), refresh_token: refresh, scope });
@@ -336,12 +337,12 @@ export async function revokeEndpoint(req, env, now = Date.now()) {
 export async function resolveAccessToken(env, raw, now = Date.now()) {
   if (typeof raw !== 'string' || !SHAPE.access.test(raw)) return null;
   const row = await env.DB.prepare(
-    `SELECT g.id AS grant_id, g.contributor, COALESCE(t.scope, g.scope) AS scope, g.client
+    `SELECT g.id AS grant_id, g.contributor, COALESCE(t.scope, g.scope) AS scope, g.client, ${workSuspended('c.id')} AS work_suspended
      FROM oauth_tokens t JOIN oauth_grants g ON g.id = t.grant_id JOIN contributors c ON c.id = g.contributor
      WHERE t.hash = ?1 AND t.kind = 'access' AND t.revoked_at IS NULL AND t.expires > ?2
        AND g.revoked_at IS NULL AND g.resource = ?3 AND c.removed = 0`
   ).bind(await secretHash(env, 'token', raw), now, resourceUrl(env)).first();
-  return row ? { contributor: row.contributor, scope: row.scope.split(' '), grant: row.grant_id, client: row.client } : null;
+  return row ? { contributor: row.contributor, scope: row.scope.split(' '), grant: row.grant_id, client: row.client, work_suspended: !!row.work_suspended } : null;
 }
 
 // ---------------------------------------------------------------- upkeep (hourly)
