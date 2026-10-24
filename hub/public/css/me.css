@@ -31,6 +31,11 @@
 .authorize .scope { display: flex; gap: .6rem; margin: .5rem 0; color: #1a2033; }
 .authorize .scope input { margin-top: .3rem; accent-color: #f2605f; }
 .authorize .scope small { display: block; color: #4a5064; }
+.authorize .scope.off { opacity: .7; }
+.authorize .scope.off small.unasked { color: #5a1d17; margin-top: .2rem; }
+.authorize .expiry { margin-top: .8rem; }
+.authorize .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.authorize .warn[hidden] { display: none; }
 .authorize .warn { border-left: 4px solid #f2605f; padding: .5rem .9rem; background: #fff1ee; color: #5a1d17; }
 .authorize .actions { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1.2rem; }
 @media (max-width: 640px) { .me-page .bar-line { grid-template-columns: 1fr; } }

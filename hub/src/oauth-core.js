@@ -180,6 +180,17 @@ export function revokeGrantStmts(env, grantId, reason, now = Date.now()) {
     env.DB.prepare('UPDATE oauth_tokens SET revoked_at = ?2, retry_blob = NULL WHERE grant_id = ?1 AND revoked_at IS NULL').bind(grantId, now),
   ];
 }
+// A new grant for the same app and the same contributor replaces the older live ones (step-up consent: the app asks again for more
+// scopes). Runs in the SAME batch as the new grant's insert and only does anything if that insert happened (the join on the new grant
+// finds it). The old grants are cancelled with their tokens, so an old refresh token fails at once: it hits the revoked-grant check
+// before any replay check, so it is never mistaken for theft and the new grant is not touched. Tokens first, then the grants that select them.
+const OLDER_LIVE = `SELECT o.id FROM oauth_grants o JOIN oauth_grants n ON n.id = ?1 WHERE o.client = n.client AND o.contributor = n.contributor AND o.id != n.id AND o.revoked_at IS NULL`;
+export function supersedeStmts(env, newGrantId, now = Date.now()) {
+  return [
+    env.DB.prepare(`UPDATE oauth_tokens SET revoked_at = ?2, retry_blob = NULL WHERE revoked_at IS NULL AND grant_id IN (${OLDER_LIVE})`).bind(newGrantId, now),
+    env.DB.prepare(`UPDATE oauth_grants SET revoked_at = ?2, revoked_reason = 'superseded' WHERE revoked_at IS NULL AND id IN (${OLDER_LIVE})`).bind(newGrantId, now),
+  ];
+}
 const revokeGrant = (env, grantId, reason, now) => env.DB.batch(revokeGrantStmts(env, grantId, reason, now));
 
 // The grant is live: not revoked, and its contributor not removed. Used inside the statements that issue tokens.
